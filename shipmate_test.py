@@ -870,6 +870,56 @@ class TestAssets(unittest.TestCase):
         self.assertIn("prefers-color-scheme: dark", shipmate.asset("shipmate.css"))
 
 
+def svg_hit(svg, css, x, y):
+    """Which hand a click at art pixel (x, y) of the ship reaches, decided as a browser does: the
+    last shape painted there, in document order, among those the stylesheet (a rule of plain class
+    selectors with `pointer-events: none`) or an attribute does not take out of hit-testing. Returns
+    that shape's hand id, or the shape's tag and class when it belongs to no hand."""
+    import xml.etree.ElementTree as ET
+    off = set()
+    for head, body in re.findall(r"([^{}]+)\{([^{}]*)\}", re.sub(r"/\*.*?\*/", "", css, flags=re.S)):
+        if re.search(r"pointer-events:\s*none", body):
+            off.update(sel.strip()[1:] for sel in head.split(",") if re.fullmatch(r"\s*\.[\w-]+\s*", sel))
+    found = [None]
+
+    def covers(el):
+        a = el.attrib
+        if el.tag == "rect" and a.get("fill") != "none":
+            return float(a["x"]) <= x < float(a["x"]) + float(a["width"]) and float(a["y"]) <= y < float(a["y"]) + float(a["height"])
+        if el.tag == "path":
+            return any(int(px) <= x < int(px) + int(w) and int(py) <= y < int(py) + 1
+                       for px, py, w in re.findall(r"M(-?\d+) (-?\d+)h(\d+)v1h-\d+z", a["d"]))
+        if el.tag == "circle":
+            return (x - float(a["cx"])) ** 2 + (y - float(a["cy"])) ** 2 <= float(a["r"]) ** 2
+        if el.tag == "polygon":
+            pts = [tuple(map(float, p.split(","))) for p in a["points"].split()]
+            inside = False
+            for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+                if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+                    inside = not inside
+            return inside
+        if el.tag == "line":
+            (x1, y1, x2, y2) = (float(a[k]) for k in ("x1", "y1", "x2", "y2"))
+            dx, dy = x2 - x1, y2 - y1
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / float(dx * dx + dy * dy or 1)))
+            return (x - x1 - t * dx) ** 2 + (y - y1 - t * dy) ** 2 <= 0.25
+        return False
+
+    def walk(el, hand, quiet):
+        cls = set((el.get("class") or "").split())
+        quiet = quiet or bool(cls & off) or el.get("pointer-events") == "none"
+        if "sm-hand" in cls:
+            hand = el.get("data-id")
+        if not quiet and covers(el):
+            found[0] = hand or "%s.%s" % (el.tag, ".".join(sorted(cls)))
+        for child in el:
+            walk(child, hand, quiet)
+    root = ET.fromstring(svg)
+    assert "transform" not in svg, "the hit test reads shapes at their own coordinates"
+    walk(root, None, False)
+    return found[0]
+
+
 class TestShip(unittest.TestCase):
     """The ship view: where each hand stands, the red flags, rest, colours, layout and drawing."""
 
@@ -1063,6 +1113,25 @@ class TestShip(unittest.TestCase):
             row.sort()
             for (_a0, a1, a), (b0, _b1, b) in zip(row, row[1:]):
                 self.assertLessEqual(a1, b0, (feet, a, b))
+
+    def test_a_click_on_a_hand_reaches_that_hand_by_day_and_by_night(self):
+        css = shipmate.asset("shipmate.css")
+        for hour in (12, 22):
+            now = time.mktime((2026, 11, 13, hour, 0, 0, 0, 0, -1))
+            sc = shipmate.ship_scene(shipmate.demo_snapshot(now))
+            self.assertEqual(sc["night"], hour == 22)
+            lay = shipmate.ship_layout(sc)
+            svg = shipmate.render_ship(sc)
+            who = {h["id"]: h for h in sc["hands"] + sc["pier"]}
+            # on deck, at the rail, in line in the cabin, standing on the pier, at the tavern's table
+            for tid in ("DEMO-AUTH", "DEMO-LOGS", "DEMO-RATE", "DEMO-Q-THEME", "DEMO-Q-PUSH"):
+                x, feet, pose, upto = lay["hands"].get(tid) or lay["pier"][tid]
+                rows = shipmate.hand_rows(who[tid], pose)[:upto]
+                top = feet - len(rows) + 1
+                inside = [(x + i + 0.5, top + j + 0.5) for j, row in enumerate(rows) for i, ch in enumerate(row) if ch in "Ec"]
+                self.assertTrue(inside, tid)
+                for px, py in inside:
+                    self.assertEqual(svg_hit(svg, css, px, py), tid, (hour, tid, px, py))
 
     def test_every_pose_is_drawn_on_the_hand_grid(self):
         self.assertEqual((len(shipmate.STAND[0]), len(shipmate.STAND)), (13, 21))

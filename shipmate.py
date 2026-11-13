@@ -3784,7 +3784,8 @@ def render_ship(sc):
     near.append(fg.svg())
     lights.append('<circle class="sm-glow" cx="%d" cy="215" r="%d" fill="#fff0b0" opacity="%s"/>'
                   % (W - 15, 30 if night else 20, "0.3" if night else "0.18"))
-    shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' opacity="0.38"') if night else ""
+    # the night's tint, the near layer and the lights lie over the hands: they take no clicks (see the stylesheet)
+    shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' class="sm-shade" opacity="0.38"') if night else ""
     args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc(tr("The ship: %s") % ship_counts(sc)), W, SHIP_H)
             + tuple(lay["crew"])
             + ("#0c2440" if night else "#2c6f9f", "#0d1631" if night else "#6fb3e0", "".join(far), "".join(mid),
