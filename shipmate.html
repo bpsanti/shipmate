@@ -22,7 +22,7 @@
       </span>
       <span class="sm-views" role="group" aria-label="View">
         <button class="sm-viewbtn" type="button" data-action="view" data-view="board" aria-pressed="true">Board</button>
-        <button class="sm-viewbtn" type="button" data-action="view" data-view="bay" aria-pressed="false">Ship</button>
+        <button class="sm-viewbtn" type="button" data-action="view" data-view="ship" aria-pressed="false">Ship</button>
       </span>
       <span class="bb-meta-mono"><span id="sm-stale" class="sm-stale" hidden>refresh failed · </span>updated <span id="sm-time">{{TIME}}</span></span>
     </header>
@@ -41,25 +41,33 @@
       </div>
     </section>
 
-    <section class="sm-view" id="sm-view-bay" hidden>
+    <section class="sm-view" id="sm-view-ship" hidden>
       <div class="bb-section__head">
-        <h2 class="fm-sign fm-sign--eyebrow">The bay</h2>
-        <span class="sm-faint sm-counts" id="b-baycounts">{{BAYCOUNTS}}</span>
+        <h2 class="fm-sign fm-sign--eyebrow">The ship</h2>
+        <span class="sm-faint sm-counts" id="b-shipcounts">{{SHIPCOUNTS}}</span>
       </div>
-      <div class="sm-bay" id="sm-bay"><div id="b-bay">{{BAY}}</div></div>
-      <details class="sm-key">
-        <summary><span class="fm-sign fm-sign--eyebrow">What the picture shows</span></summary>
-        <ul>
-          <li>Each ship is a project with live work. The flagship on the left is firstmate's, and firstmate is at its helm.</li>
-          <li>Each hand is one agent, and where it stands is its phase: in the crow's nest with a spyglass, exploring; on deck hauling rope or hammering, implementing; at the bow with signal flags, PR open; fishing at the rail, waiting for CI; on the gangplank with a sea bag, ready to merge. A question mark means the phase is unknown.</li>
-          <li>A red flag means the hand needs the captain: its crew is parked, blocked or failed, or a needs-decision or blocked line is still open. Its name stays shown.</li>
-          <li>A scout rows a skiff out to the horizon, rows back holding the map (the report is being written), and moors at the pier when the report is delivered.</li>
-          <li>The barrels in the flagship's hold are the Claude accounts' quota: the amber level is what is left, and a red barrel runs out before it resets or has less than 15% left.</li>
-          <li>The flagship's draught is firstmate's context: the fuller it is, the lower she sits, and past the warning threshold her white load line goes under water.</li>
-          <li>The boats moored under the flagship are the queue; a red flag marks one held for the captain's decision. Crates on the pier are tasks delivered in the last 7 days.</li>
-          <li>The sea is calm, choppy or rough with the machine's load. Hover a hand, boat, barrel or crate for its name; click a hand or a boat for the same details as its card.</li>
-        </ul>
-      </details>
+      <div class="sm-ship" id="sm-ship">
+        <div class="sm-ship__tools">
+          <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
+          <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
+          <button type="button" class="is-wide" data-zoom="crew" aria-label="Frame the crew">crew</button>
+          <button type="button" class="is-wide" data-zoom="all" aria-label="Fit everything">fit all</button>
+        </div>
+        <div class="sm-ship__zoom" id="sm-ship-zoom" aria-hidden="true"></div>
+        <div id="b-ship">{{SHIP}}</div>
+      </div>
+      <p class="sm-faint sm-ship__hint">Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand or a queued boat for its details.</p>
+      <div class="sm-key">
+        <section><h3 class="fm-sign fm-sign--eyebrow">Where a hand stands is its phase</h3><ul class="sm-key__poses">{{SHIPKEY}}</ul></section>
+        <section><h3 class="fm-sign fm-sign--eyebrow">Projects aboard</h3><ul class="sm-key__projects" id="b-shipprojects">{{SHIPPROJECTS}}</ul>
+          <p class="sm-faint">A shirt and bandana take the project's colour, and so do the stripes on the sails.
+          A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued boat waits on the captain's decision.
+          Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.
+          Water in the hold: firstmate's context, the white line its warning threshold.
+          Scouts row out to the horizon, back with the map, and moor at the pier with it.
+          Boats at the pier: the queue. Crates: tasks delivered in the last 7 days.
+          The sky follows the local time, the sea the machine's load.</p></section>
+      </div>
     </section>
 
     <details class="sm-usage">
@@ -107,39 +115,164 @@
   var lastFocus = null;
   var OPENS = ".sm-card[data-id], .sm-hand[data-id], .sm-boat[data-id]";
   var view = "board";
-  try { if (localStorage.getItem("shipmate.view") === "bay") view = "bay"; } catch (e) {}
+  try { if (localStorage.getItem("shipmate.view") === "ship") view = "ship"; } catch (e) {}
 
-  // the bay is pixel art: scale it to the frame's width, between 2 and 4 screen pixels per art
-  // pixel, and let it scroll inside its frame when even 2 is too wide
-  function fit() {
-    var frame = document.getElementById("sm-bay");
-    var svg = frame.querySelector("svg");
-    if (!svg || view !== "bay") return;
-    var w = svg.viewBox.baseVal.width || 1;
-    frame.style.setProperty("--s", String(Math.max(2, Math.min(4, (frame.clientWidth - 4) / w))));
-  }
-  function loadBay() {
-    fetch("/bay", { cache: "no-store" }).then(function (r) {
+  // the ship: a pixel-art scene larger than its frame, zoomed and panned by changing the viewBox.
+  // The view survives the 30 s refresh, which only swaps the drawing.
+  var ship = (function () {
+    var frame = document.getElementById("sm-ship"), zl = document.getElementById("sm-ship-zoom");
+    var NAMES_FROM = 2.6, TAG_MAX = 3.6, MIN_W = 48;
+    var svg = null, SW = 1, SH = 1, crew = [0, 0, 1, 1], v = null, tags = [], far = null, near = null;
+    function aspect() { return frame.clientHeight / Math.max(1, frame.clientWidth); }
+    function scale() { return frame.clientWidth / v.w; }
+    function maxW() { return Math.max(SW, SH / aspect()) * 1.02; }
+    function apply() {
+      if (!svg || !v || !frame.clientWidth) return;
+      v.w = Math.min(Math.max(v.w, MIN_W), maxW());
+      v.h = v.w * aspect();
+      v.x = v.w >= SW ? (SW - v.w) / 2 : Math.min(Math.max(v.x, 0), SW - v.w);
+      v.y = v.h >= SH ? (SH - v.h) / 2 : Math.min(Math.max(v.y, 0), SH - v.h);
+      svg.setAttribute("viewBox", [v.x, v.y, v.w, v.h].map(function (n) { return n.toFixed(2); }).join(" "));
+      var s = scale();
+      svg.classList.toggle("is-far", s < NAMES_FROM);
+      // parallax: the far layer drifts slower than the ship, the near layer faster
+      var cx = v.x + v.w / 2 - SW / 2, cy = v.y + v.h / 2 - SH / 2;
+      if (far) far.setAttribute("transform", "translate(" + (cx * 0.45).toFixed(2) + " " + (cy * 0.3).toFixed(2) + ")");
+      if (near) near.setAttribute("transform", "translate(" + (-cx * 0.12).toFixed(2) + " 0)");
+      // names grow with the zoom up to a point, then keep their size beside their hand
+      var k = Math.min(1, TAG_MAX / s);
+      for (var i = 0; i < tags.length; i++) {
+        var ax = tags[i].getAttribute("data-ax"), ay = tags[i].getAttribute("data-ay");
+        tags[i].setAttribute("transform", k < 1 ? "translate(" + ax + " " + ay + ") scale(" + k.toFixed(3) + ") translate(" + (-ax) + " " + (-ay) + ")" : "");
+      }
+      zl.textContent = s.toFixed(1) + "\u00d7";
+    }
+    function box(x, y, w, h, minScale) {
+      if (!svg) return;
+      var a = aspect();
+      v = { w: Math.max(w, h / a) };
+      if (minScale) v.w = Math.min(v.w, frame.clientWidth / minScale);   // a narrow screen crops instead of shrinking
+      v.h = v.w * a;
+      v.x = x + w / 2 - v.w / 2;
+      v.y = y + h / 2 - v.h / 2;
+      apply();
+    }
+    function zoomAt(f, clientX, clientY) {
+      if (!v) return;
+      var r = frame.getBoundingClientRect();
+      var fx = (clientX - r.left) / r.width, fy = (clientY - r.top) / r.height;
+      var ax = v.x + fx * v.w, ay = v.y + fy * v.h;
+      v.w = Math.min(Math.max(v.w / f, MIN_W), maxW());
+      v.h = v.w * aspect();
+      v.x = ax - fx * v.w;
+      v.y = ay - fy * v.h;
+      apply();
+    }
+    function middle() { var r = frame.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }
+    function bind() {
+      svg = frame.querySelector("svg");
+      if (!svg) return;
+      SW = +svg.getAttribute("data-w"); SH = +svg.getAttribute("data-h");
+      crew = svg.getAttribute("data-crew").split(",").map(Number);
+      tags = svg.querySelectorAll(".sm-tag[data-ax]");
+      far = svg.querySelector(".sm-far"); near = svg.querySelector(".sm-near");
+      if (v) apply(); else if (frame.clientWidth) box(crew[0], crew[1], crew[2], crew[3], NAMES_FROM);
+    }
+    frame.addEventListener("wheel", function (e) {
+      e.preventDefault();
+      zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018)), e.clientX, e.clientY);
+    }, { passive: false });
+    // one pointer drags, two pinch; a press that barely moves stays a click
+    var pts = {}, last = null, moved = 0;
+    frame.addEventListener("pointerdown", function (e) {
+      if (e.target.closest(".sm-ship__tools") || !v) return;
+      pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+      last = null;
+      moved = 0;
+    });
+    frame.addEventListener("pointermove", function (e) {
+      var prev = pts[e.pointerId];
+      if (!prev) return;
+      pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+      var ids = Object.keys(pts), r = frame.getBoundingClientRect();
+      if (ids.length === 1) {
+        moved += Math.abs(e.clientX - prev.x) + Math.abs(e.clientY - prev.y);
+        if (moved > 4) {
+          if (!frame.classList.contains("is-dragging")) { frame.classList.add("is-dragging"); frame.setPointerCapture(e.pointerId); }
+          v.x -= (e.clientX - prev.x) * v.w / r.width;
+          v.y -= (e.clientY - prev.y) * v.h / r.height;
+          apply();
+        }
+      } else if (ids.length === 2) {
+        var a = pts[ids[0]], b = pts[ids[1]];
+        var d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        if (last) {
+          v.x -= (mx - last.mx) * v.w / r.width;
+          v.y -= (my - last.my) * v.h / r.height;
+          zoomAt(d / last.d, mx, my);
+        }
+        last = { d: d, mx: mx, my: my };
+        moved += 10;
+      }
+    });
+    function up(e) {
+      delete pts[e.pointerId];
+      last = null;
+      if (!Object.keys(pts).length) frame.classList.remove("is-dragging");
+    }
+    frame.addEventListener("pointerup", up);
+    frame.addEventListener("pointercancel", up);
+    // a drag must not end as a click that opens a drawer
+    frame.addEventListener("click", function (e) { if (moved > 6) { e.stopPropagation(); e.preventDefault(); } }, true);
+    frame.addEventListener("dblclick", function (e) { if (!e.target.closest(".sm-ship__tools")) zoomAt(1.8, e.clientX, e.clientY); });
+    // names are hidden when zoomed out; hovering or focusing a hand shows its own
+    function showTag(e, on) {
+      var hand = e.target.closest && e.target.closest(".sm-hand[data-id]");
+      if (!hand || !svg) return;
+      var tag = svg.querySelector('.sm-tag[data-for="' + hand.getAttribute("data-id").replace(/"/g, "") + '"]');
+      if (tag) tag.classList.toggle("is-on", on);
+    }
+    frame.addEventListener("pointerover", function (e) { showTag(e, true); });
+    frame.addEventListener("pointerout", function (e) { showTag(e, false); });
+    frame.addEventListener("focusin", function (e) { showTag(e, true); });
+    frame.addEventListener("focusout", function (e) { showTag(e, false); });
+    frame.querySelector(".sm-ship__tools").addEventListener("click", function (e) {
+      var b = e.target.closest("[data-zoom]");
+      if (!b) return;
+      var z = b.getAttribute("data-zoom"), c = middle();
+      if (z === "in") zoomAt(1.4, c[0], c[1]);
+      else if (z === "out") zoomAt(1 / 1.4, c[0], c[1]);
+      else if (z === "all") box(0, 0, SW, SH);
+      else box(crew[0], crew[1], crew[2], crew[3], NAMES_FROM);
+    });
+    return { bind: bind, apply: apply, box: box,
+             crew: function () { box(crew[0], crew[1], crew[2], crew[3], NAMES_FROM); }, all: function () { box(0, 0, SW, SH); } };
+  })();
+  window.shipView = ship;
+
+  function loadShip() {
+    fetch("/ship", { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error(String(r.status));
       return r.json();
     }).then(function (b) {
-      document.getElementById("b-bay").innerHTML = b.bay;
-      document.getElementById("b-baycounts").textContent = b.counts;
-      fit();
+      document.getElementById("b-ship").innerHTML = b.ship;
+      document.getElementById("b-shipcounts").textContent = b.counts;
+      document.getElementById("b-shipprojects").innerHTML = b.projects;
+      ship.bind();
     }).catch(function () {});
   }
   function setView(v, fresh) {
     view = v;
     document.getElementById("sm-view-board").hidden = v !== "board";
-    document.getElementById("sm-view-bay").hidden = v !== "bay";
+    document.getElementById("sm-view-ship").hidden = v !== "ship";
     [].forEach.call(document.querySelectorAll("[data-view]"), function (b) {
       b.setAttribute("aria-pressed", String(b.getAttribute("data-view") === v));
     });
     if (fresh) {
       try { localStorage.setItem("shipmate.view", v); } catch (e) {}
-      if (v === "bay") loadBay();
+      if (v === "ship") loadShip();
     }
-    if (v === "bay") fit(); else overflow();
+    if (v === "ship") ship.bind(); else overflow();
   }
 
   // tell when lanes or cards are out of sight, since a sideways scroll is easy to miss
@@ -227,7 +360,7 @@
     if (card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(card.getAttribute("data-id")); }
   });
   document.addEventListener("scroll", overflow, true);
-  window.addEventListener("resize", function () { overflow(); fit(); });
+  window.addEventListener("resize", function () { overflow(); ship.apply(); });
 
   function tick() {
     if (document.hidden) return;
@@ -239,7 +372,7 @@
       document.getElementById("sm-time").textContent = b.time;
       document.getElementById("sm-stale").hidden = true;
       overflow();
-      if (view === "bay") loadBay();
+      if (view === "ship") loadShip();
       load();
     }).catch(function () {
       document.getElementById("sm-stale").hidden = false;

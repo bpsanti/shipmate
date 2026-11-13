@@ -8,7 +8,7 @@ It shows one page, read live from the home's own records every time the page loa
 - **A fixed sidebar** on the right keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
 - **A detail drawer** opens from any card: read-only facts about that piece of work, gathered from the home's records.
 - **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
-- **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as a harbour in pixel art: each project a ship, each agent a hand whose place on board is its phase. The page remembers the choice in the browser.
+- **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as one ship in pixel art, seen from the side and cut away: each agent is a hand whose place on board is its phase. It zooms and pans, and the page remembers the choice of view in the browser.
 
 Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
 
@@ -41,7 +41,7 @@ It listens on `127.0.0.1` only.
 Transcripts are always read from `~/.claude` and from every directory the home lists in `config/claude-accounts`.
 
 `GET /state.json` returns the same snapshot the page is built from.
-`GET /bay` returns the ship view drawn from that snapshot.
+`GET /ship` returns the ship view drawn from that snapshot.
 `GET /detail?id=<task>` returns one card's drawer and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
 
 ### Keep it running (optional)
@@ -136,24 +136,29 @@ Each element stands for one thing:
 
 | In the picture | What it is |
 | --- | --- |
-| A ship | a project with live work; its name is on the hull |
-| The flagship, on the left | firstmate's own ship, with firstmate at the helm |
+| The ship | the home; firstmate stands at the helm on the stern castle |
 | A hand in the crow's nest with a spyglass | an agent exploring |
-| A hand on deck hauling rope or hammering | an agent implementing |
+| A hand on deck with a hammer | an agent implementing |
 | A hand at the bow with signal flags | an agent with a PR open |
 | A hand fishing at the rail | an agent waiting for CI |
-| A hand on the gangplank with a sea bag | an agent ready to merge |
-| A hand on deck under a question mark | an agent whose phase is unknown |
+| A hand on the gangplank with a pack | an agent ready to merge |
+| A hand under a question mark | an agent whose phase is unknown |
+| A hand sitting with the dice | off duty: an unflagged agent exploring, implementing, at the bow or of unknown phase whose crew state is `paused`, or that has had no transcript activity for 20 minutes without a busy session |
+| A hand's shirt and bandana | its project's colour, in the order of `data/projects.md`; the sails carry one stripe per project aboard |
 | A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
 | A skiff on the horizon, rowing back with the map, moored at the pier | a scout exploring, writing the report, report delivered |
-| Barrels in the flagship's hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
-| The flagship's draught | firstmate's context: the fuller, the lower she sits; past the warning threshold her white load line goes under water |
-| Boats moored under the flagship | the queue; a red flag marks one held for the captain's decision |
+| Barrels in the hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
+| Water in the hold | firstmate's context; the white line is the warning threshold |
+| Boats moored at the pier | the queue; a red flag marks one held for the captain's decision |
 | Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
+| Day or night | the local hour: night from 18:00 to 06:00 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
 
-Hovering an element names it; clicking a hand or a queue boat opens the same drawer as its card.
-The drawing scales with the frame between 2 and 4 screen pixels per art pixel and scrolls inside its frame when it is wider than that.
+The scene is larger than its frame and grows with the crew so no hand stands on another.
+It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the buttons zoom in and out, frame the crew again, or fit everything.
+Names show from a readable zoom up, never overlap, and come back on hover or focus when zoomed out.
+Clicking a hand or a queued boat opens the same drawer as its card.
+The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only when the browser does not ask for reduced motion.
 
 ## Adding a task
 

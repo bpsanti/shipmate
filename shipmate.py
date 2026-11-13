@@ -13,8 +13,8 @@ refresh:
                 phase timeline, latest status lines, PR checks (cached), tokens,
                 context, idle time, report link
   usage         tokens per day and per delivered task, folded under the board
-  ship view     the same snapshot drawn as a harbour: projects as ships, agents as hands
-                whose place on board is their phase (switch with "Ship" in the header)
+  ship view     the same snapshot drawn as one ship, cut away, that zooms and pans: agents
+                as hands whose place on board is their phase (switch with "Ship" in the header)
 
 Read-only over the home, except the add-task form, which runs the same backlog
 command firstmate uses (`bin/fm-tasks-axi.sh add ... --queue`) and then the inbox
@@ -1586,12 +1586,13 @@ def render_page(panel, snap, notice=""):
             '<button class="fm-btn fm-btn--sm fm-btn--primary" type="submit"%s>Queue it</button></div></form>'
             % (esc(panel.token), esc(secrets.token_urlsafe(12)), opts or '<option value="">no projects</option>',
                "" if opts else " disabled"))
-    bay = block_bay(snap)
+    ship = block_ship(snap)
     page = asset("shipmate.html")
     keys = ("board", "today", "firstmate", "accounts", "strip", "sumline", "usage", "counts")
     for k, v in [("{{CSS}}", asset("shipmate.css")), ("{{NONCE}}", nonce), ("{{TIME}}", esc(b["time"])),
                  ("{{FORM}}", form), ("{{NOTICE}}", notice), ("{{REFRESH_MS}}", str(REFRESH_SECONDS * 1000)),
-                 ("{{BAY}}", bay["bay"]), ("{{BAYCOUNTS}}", esc(bay["counts"]))] + \
+                 ("{{SHIP}}", ship["ship"]), ("{{SHIPCOUNTS}}", esc(ship["counts"])),
+                 ("{{SHIPPROJECTS}}", ship["projects"]), ("{{SHIPKEY}}", pose_key())] + \
             [("{{%s}}" % k.upper(), b[k]) for k in keys]:
         page = page.replace(k, v)
     return page, nonce
@@ -1609,30 +1610,38 @@ def notice_html(q):
     return ""
 
 
-# ---------------------------------------------------------------- the bay (ship view)
+# ---------------------------------------------------------------- the ship (ship view)
 #
-# The same snapshot as the board, drawn as a harbour: each project is a ship, each live agent a
-# hand whose place on board is its phase, firstmate at the helm of the flagship with the quota as
-# barrels in its hold and its context as ballast, the queue as boats moored at the pier. The scene
-# is a pure function of the snapshot (bay_scene), drawn as pixel art in SVG (render_bay).
+# The same snapshot as the board, drawn as one ship seen from the side and cut away. Each live
+# agent is a hand whose place on board is its phase; firstmate is at the helm; the quota is the
+# barrels in the hold and firstmate's context the bilge water; the queue is boats moored at the
+# pier and delivered work crates on it. ship_scene() derives what to show from the snapshot alone,
+# ship_layout() places it, render_ship() draws it as pixel art in SVG.
 
 PLACES = ["nest", "deck", "bow", "rail", "plank"]          # a ship agent's place, by ship phase index
 SCOUT_PLACES = ["out", "back", "dock"]                     # a scout's boat, by scout phase index
 PLACE_TEXT = {
     "nest": "in the crow's nest with a spyglass",
-    "deck": "on deck, hauling rope or hammering",
+    "deck": "on deck with a hammer",
     "bow": "at the bow, signalling with flags",
     "rail": "fishing at the rail",
-    "plank": "on the gangplank, waiting to go ashore",
+    "plank": "on the gangplank with a pack, waiting to go ashore",
     "hatch": "on deck, phase unknown",
     "out": "rowing out to sea",
     "back": "rowing back with the map",
     "dock": "moored at the pier with the map",
 }
+PLACE_POSE = {"nest": "spy", "deck": "hammer", "bow": "signal", "rail": "fish", "plank": "pack", "hatch": "stand"}
 CAPTAIN_STATES = {"parked", "blocked", "failed"}   # fm-crew-state.sh reports a needs-decision crew as parked
 SEA_LOAD = (0.6, 1.0)                              # load per CPU where the sea turns choppy, then rough
-MAX_QUEUE_BOATS = 6
+OFF_DUTY_AFTER = 20 * 60                           # seconds without activity before an idle hand rests
+OFF_DUTY_PLACES = {"nest", "deck", "bow", "hatch"}  # waiting for CI or to go ashore is the job itself
+DAY_HOURS = (6, 18)                                # local hours of daylight in the picture
+MAX_QUEUE_BOATS = 8
 MAX_CRATES = 12
+NEST_SEATS = 6
+# strong project colours, none of them the red that marks a red flag
+PROJECT_COLORS = ["#16a4a4", "#9150dc", "#f2a114", "#2f78d8", "#3fa34d", "#e0569b", "#a0713a", "#5a6f88"]
 
 
 def captain_reasons(a):
@@ -1657,26 +1666,52 @@ def sea_state(machine):
     return "calm" if per < SEA_LOAD[0] else "choppy" if per < SEA_LOAD[1] else "rough"
 
 
-def bay_scene(s):
-    """What the bay shows, derived from the snapshot alone; render_bay draws it."""
-    ships, scouts = {}, []
+def is_night(now):
+    h = dt.datetime.fromtimestamp(now).hour
+    return not (DAY_HOURS[0] <= h < DAY_HOURS[1])
+
+
+def off_duty(a, place, flagged, now):
+    """An idle hand rests: paused, or quiet for a while without a busy session. A flagged hand
+    never rests (it waits on the captain), nor one whose phase is itself a wait."""
+    if flagged or place not in OFF_DUTY_PLACES:
+        return False
+    if a.get("crew") == "paused":
+        return True
+    last = a.get("last_activity")
+    return bool(last and now - last > OFF_DUTY_AFTER and a.get("crew") != "working")
+
+
+def project_colors(s):
+    """A colour per project, in the order of data/projects.md so it stays put across refreshes."""
+    names = list(s.get("projects") or [])
+    for a in s.get("agents") or []:
+        p = a.get("project") or ""
+        if p and p not in names:
+            names.append(p)
+    return {p: PROJECT_COLORS[i % len(PROJECT_COLORS)] for i, p in enumerate(names)}
+
+
+def ship_scene(s):
+    """What the ship shows, derived from the snapshot alone; render_ship draws it."""
+    now, colors = s["now"], project_colors(s)
+    hands, scouts = [], []
     for a in s["agents"]:
         why = captain_reasons(a)
         phases = a.get("phases") or []
-        hand = {"id": a["id"], "title": a.get("title") or "", "crew": a.get("crew") or "unknown",
-                "flag": bool(why), "why": why, "project": a.get("project") or "",
-                "phase": phases[a["phase"]] if a.get("phase") is not None and a["phase"] < len(phases) else "unknown"}
-        if a.get("kind") == "scout":
-            ph = a.get("phase")
-            hand["place"] = SCOUT_PLACES[ph] if ph is not None and ph < len(SCOUT_PLACES) else "out"
-            scouts.append(hand)
-        else:
-            ph = a.get("phase")
-            hand["place"] = PLACES[ph] if ph is not None and ph < len(PLACES) else "hatch"
-            ships.setdefault(a.get("project") or "no project", []).append(hand)
+        ph = a.get("phase")
+        scout = a.get("kind") == "scout"
+        places = SCOUT_PLACES if scout else PLACES
+        place = places[ph] if ph is not None and ph < len(places) else ("out" if scout else "hatch")
+        h = {"id": a["id"], "title": a.get("title") or "", "crew": a.get("crew") or "unknown",
+             "flag": bool(why), "why": why, "project": a.get("project") or "", "place": place,
+             "color": colors.get(a.get("project") or "", "#8a8a8a"),
+             "phase": phases[ph] if ph is not None and ph < len(phases) else "unknown"}
+        h["off"] = off_duty(a, place, h["flag"], now)
+        (scouts if scout else hands).append(h)
     order = {p: i for i, p in enumerate(PLACES + ["hatch"])}
-    ship_list = [{"project": p, "hands": sorted(h, key=lambda x: (order[x["place"]], x["id"]))}
-                 for p, h in sorted(ships.items())]
+    hands.sort(key=lambda x: (order[x["place"]], x["id"]))
+    scouts.sort(key=lambda x: (SCOUT_PLACES.index(x["place"]), x["id"]))
     fm = s.get("firstmate") or {}
     pct, warn = fm.get("percent"), fm.get("warn_at", DEFAULT_CONTEXT_WARN)
     barrels = []
@@ -1689,72 +1724,182 @@ def bay_scene(s):
               "flag": any(r[0] == "decision" for r in q.get("reasons") or []),
               "why": [r[1] for r in q.get("reasons") or []]} for q in s.get("queue") or []]
     crates = [{"id": r.get("id") or "?", "kind": r.get("kind") or "?"} for r in (s.get("delivered") or [])]
-    hands = sum(len(x["hands"]) for x in ship_list) + len(scouts)
-    flags = (sum(h["flag"] for x in ship_list for h in x["hands"]) + sum(h["flag"] for h in scouts)
-             + sum(q["flag"] for q in queue))
+    used = {h["project"] for h in hands + scouts}
     return {
-        "ships": ship_list, "scouts": scouts, "queue": queue, "crates": crates, "barrels": barrels,
-        "flagship": {"context": pct, "warn_at": warn, "over": pct is not None and pct >= warn,
-                     "tokens": fm.get("context"), "limit": fm.get("limit"), "known": bool(fm)},
-        "sea": sea_state(s.get("machine")), "load": s.get("machine"),
-        "hands": hands, "flags": flags,
+        "hands": hands, "scouts": scouts, "queue": queue, "crates": crates, "barrels": barrels,
+        "firstmate": {"context": pct, "warn_at": warn, "over": pct is not None and pct >= warn,
+                      "tokens": fm.get("context"), "limit": fm.get("limit"), "known": bool(fm)},
+        "colors": {p: c for p, c in colors.items() if p in used},
+        "sea": sea_state(s.get("machine")), "night": is_night(now),
+        "flags": sum(h["flag"] for h in hands + scouts) + sum(q["flag"] for q in queue),
+        "off": sum(h["off"] for h in hands),
     }
 
 
-def bay_counts(sc):
-    n = len(sc["ships"])
-    parts = ["%d ship%s" % (n, "" if n == 1 else "s"), "%d hand%s" % (sc["hands"], "" if sc["hands"] == 1 else "s")]
+def ship_counts(sc):
+    n = len(sc["hands"]) + len(sc["scouts"])
+    parts = ["%d hand%s aboard" % (n, "" if n == 1 else "s")]
     if sc["flags"]:
         parts.append("%d red flag%s" % (sc["flags"], "" if sc["flags"] == 1 else "s"))
+    if sc["off"]:
+        parts.append("%d off duty" % sc["off"])
     parts.append("%d boat%s moored" % (len(sc["queue"]), "" if len(sc["queue"]) == 1 else "s"))
     return " · ".join(parts)
 
 
-# -- pixel art: a palette, a few sprites, and a canvas that writes one SVG path per colour
+# -- layout, in art pixels: the ship grows with its crew so nobody stands on anybody
+
+SHIP_H, HOR, FAR, NEAR, WL, PIER = 340, 112, 176, 196, 262, 300
+CASTLE = 90           # stern castle length, where firstmate steers
+
+
+def ship_layout(sc):
+    """Where every hand, boat and part of the ship goes. Hands get (x, feet, pose, upto) with x
+    the sprite's left edge and feet its lowest painted row; nothing here depends on the clock."""
+    by = {k: [h for h in sc["hands"] if h["place"] == k] for k in PLACES + ["hatch"]}
+    n = {k: len(v) for k, v in by.items()}
+    deck_zone = max(110, 48 * ((n["deck"] + 1) // 2) + 30, 14 * len(sc["barrels"]) + 100)
+    hatch_zone = 60 + 26 * max(0, n["hatch"] - 1)
+    rail_zone = max(40, 26 * n["rail"] + 16)
+    deck_len = max(260, deck_zone + hatch_zone + rail_zone)
+    fc_len = max(104, 46 * n["bow"] + 18)
+    x0 = 70 + 22 * max(0, n["plank"] - 3)
+    length = CASTLE + deck_len + fc_len
+    deck_x, fc_x = x0 + CASTLE, x0 + CASTLE + deck_len
+    hatch_x = deck_x + deck_zone + 4
+    rail_x = deck_x + deck_zone + hatch_zone
+    main_x = deck_x + deck_zone - 6
+    nest_w = max(54, 22 * min(n["nest"], NEST_SEATS) + 10)
+    out = {"x0": x0, "length": length, "deck_x": deck_x, "deck_len": deck_len, "fc_x": fc_x, "fc_len": fc_len,
+           "hatch_x": hatch_x, "rail_x": rail_x, "main_x": main_x, "nest": (main_x + 2 - nest_w // 2, nest_w),
+           "hold": (x0 + 98, deck_x + deck_zone + hatch_zone - 8), "hands": {}}
+    put = out["hands"]
+    ladder = ((main_x - 38, FAR), (main_x - 8, 46))
+    for i, h in enumerate(by["nest"]):
+        if i < NEST_SEATS:
+            put[h["id"]] = (out["nest"][0] + 6 + 22 * i, 43, "spy", 9)
+        elif i < NEST_SEATS + 3:                       # more lookouts than seats climb the ladder
+            t = (0.3, 0.55, 0.8)[i - NEST_SEATS]
+            put[h["id"]] = (int(ladder[1][0] + (ladder[0][0] - ladder[1][0]) * t) - 4,
+                            int(ladder[1][1] + (ladder[0][1] - ladder[1][1]) * t), "spy", None)
+        else:
+            put[h["id"]] = (main_x + 14 + 22 * (i - NEST_SEATS - 3), FAR + 6, "spy", None)
+    for i, h in enumerate(by["deck"]):
+        put[h["id"]] = (deck_x + 12 + 48 * (i // 2) + 24 * (i % 2), 194 if i % 2 == 0 else 183, "hammer", None)
+    for i, h in enumerate(by["hatch"]):
+        put[h["id"]] = (hatch_x + 38 + 26 * i, 188, "stand", None)
+    for i, h in enumerate(by["rail"]):
+        put[h["id"]] = (rail_x + 4 + 26 * i, NEAR + 2, "fish", None)
+    for i, h in enumerate(by["bow"]):
+        put[h["id"]] = (fc_x + 8 + 46 * i, 166 + 3 * (i % 2), "signal", None)
+    plank = ((x0 + 86, NEAR + 2), (x0 + 30, PIER + 4))
+    out["plank"] = plank
+    for i, h in enumerate(by["plank"]):
+        if i < 3:
+            t = (0.22, 0.5, 0.78)[i]
+            put[h["id"]] = (int(plank[0][0] + (plank[1][0] - plank[0][0]) * t) - 5,
+                            int(plank[0][1] + (plank[1][1] - plank[0][1]) * t), "pack", None)
+        else:                                           # the rest wait on the pier at the foot of the plank
+            put[h["id"]] = (plank[1][0] - 12 - 22 * (i - 3), PIER + 8, "pack", None)
+    for h in sc["hands"]:
+        if h["off"] and h["id"] in put:
+            x, feet, _pose, upto = put[h["id"]]
+            put[h["id"]] = (x, feet, "rest", upto)
+    right = x0 + length + 70
+    sb = {k: [h for h in sc["scouts"] if h["place"] == k] for k in SCOUT_PLACES}
+    out["scouts"] = {}
+    for i, h in enumerate(sb["out"]):
+        out["scouts"][h["id"]] = (right + 30 * i, HOR + 14, "spy", 9)
+    for i, h in enumerate(sb["back"]):                  # rowing back: out at sea, clear of the pier
+        out["scouts"][h["id"]] = (right + 44 + 30 * i, WL + 16, "scroll", 10)
+    for i, h in enumerate(sb["dock"]):
+        out["scouts"][h["id"]] = (right + 30 * i, PIER - 2, "stand", 10)
+    out["crates_x"] = right + 30 * max(1, len(sb["dock"])) + 10
+    widest = max([1] + [len(v) for v in sb.values()] + [len(sb["back"]) + 2])
+    out["width"] = max(640, right + 30 * widest + 9 * ((min(len(sc["crates"]), MAX_CRATES) + 2) // 3) + 70)
+    out["queue_x"] = x0 + 160
+    # the opening frame: the deck and every hand aboard, with a margin; the nest only when manned
+    xs = [deck_x - 20, fc_x + fc_len] + [x for x, _f, _p, _u in put.values()] + [x + 18 for x, _f, _p, _u in put.values()]
+    ys = [FAR - 50, NEAR + 20] + [f - 26 for _x, f, _p, _u in put.values()] + [f + 4 for _x, f, _p, _u in put.values()]
+    out["crew"] = (min(xs) - 12, min(ys) - 8, max(xs) - min(xs) + 24, max(ys) - min(ys) + 16)
+    return out
+
+
+# -- pixel art: palette, sprites, and a canvas that writes one SVG path per colour
 
 INK = {
-    "e": "#22180f", "p": "#34405e", "b": "#2a1d14", "w": "#f6f1e3", "g": "#d4a83c", "G": "#8a6a2a",
-    "o": "#7a4a24", "O": "#5a3418", "t": "#c9a46a", "r": "#d8342a", "R": "#a32218", "y": "#f2c53d",
-    "u": "#2f6fd0", "m": "#efdcae", "M": "#b89a5e", "n": "#22345e", "N": "#162447", "l": "#e9edf2",
-    "k": "#1a1a22", "x": "#c23b22",
+    "e": "#22180f", "E": "#1d140c", "p": "#34405e", "b": "#2a1d14", "w": "#fbf6ea", "g": "#e8b83a", "T": "#8a6420",
+    "G": "#6d7380", "o": "#7a4a24", "O": "#5a3418", "t": "#c9a46a", "r": "#d8342a", "R": "#a32218", "y": "#f6d040",
+    "u": "#2f6fd8", "m": "#f2e2b4", "M": "#b89a5e", "n": "#22345e", "N": "#162447", "l": "#e9edf2", "x": "#c23b22",
+    "P": "#8a5a30", "k": "#1a1a22",
 }
-SHIRTS = ["#2f6fb0", "#3c8f5a", "#c98a2b", "#7a4fa0", "#2b8c8c", "#b0563a", "#56657a", "#d9d6c8"]
 SKINS = ["#f1c9a0", "#d9a173", "#b07a4f", "#8a5a3a", "#f5d6b8"]
 HAIRS = ["#2a1d14", "#5a3a1e", "#a0662a", "#d9b45a", "#8d8d8d", "#1d1d2a", "#7a2e1a"]
-PROJECT_HUES = ["#c0452a", "#2f6688", "#2f6b4f", "#b5791c", "#6a4a9c", "#2b8c8c", "#8f2f17"]
 
-# sprites face right; the last row is where the feet are. h hair, s skin, E eye, c shirt, C shirt
-# stripe, p trousers, b boots; the rest are INK colours.
-HEAD = ["..hhh..", ".hhhhh.", ".hssEs.", ".hssss.", "...ss.."]
-LEGS = ["..ppp..", "..p.p..", ".bb.bb."]
+# A hand is 9 pixels wide and faces right. k bandana and c shirt take the project's colour, w the
+# shirt's stripes; the poses add the prop that makes each phase a different silhouette.
+STAND = ["...kkk...", ".kkkkkk..", ".khssss..", "..hssEs..", "..hssss..", "...sss...",
+         "..ccccc..", ".cwwwwwc.", ".ccccccc.", ".swwwwws.", "..ccccc..", "..pp.pp..", "..pp.pp..", ".bbb.bbb."]
+
+
+def build_pose(w, h, ox, oy, sets=(), clear=()):
+    grid = [["."] * w for _ in range(h)]
+    for j, row in enumerate(STAND):
+        for i, ch in enumerate(row):
+            if ch != ".":
+                grid[oy + j][ox + i] = ch
+    for x, y in clear:
+        grid[oy + y][ox + x] = "."
+    for x, y, ch in sets:
+        grid[y][x] = ch
+    return ["".join(r) for r in grid]
+
+
+def line_points(x0, y0, x1, y1):
+    n = max(abs(x1 - x0), abs(y1 - y0))
+    return [(round(x0 + (x1 - x0) * k / float(n)), round(y0 + (y1 - y0) * k / float(n))) for k in range(n + 1)]
+
+
+ARMS_R = [(7, 7), (7, 8), (7, 9)]
+LEGS = [(x, y) for y in (11, 12, 13) for x in range(1, 8)]
 POSES = {
-    "stand": HEAD + [".ccccc.", "ccCcCcc", "s.ccc.s"] + LEGS,
-    "spy": ["..hhh.....", ".hhhhh....", ".hssEgggGG", ".hssssss..", "...ss.c...", ".cccccc...",
-            "ccCcC.....", "s.ccc.....", "..ppp.....", "..p.p.....", ".bb.bb...."],
-    "pull": [".........t", "........t.", "..hhh..t..", ".hhhhhs...", ".hssEsc...", ".hssssc...",
-             "...ss.c...", ".cccccc...", "ccCcC.....", "s.ccc.....", "..ppp.....", "..p.p.....", ".bb..bb..."],
-    "hammer": [".......GGG", ".......GGG", "..hhh...o.", ".hhhhh..s.", ".hssEs..c.", ".hssss..c.",
-               "...ss..c..", ".cccccc...", "ccCcC.....", "s.ccc.....", "..ppp.....", "..p.p.....", ".bb.bb...."],
-    "signal": ["yyy.......uuu", "yyy.......uuu", "..o.......o..", "..s..hhh..s..", "..c.hhhhh.c..",
-               "..c.hssEs.c..", "...chssssc...", "....cs.sc....", "....ccccc....", "....cCcCc....",
-               "....ccccc....", "....ppppp....", "....pp.pp....", "...bbb.bbb..."],
-    "fish": ["..........t", ".........t.", "..hhh...t..", ".hhhhh.t...", ".hssEst....", ".hssss.....",
-             "...ss.....", ".ccccc....", "cCcCcs....", ".ppppp....", "...p.p....", "...b.b...."],
-    "bag": ["......www", "..hhh.www", ".hhhhhwww", ".hssEsw..", ".hssss...", "...ss....", ".ccccc...",
-            "ccCcCc...", "s.ccc....", "..ppp....", "..p.p....", ".bb.bb..."],
-    "scroll": HEAD + [".ccccc..", "ccCcsmmm", "s.ccmmmM"] + LEGS,
-    "row": ["..hhh....", ".hhhhh...", ".hssEs...", ".hssss...", "...ss....", ".cccccs..", "ccCcCc.o.",
-            "..........o"],
-    "helm": ["..NNN..", ".NNNNN.", "ggggggg", ".hssEs.", ".hssss.", "...ss..", ".nnnnn.", "nngnnnn",
-             "s.nnn.s", "..ppp..", "..p.p..", ".bb.bb."],
+    "stand": STAND,
+    "spy": build_pose(14, 14, 0, 0, [(7, 6, "c"), (8, 5, "c"), (8, 4, "s")] + [(x, 3, "g") for x in range(6, 12)]
+                      + [(12, 3, "T"), (13, 3, "T"), (11, 2, "g"), (12, 2, "T")], clear=ARMS_R),
+    "hammer": build_pose(12, 18, 0, 4, [(7, 9, "c"), (8, 8, "c"), (8, 7, "s")] + [(8, y, "o") for y in range(3, 7)]
+                         + [(x, y, "G") for x in range(6, 12) for y in (0, 1, 2)], clear=ARMS_R),
+    "signal": build_pose(17, 18, 4, 4, [(4, 9, "c"), (3, 8, "c"), (3, 7, "s"), (12, 9, "c"), (13, 8, "c"), (13, 7, "s")]
+                         + [(3, y, "o") for y in range(7)] + [(13, y, "o") for y in range(7)]
+                         + [(x, y, "y") for x in range(3) for y in range(4)]
+                         + [(x, y, "u") for x in range(14, 17) for y in range(4)],
+                         clear=[(1, 7), (1, 8), (1, 9)] + ARMS_R),
+    "fish": build_pose(18, 14, 0, 0, [(7, 9, "s")] + [(x, y, "o") for x, y in line_points(8, 9, 17, 0)]
+                       + [(x, 12, "p") for x in (2, 3, 5, 6)] + [(x, 13, "b") for x in (2, 3, 5, 6)],
+                       clear=[(7, 7), (7, 8)] + LEGS),
+    "pack": build_pose(12, 14, 3, 0, [(x, y, "P") for x in range(4) for y in range(6, 12)]
+                       + [(x, 5, "w") for x in range(4)] + [(4, 7, "O"), (4, 8, "O"), (1, 8, "O"), (2, 8, "O")]
+                       + [(5, 11, "p"), (4, 12, "p"), (5, 12, "p"), (9, 11, "p"), (10, 12, "p"), (9, 12, "p")]
+                       + [(x, 13, "b") for x in (3, 4, 5, 9, 10, 11)], clear=LEGS),
+    "scroll": build_pose(12, 14, 0, 0, [(x, y, "m") for x in range(6, 12) for y in (7, 8, 9)]
+                         + [(6, 7, "M"), (11, 7, "M"), (6, 9, "M"), (11, 9, "M"), (8, 8, "x")]),
+    # off duty: sitting on a crate, a pair of dice in front
+    "rest": build_pose(15, 14, 0, 0, [(x, 11, "p") for x in range(2, 8)] + [(7, 12, "p"), (8, 12, "p"), (8, 13, "b"), (9, 13, "b")]
+                       + [(x, y, "O") for x in range(1, 6) for y in (12, 13)]
+                       + [(11, 12, "w"), (12, 12, "w"), (11, 13, "w"), (12, 13, "w"), (13, 13, "w"), (14, 13, "w"), (14, 12, "w")],
+                       clear=LEGS),
+    "helm": ["..NNNNN..", ".NNNNNNN.", "..ggggg..", "..hssss..", "..hssEs..", "..hssss..", "...sss...",
+             "..nnnnn..", ".nngnnnn.", ".nnngnnn.", ".snnnnns.", "..nnnnn..", "..pp.pp..", "..pp.pp..", ".bbb.bbb."],
 }
 QMARK = [".www.", "w...w", "...w.", "..w..", ".....", "..w.."]
+ZZZ = ["www...", "..w...", ".w.www", "www..w", "....w.", "...www"]
 WHEEL = ["..o.o..", ".ooooo.", "oo.O.oo", ".oOOOo.", "oo.O.oo", ".ooooo.", "..o.o.."]
-BARREL = [".OoooO.", "OGGGGGO", "OoooooO", "OoooooO", "OGGGGGO", "OoooooO", "OoooooO", ".OGGGO."]
-CRATE = ["OOOOOO", "OoMMoO", "OMoOMO", "OMOoMO", "OoMMoO", "OOOOOO"]
+BARREL = ["..OOOOO..", ".OoooooO.", "OGGGGGGGO", "OoooooooO", "OoooooooO", "OoooooooO", "OGGGGGGGO",
+          "OoooooooO", "OoooooooO", "OGGGGGGGO", ".OoooooO.", "..OOOOO.."]
+CRATE = ["OOOOOOOO", "OoMMMMoO", "OMoMMoMO", "OMMooMMO", "OMMooMMO", "OMoMMoMO", "OoMMMMoO", "OOOOOOOO"]
 BOAT = ["O..............O", "OoooooooooooooOO", ".OooooooooooooO.", "..OOOOOOOOOOOO.."]
-SKIFF = ["O..........O", "OoooooooooOO", ".OOOOOOOOOO."]
 MAP = ["MmmmmmmmM", "Mmmxmmmm.", "Mmmmmxmm.", "MmxmmmmmM"]
+CRATE_INK = {"O": "#5a3418", "o": "#a5743f", "M": "#c99a5c"}
+BARREL_INK = {"O": "#3e220f", "o": "#8a5530", "G": "#5a5f6a"}
 
 
 def pick(seq, key):
@@ -1763,6 +1908,20 @@ def pick(seq, key):
     for ch in key:
         h = (h * 131 + ord(ch)) & 0xFFFFFFFF
     return seq[h % len(seq)]
+
+
+def mix(c, other, t):
+    a = [int(c[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(int(round(x + (y - x) * t)) for x, y in zip(a, b))
+
+
+def lit(c, t=0.22):
+    return mix(c, "#fff4d6", t)
+
+
+def dark(c, t=0.32):
+    return mix(c, "#1a1030", t)
 
 
 class Pix:
@@ -1780,33 +1939,37 @@ class Pix:
         self.px[(x, y)] = c
 
     def line(self, x0, y0, x1, y1, c):
-        dx, dy = abs(x1 - x0), -abs(y1 - y0)
-        sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
-        err = dx + dy
-        while True:
-            self.px[(x0, y0)] = c
-            if x0 == x1 and y0 == y1:
-                return
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x0 += sx
-            if e2 <= dx:
-                err += dx
-                y0 += sy
+        for x, y in line_points(x0, y0, x1, y1) if (x0, y0) != (x1, y1) else [(x0, y0)]:
+            self.px[(x, y)] = c
 
-    def sprite(self, x, y, rows, pal, flip=False, upto=None):
-        """Paint rows at (x, y) as the top-left corner; upto keeps only the first rows."""
-        for j, row in enumerate(rows[:upto]):
-            if flip:
-                row = row[::-1]
+    def sprite(self, x, y, rows, pal):
+        for j, row in enumerate(rows):
             for i, ch in enumerate(row):
                 c = pal.get(ch) or INK.get(ch)
                 if ch != "." and c:
                     self.px[(x + i, y + j)] = c
 
-    def clip_below(self, y):
-        self.px = {k: v for k, v in self.px.items() if k[1] < y}
+    def shaded(self, x, y, rows, pal, outline="#24160c"):
+        """A sprite with volume: each material gets a lit edge toward the light (upper left) and a
+        shaded edge away from it, and the figure a dark outline."""
+        grid = {(i, j): ch for j, row in enumerate(rows) for i, ch in enumerate(row) if ch != "."}
+        for (i, j) in grid:
+            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if (i + di, j + dj) not in grid:
+                    self.px.setdefault((x + i + di, y + j + dj), outline)
+        for (i, j), ch in grid.items():
+            base = pal.get(ch) or INK.get(ch)
+            if not base:
+                continue
+            if ch in "Ee":
+                c = base
+            elif grid.get((i - 1, j - 1)) != ch and grid.get((i, j - 1)) != ch:
+                c = lit(base)
+            elif grid.get((i + 1, j + 1)) != ch or grid.get((i + 1, j)) != ch:
+                c = dark(base)
+            else:
+                c = base
+            self.px[(x + i, y + j)] = c
 
     def svg(self, attrs=""):
         runs = {}
@@ -1821,352 +1984,454 @@ class Pix:
         return "<g%s>%s</g>" % (attrs, paths)
 
 
-def hand_palette(hid):
-    shirt = pick(SHIRTS, hid)
-    return {"h": pick(HAIRS, hid + "h"), "s": pick(SKINS, hid + "s"), "E": INK["e"], "c": shirt,
-            "C": "#f6f1e3" if shirt != "#d9d6c8" else "#2f6fb0", "p": INK["p"], "b": INK["b"]}
+def band(x, y0, w, y1, c, attrs=""):
+    return '<rect x="%d" y="%d" width="%d" height="%d" fill="%s"%s/>' % (x, y0, w, y1 - y0, c, attrs)
+
+
+def polygon(pts, c, attrs=""):
+    return '<polygon points="%s" fill="%s"%s/>' % (" ".join("%g,%g" % p for p in pts), c, attrs)
+
+
+def shadow(cx, cy, w=11, h=3, op=0.28):
+    """A soft drop shadow on the deck, a little to the lower right (the light is upper left)."""
+    p = Pix()
+    for j in range(h):
+        k = 1 if j in (0, h - 1) else 0
+        p.rect(cx - w // 2 + k + 2, cy + j, w - 2 * k, 1, "#000000")
+    return p.svg(' opacity="%.2f"' % op)
+
+
+def hand_palette(h):
+    c = h.get("color") or "#8a8a8a"
+    return {"c": c, "k": dark(c, 0.38), "h": pick(HAIRS, h["id"] + "h"), "s": pick(SKINS, h["id"] + "s")}
 
 
 def red_flag(p, x, y):
     """The red flag a hand raises when it needs the captain: a pole at x with the cloth to its left."""
     p.rect(x, y, 1, 13, INK["o"])
     p.rect(x - 6, y, 6, 4, INK["r"])
+    p.rect(x - 6, y, 6, 1, lit(INK["r"]))
     p.rect(x - 6, y + 3, 6, 1, INK["R"])
 
 
-def hand_svg(h, x, feet, pose, flip=False, upto=None, extra=None):
-    """One clickable hand: the sprite with its lowest painted row (its feet, or its waist when
-    `upto` cuts it, as in a boat or the nest) on row `feet`, its flag, and a name tag."""
-    rows = POSES[pose]
-    top = feet - len(rows[:upto]) + 1
+class Tags:
+    """Name tags placed so that none overlaps another: each goes above its hand, or higher with a
+    leader line when that spot is taken."""
+
+    def __init__(self):
+        self.boxes, self.out = [], []
+
+    def place(self, text, cx, top, owner=""):
+        w, h = int(len(text) * 2.75) + 5, 7
+        for dy in (0, -8, -16, 8, -24, 16, -32, -40):
+            x0, y0 = int(cx - w / 2), top - h - 2 + dy
+            box = (x0, y0, x0 + w, y0 + h)
+            if all(box[2] <= b[0] or box[0] >= b[2] or box[3] <= b[1] or box[1] >= b[3] for b in self.boxes):
+                break
+        self.boxes.append(box)
+        lead = ('<line class="sm-tag__lead" x1="%d" y1="%d" x2="%d" y2="%d"/>' % (cx, y0 + h, cx, top - 1)) if dy < 0 else ""
+        self.out.append('<g class="sm-tag" data-for="%s" data-ax="%d" data-ay="%d">%s<rect x="%d" y="%d" width="%d" height="%d" rx="1.5"/>'
+                        '<text x="%d" y="%.1f">%s</text></g>' % (esc(owner), cx, top, lead, x0, y0, w, h, cx, y0 + 5.2, esc(text)))
+        return box
+
+    def svg(self):
+        return "".join(self.out)
+
+
+def hand_svg(h, spot, tags, extra=None, shadow_on=True):
+    """One clickable hand at its spot, with its flag, its rest marks, and its name tag."""
+    x, feet, pose, upto = spot
+    rows = POSES[pose][:upto]
+    top = feet - len(rows) + 1
     p = Pix()
-    p.sprite(x, top, rows, hand_palette(h["id"]), flip=flip, upto=upto)
+    p.shaded(x, top, rows, hand_palette(h))
     if extra:
         extra(p, top)
     if h["place"] == "hatch":
-        p.sprite(x + 1, top - 7, QMARK, {})
+        p.sprite(x + 2, top - 8, QMARK, {})
+    if pose == "rest":
+        p.sprite(x + 9, top - 7, ZZZ, {})
+    flag = ""
     if h["flag"]:
-        red_flag(p, x - 1, top - 9)
-    title = "%s: %s (%s%s)" % (h["id"], PLACE_TEXT[h["place"]], h["phase"],
-                               "; needs the captain: " + "; ".join(h["why"]) if h["flag"] else "")
-    label = h["id"] if len(h["id"]) <= 18 else h["id"][:17] + "…"
-    return ('<g class="sm-hand%s" data-id="%s" tabindex="0" role="button" aria-label="%s"><title>%s</title>%s'
-            '<text class="sm-hand__tag" x="%d" y="%d">%s</text></g>'
-            % (" has-flag" if h["flag"] else "", esc(h["id"]), esc(title + ": details"), esc(title),
-               p.svg()[3:-4], x + 3, top - (11 if h["flag"] else 3), esc(label)))
+        f = Pix()
+        red_flag(f, x - 2, top - 10)
+        flag = f.svg(' class="sm-redflag"')
+    cx = x + {"signal": 8, "pack": 7}.get(pose, 4)
+    tags.place(h["id"], cx, top - (10 if h["flag"] else 1) + (4 if pose in ("hammer", "signal") else 0), h["id"])
+    state = "; off duty" if h["off"] else ""
+    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or "no project", PLACE_TEXT[h["place"]], h["phase"], state,
+                                       "; needs the captain: " + "; ".join(h["why"]) if h["flag"] else "")
+    return ('%s<g class="sm-hand pose-%s%s" data-id="%s" tabindex="0" role="button" aria-label="%s"><title>%s</title>%s%s</g>'
+            % (shadow(cx, feet + 1) if shadow_on else "", pose, " has-flag" if h["flag"] else "", esc(h["id"]),
+               esc(title + ": details"), esc(title), p.svg(), flag))
 
 
-# -- layout constants, in art pixels
-
-BAY_H = 178
-HORIZON = 62
-WL = 124            # ships' waterline
-PIER = 150          # top of the pier's deck
-PIER_FRONT = 158
-
-
-def ship_size(hands, name=""):
-    """Hull length: room for every hand on deck, at the rail and at the bow, and for the name."""
-    n = {k: sum(1 for h in hands if h["place"] == k) for k in PLACES + ["hatch"]}
-    deck = max(20, 9 * (n["deck"] + n["hatch"] + max(0, n["nest"] - 4)))
-    length = 18 + deck + 10 * n["rail"] + 11 * n["bow"] + 16
-    return max(70, length, 26 + int(3.7 * len(name[:28])))
-
-
-def draw_hull(front, x0, length, deck_y, hue, castle=16):
-    """Hull from the bulwark down to the waterline, a raised stern castle and the bowsprit."""
-    for y in range(deck_y - 3, WL):
-        depth = y - deck_y
-        left = x0 + (max(0, depth - 6) // 3)
-        right = x0 + length - max(0, (depth + 3) // 2)
-        c = "#d4a83c" if y == deck_y - 3 else "#8a5530" if y < deck_y else "#57301a" if depth % 4 == 3 else "#6b3a1c"
-        if deck_y + 1 <= y <= deck_y + 2:
-            c = hue
-        front.rect(left, y, right - left, 1, c)
-    front.rect(x0, deck_y - 11, castle, 8, "#7a4524")
-    front.rect(x0, deck_y - 12, castle, 1, "#d4a83c")
-    front.rect(x0 + 3, deck_y - 9, 3, 3, "#f0d070")
-    front.rect(x0 + 8, deck_y - 9, 3, 3, "#f0d070")
-    front.line(x0 + length - 1, deck_y - 4, x0 + length + 13, deck_y - 13, "#5a3418")
-    front.line(x0 + length - 1, deck_y - 3, x0 + length + 13, deck_y - 12, "#7a4a24")
-
-
-def draw_mast(back, front, mx, deck_y, top, hue, sail_rows=(18, 50)):
-    back.rect(mx, top, 2, deck_y - top, "#5a3418")
-    back.rect(mx + 2, top - 1, 1, 6, "#5a3418")
-    back.rect(mx - 9, top, 9, 3, hue)                        # pennant, blowing astern
-    back.rect(mx - 6, top + 3, 6, 1, hue)
-    s0, s1 = top + sail_rows[0], top + sail_rows[1]
-    back.rect(mx - 19, s0 - 1, 40, 1, "#5a3418")
-    for y in range(s0, s1):
-        bulge = 1 if s0 + 4 < y < s1 - 4 else 0
-        back.rect(mx - 17 - bulge, y, 36 + 2 * bulge, 1, "#e2d3ad" if (y - s0) % 7 == 6 else "#f4ead0")
-        back.dot(mx + 18 + bulge, y, "#cdbb92")
-    back.rect(mx - 17, (s0 + s1) // 2 - 1, 36, 3, hue)
-    back.rect(mx - 15, s1, 32, 1, "#5a3418")
-    front.rect(mx - 8, top + 8, 18, 5, "#6b3a1c")             # crow's nest, drawn over its lookouts
-    front.rect(mx - 8, top + 8, 18, 1, "#d4a83c")
-    return top + 12                                            # the nest floor
-
-
-def ship_svg(ship, x0):
-    hands, length = ship["hands"], ship_size(ship["hands"], ship["project"])
-    deck_y, hue = WL - 14, pick(PROJECT_HUES, ship["project"])
-    back, front, out_hands = Pix(), Pix(), []
-    mx = x0 + length // 2 - 1
-    top = deck_y - 70
-    for side in (-1, 1):
-        back.line(mx + 1, top + 2, mx + side * (length // 2 - 4), deck_y - 3, "#3a2a1a")
-    back.line(mx + 1, top + 4, x0 + length + 12, deck_y - 12, "#3a2a1a")
-    nest_floor = draw_mast(back, front, mx, deck_y, top, hue)
-    by_place = {k: [h for h in hands if h["place"] == k] for k in PLACES + ["hatch"]}
-    deck_x = x0 + 19
-    for i, h in enumerate(by_place["nest"]):
-        if i < 2:
-            out_hands.append(hand_svg(h, mx - 7 + 8 * i, nest_floor - 2, "spy", upto=8))
-        elif i < 4:                                            # more lookouts than the nest holds climb the shrouds
-            t = (0.42, 0.7)[i - 2]
-            sx, sy = mx - int((length // 2 - 4) * t), int(top + 2 + (deck_y - 3 - top - 2) * t)
-            out_hands.append(hand_svg(h, sx - 3, sy + 4, "spy"))
-        else:
-            out_hands.append(hand_svg(h, deck_x, deck_y - 1, "spy"))
-            deck_x += 9
-    for i, h in enumerate(by_place["deck"]):
-        out_hands.append(hand_svg(h, deck_x, deck_y - 1, "pull" if i % 2 == 0 else "hammer"))
-        deck_x += 9
-    for h in by_place["hatch"]:
-        out_hands.append(hand_svg(h, deck_x, deck_y - 1, "stand"))
-        deck_x += 9
-    rail_x = max(deck_x + 2, x0 + 38)
-    bow_x = x0 + length - 13
-    for h in by_place["bow"]:
-        out_hands.append(hand_svg(h, bow_x - 3, deck_y - 1, "signal"))
-        bow_x -= 11
-    draw_hull(front, x0, length, deck_y, hue)
-    rails = []
-    for i, h in enumerate(by_place["rail"]):
-        x = rail_x + 10 * i
-
-        def line_down(p, top_, x=x):
-            p.line(x + 10, top_ + 1, x + 10, WL - 1, "#e9edf2")
-        rails.append(hand_svg(h, x, deck_y - 2, "fish", extra=line_down))
-    planks = []
-    if by_place["plank"]:
-        px0, py0, px1, py1 = x0 + 6, deck_y - 2, x0 - 26, PIER + 2
-        plank = Pix()
-        for k in range(3):
-            plank.line(px0, py0 + k, px1, py1 + k, "#b07a45" if k < 2 else "#6b3a1c")
-        for t in (0.2, 0.4, 0.6, 0.8):
-            plank.dot(int(px0 + (px1 - px0) * t), int(py0 + (py1 - py0) * t) - 1, "#5a3418")
-        planks.append(plank.svg())
-        for i, h in enumerate(by_place["plank"]):
-            if i < 3:
-                t = (0.3, 0.58, 0.86)[i]
-                fx, fy = int(px0 + (px1 - px0) * t), int(py0 + (py1 - py0) * t)
-            else:
-                fx, fy = px1 - 6 - 9 * (i - 3), PIER + 3
-            planks.append(hand_svg(h, fx - 3, fy - 1, "bag"))
-    name = ('<text class="sm-bay__name" x="%d" y="%d">%s</text>'
-            % (x0 + length - 8, WL - 3, esc(ship["project"][:28])))
-    return ('<g class="sm-ship" aria-label="%s"><title>%s: %d hand%s aboard</title>%s%s%s%s%s</g>'
-            % (esc(ship["project"]), esc(ship["project"]), len(hands), "" if len(hands) == 1 else "s",
-               back.svg(), "".join(out_hands), front.svg(), "".join(rails), name), planks, length)
-
-
-def flagship_svg(sc, x0, length=112):
-    """Firstmate's own ship: firstmate at the helm, one barrel per account in the hold, and the
-    context as ballast: the fuller the context, the lower she sits; past the warning threshold the
-    load line goes under."""
-    f = sc["flagship"]
-    pct = max(0.0, min(100.0, f["context"] or 0.0))
-    sink = int(round(pct * 6 / 100.0)) + (2 if f["over"] else 0)
-    mark = int(round(f["warn_at"] * 6 / 100.0))
-    deck_y = WL - 22 + sink
-    hue = "#22345e"
-    back, front = Pix(), Pix()
-    for mx, top in ((x0 + 46, deck_y - 74), (x0 + 82, deck_y - 62)):
-        back.line(mx + 1, top + 2, mx - 22, deck_y - 3, "#3a2a1a")
-        back.line(mx + 1, top + 2, mx + 22, deck_y - 3, "#3a2a1a")
-        draw_mast(back, front, mx, deck_y, top, "#c0452a")
-    back.line(x0 + 83, deck_y - 60, x0 + length + 12, deck_y - 12, "#3a2a1a")
-    draw_hull(front, x0, length, deck_y, hue, castle=24)
-    # the hold, cut away to show the barrels
-    hold_w = max(34, 10 * len(sc["barrels"]) + 4)
-    hx, hy = x0 + 30, deck_y + 4
-    front.rect(hx - 1, hy - 1, hold_w + 2, 12, "#d4a83c")
-    front.rect(hx, hy, hold_w, 10, "#2a1a10")
-    barrels = []
-    for i, b in enumerate(sc["barrels"]):
-        bx = hx + 3 + 10 * i
-        p = Pix()
-        p.sprite(bx, hy + 1, BARREL, {})
-        level = 0 if b["remaining"] is None else int(round(max(0, min(100, b["remaining"])) / 100.0 * 6))
-        fill = "#d8342a" if b["empty"] else "#e0a52e"
-        if b["empty"]:
-            level = max(1, level)
-            for row in (1, 4, 7):                               # red hoops on a barrel that runs dry
-                p.rect(bx + 1, hy + 1 + row, 5, 1, "#d8342a")
-        if level:
-            p.rect(bx + 1, hy + 8 - level, 5, level, fill)
-        tip = "%s: %s%s" % (b["label"], ("%d%% left" % b["remaining"]) if b["remaining"] is not None else "unknown",
-                            ", runs out before it resets" if b["early"] else "")
-        barrels.append('<g class="sm-barrel%s"><title>%s</title>%s</g>' % (" is-empty" if b["empty"] else "", esc(tip), p.svg()))
-    # load line on the hull, `mark` rows above the light waterline: she sinks onto it as the
-    # context nears the threshold, and past the threshold it is under water
-    if not f["over"]:
-        ly = WL - 3 - mark + sink
-        lx = x0 + length - 30
-        front.rect(lx, ly, 7, 1, "#f6f1e3")
-        front.rect(lx + 3, ly - 2, 1, 5, "#f6f1e3")
-    # the helm on the stern castle, with firstmate behind it
-    helm = Pix()
-    helm.sprite(x0 + 6, deck_y - 12 - 12, POSES["helm"], {"h": "#2a1d14", "s": "#d9a173", "E": INK["e"],
-                                                         "p": INK["p"], "b": INK["b"]})
-    helm.sprite(x0 + 14, deck_y - 12 - 9, WHEEL, {})
-    front.clip_below(WL)
-    if f["context"] is None:
-        state = "context unknown"
-    else:
-        state = "context %d%% of the window%s" % (round(f["context"]), ", past the %d%% warning" % f["warn_at"] if f["over"] else "")
-    return ('<g class="sm-ship sm-ship--flag"><title>firstmate: %s</title>%s%s<g class="sm-helm"><title>firstmate at the helm: %s</title>%s</g>'
-            '%s<text class="sm-bay__name" x="%d" y="%d">firstmate</text></g>'
-            % (esc(state), back.svg(), front.svg(), esc(state), helm.svg(), "".join(barrels),
-               x0 + length - 10, min(WL - 3, deck_y + 12)))
-
-
-def boat_svg(item, x, wl, cls, sailor=None, flag=False, cargo=True):
+def boat_pix(x, wl, cargo=False, flag=False):
     p = Pix()
-    p.sprite(x, wl - 3, BOAT, {})
-    if cargo and sailor is None:
-        p.sprite(x + 5, wl - 8, CRATE, {})
+    p.shaded(x, wl - 3, BOAT, {})
+    if cargo:
+        p.shaded(x + 5, wl - 8, CRATE[:6], CRATE_INK)
     if flag:
-        red_flag(p, x + 12, wl - 15)
-    if sailor is not None:                     # the hand aboard is what opens the details
-        return '<g class="%s">%s%s</g>' % (cls, sailor, p.svg())
-    return '<g class="%s" data-id="%s" tabindex="0" role="button" aria-label="%s"><title>%s</title>%s</g>' % (
-        cls, esc(item["id"]), esc(item["id"] + ": details"), esc(item["title_text"]), p.svg())
-
-
-def sky_and_sea(w, sea, rnd):
-    out = []
-    for y0, y1, c in ((0, 18, "#79bde6"), (18, 34, "#8ccaee"), (34, 48, "#a2d6f2"), (48, HORIZON, "#bfe4f6")):
-        out.append('<rect x="0" y="%d" width="%d" height="%d" fill="%s"/>' % (y0, w, y1 - y0, c))
-    sun = Pix()
-    cx, cy = w - 42, 18
-    for y in range(-7, 8):
-        for x in range(-7, 8):
-            if x * x + y * y <= 49:
-                sun.dot(cx + x, cy + y, "#ffe58a" if x * x + y * y > 30 else "#fff1b8")
-    out.append(sun.svg())
-    clouds = Pix()
-    for _ in range(max(3, w // 140)):
-        cx, cy = rnd.randrange(10, w - 40), rnd.randrange(6, 40)
-        for (dx, dy, ww) in ((4, 0, 10), (0, 3, 22), (2, 6, 18)):
-            clouds.rect(cx + dx, cy + dy, ww, 3, "#fbfdff")
-        clouds.rect(cx + 2, cy + 8, 18, 1, "#dfeef7")
-    out.append(clouds.svg())
-    for y0, y1, c in ((HORIZON, HORIZON + 14, "#4d9fcc"), (HORIZON + 14, WL - 20, "#3f8fbf"),
-                      (WL - 20, WL + 8, "#3480b2"), (WL + 8, BAY_H, "#2c70a0")):
-        out.append('<rect x="0" y="%d" width="%d" height="%d" fill="%s"/>' % (y0, w, y1 - y0, c))
-    out.append('<rect x="0" y="%d" width="%d" height="1" fill="#d7eef8"/>' % (HORIZON, w))
-    caps = Pix()
-    n, size = {"calm": (w // 40, 2), "choppy": (w // 16, 3), "rough": (w // 7, 4)}[sea]
-    for _ in range(n):
-        x, y = rnd.randrange(0, w), rnd.randrange(HORIZON + 3, BAY_H - 2)
-        far = y < HORIZON + 20
-        caps.rect(x, y, max(1, size - (1 if far else 0)), 1, "#d4ecf7")
-        if sea != "calm" and not far:
-            caps.dot(x + 1, y - 1, "#f6fbfd")
-            if sea == "rough":
-                caps.rect(x - 1, y + 1, size + 2, 1, "#8fc3e0")
-    out.append(caps.svg(' class="sm-waves"'))
-    return out
-
-
-def pier_svg(w):
-    p = Pix()
-    for y in range(PIER, PIER_FRONT):
-        p.rect(0, y, w, 1, "#b07a45" if (y - PIER) % 3 else "#8a5530")
-    for x in range(0, w, 13):
-        p.rect(x, PIER, 1, PIER_FRONT - PIER, "#8a5530")
-    p.rect(0, PIER_FRONT, w, 4, "#6b3a1c")
-    for x in range(4, w, 26):
-        p.rect(x, PIER_FRONT + 4, 4, BAY_H - PIER_FRONT - 4, "#4f2c14")
-        p.rect(x + 1, PIER_FRONT + 4, 1, BAY_H - PIER_FRONT - 4, "#6b3a1c")
+        red_flag(p, x + 13, wl - 16)
     return p
 
 
-def render_bay(sc):
-    """The bay as one SVG, sized in art pixels; the page scales it by a whole number."""
-    rnd = random.Random(7)                  # the same clouds and waves on every refresh
-    flag_w = max(130, 22 * min(len(sc["queue"]), MAX_QUEUE_BOATS) + 34)
-    sizes = [ship_size(s["hands"], s["project"]) for s in sc["ships"]]
-    n_out = sum(1 for h in sc["scouts"] if h["place"] == "out")
-    n_back = sum(1 for h in sc["scouts"] if h["place"] == "back")
-    n_dock = sum(1 for h in sc["scouts"] if h["place"] == "dock")
-    n_crates = min(len(sc["crates"]), MAX_CRATES)
-    open_w = max(80, 24 * n_out + 16, 26 * n_back + 16, 30 * n_dock + 8 * ((n_crates + 2) // 3) + 30)
-    w = 10 + flag_w + sum(l + 44 for l in sizes) + open_w
-    parts = sky_and_sea(w, sc["sea"], rnd)
-    far, near, lower = [], [], []
-    ox = 10 + flag_w + sum(l + 44 for l in sizes)
-    # scouts: far out on the horizon, rowing back, or moored at the pier with the map
-    for i, h in enumerate([h for h in sc["scouts"] if h["place"] == "out"]):
-        x = ox + 8 + 24 * i
-        p = Pix()
-        p.sprite(x, HORIZON + 8, SKIFF, {})
-        far.append(hand_svg(h, x + 2, HORIZON + 8, "spy", upto=7) + p.svg())
-    for i, h in enumerate([h for h in sc["scouts"] if h["place"] == "back"]):
-        x = ox + 8 + 26 * i
-        sailor = hand_svg(h, x + 4, WL + 8, "scroll", upto=8)
-        near.append(boat_svg(h, x, WL + 10, "sm-boat", sailor=sailor))
-    dock_x = ox + 6
-    for h in [h for h in sc["scouts"] if h["place"] == "dock"]:
-        sailor = hand_svg(h, dock_x + 4, PIER - 4, "stand", upto=9)
-        lower.append(boat_svg(h, dock_x, PIER - 1, "sm-boat", sailor=sailor))
-        dock_x += 30
-    # the flagship and the project ships
-    ships, planks = [], []
-    ships.append(flagship_svg(sc, 14))
-    x = 10 + flag_w
-    for s, l in zip(sc["ships"], sizes):
-        svg, plank, _ = ship_svg(s, x + 6)
-        ships.append(svg)
-        planks.extend(plank)
-        x += l + 44
-    # queue boats moored along the pier under the flagship, red flag when they wait on a decision
+def sail(x0, x1, y0, y1, colors, belly=4):
+    """A sail with volume: lit on the luff, shaded toward the leech, seams, a belly, and one
+    stripe per project aboard."""
+    p = Pix()
+    w = x1 - x0
+    for y in range(y0, y1):
+        t = (y - y0) / float(max(1, y1 - y0 - 1))
+        b = int(round(belly * (1 - (2 * t - 1) ** 2)))
+        for x in range(x0 - b, x1 + b):
+            u = (x - x0 + b) / float(w + 2 * b)
+            c = "#fbf3dc" if u < 0.25 else "#f1e5c4" if u < 0.7 else "#ddcda4"
+            for i, col in enumerate(colors[:4]):
+                if y - y0 in (8 + 5 * i, 9 + 5 * i):
+                    c = lit(col, 0.2) if u < 0.25 else col if u < 0.7 else dark(col, 0.2)
+            if (y - y0) % 8 == 7:
+                c = dark(c, 0.08)
+            p.dot(x, y, c)
+    p.rect(x0 - 2, y0 - 1, w + 4, 1, "#4a2a12")
+    p.rect(x0 - 2, y1, w + 4, 1, "#4a2a12")
+    return p.svg()
+
+
+def sky_and_sea(w, night, sea, rnd):
+    far, mid = [], []
+    sky = (["#0d1631", "#111c3b", "#152244", "#1a294d", "#203157", "#283a60"] if night else
+           ["#6fb3e0", "#78b9e4", "#83c0e8", "#8fc8ec", "#9dd0ee", "#b3dcf2"])
+    for i, c in enumerate(sky):
+        far.append(band(-300, HOR * i // 6, w + 600, HOR * (i + 1) // 6, c))
+    deco = Pix()
+    if night:
+        for _ in range(w // 6):
+            deco.dot(rnd.randrange(-200, w + 200), rnd.randrange(2, HOR - 18), "#fff8d8" if rnd.random() < 0.3 else "#aab6d8")
+        for y in range(-7, 8):
+            for x in range(-7, 8):
+                if x * x + y * y <= 49 and (x - 3) ** 2 + (y + 2) ** 2 > 30:
+                    deco.dot(w - 90 + x, 24 + y, "#f6efd0")
+    else:
+        for y in range(-8, 9):
+            for x in range(-8, 9):
+                if x * x + y * y <= 64:
+                    deco.dot(w - 90 + x, 22 + y, "#fff1b8" if x * x + y * y < 40 else "#ffe58a")
+    clouds = Pix()
+    for cx, cy in ((40, 14), (250, 30), (470, 10), (690, 26), (910, 16), (1130, 30)):
+        if cx > w + 100:
+            break
+        for dx, dy, ww in ((6, 0, 14), (0, 4, 30), (3, 8, 26)):
+            clouds.rect(cx + dx, cy + dy, ww, 4, "#3a4a72" if night else "#fbfdff")
+        clouds.rect(cx + 3, cy + 12, 26, 1, "#2c3a5e" if night else "#dfeef7")
+    hills = Pix()
+    hc = ("#2a3b5c", "#304466", "#22314f") if night else ("#8fb7c9", "#9ec2d2", "#7aa6bb")
+    for x in range(-300, w + 300):
+        hgt = int(9 + 8 * abs(((x * 7) % 130) - 65) / 65.0 + 4 * ((x // 37) % 2))
+        hills.rect(x, HOR - hgt, 1, hgt, hc[0] if x % 210 < 130 else hc[1])
+        hgt = int(4 + 4 * abs(((x * 5 + 40) % 100) - 50) / 50.0)
+        hills.rect(x, HOR - hgt, 1, hgt, hc[2])
+    far += [deco.svg(), '<g class="sm-drift">%s</g>' % clouds.svg(), hills.svg()]
+    near_c, far_c = ("#0c2440", "#1d3d64") if night else ("#2c6f9f", "#5aa6cf")
+    for i in range(6):
+        mid.append(band(-300, HOR + (SHIP_H - HOR) * i // 6, w + 600, HOR + (SHIP_H - HOR) * (i + 1) // 6,
+                        mix(far_c, near_c, i / 5.0)))
+    caps = Pix()
+    count = {"calm": w // 5, "choppy": w // 3, "rough": w // 2}[sea]
+    for _ in range(count):
+        y = rnd.randrange(HOR + 2, SHIP_H)
+        t = (y - HOR) / float(SHIP_H - HOR)
+        x = rnd.randrange(-100, w + 100)
+        size = 2 + int((4 if sea == "rough" else 3) * t)
+        caps.rect(x, y, size, 1, mix("#cfe8f5", "#9bc9e4", t) if not night else mix("#5a7aa8", "#3a5a88", t))
+        if t > 0.5 and sea != "calm":
+            caps.rect(x + 1, y - 1, max(1, size - 2), 1, "#f6fbfd" if not night else "#8aa6cc")
+    mid.append('<g class="sm-waves">%s</g>' % caps.svg())
+    return far, mid
+
+
+def render_ship(sc):
+    """The ship as one SVG in art pixels; the page frames, zooms and pans it."""
+    lay = ship_layout(sc)
+    W, x0, L = lay["width"], lay["x0"], lay["length"]
+    night = sc["night"]
+    rnd = random.Random(21)                     # the same stars, clouds and waves on every refresh
+    tags = Tags()
+    colors = list(sc["colors"].values())
+    far, mid = sky_and_sea(W, night, sc["sea"], rnd)
+    ship, ashore, near, lights = [], [], [], []
+    spots = lay["hands"]
+    by_id = {h["id"]: h for h in sc["hands"]}
+
+    def hands_at(place):
+        return [h for h in sc["hands"] if h["place"] == place]
+
+    # scouts out on the horizon, behind the ship
+    for h in sc["scouts"]:
+        x, wl, pose, upto = lay["scouts"][h["id"]]
+        if h["place"] == "out":
+            mid.append(hand_svg(h, (x + 3, wl - 3, pose, upto), tags, shadow_on=False) + boat_pix(x, wl).svg())
+    mid.append(polygon([(x0 + 10, WL), (x0 + L - 60, WL), (x0 + L - 80, WL + 12), (x0 + 20, WL + 12)],
+                       "#0a2238" if night else "#1d4f73", ' opacity="0.45"'))
+    # masts, stays and sails
+    deck_x, fc_x, main_x = lay["deck_x"], lay["fc_x"], lay["main_x"]
+    masts = [(x0 + 60, 36, (x0 + 24, x0 + 100, 50, 124)), (main_x, 6, (main_x - 54, main_x + 56, 56, 150)),
+             (fc_x + lay["fc_len"] // 2 - 6, 26, (fc_x + lay["fc_len"] // 2 - 54, fc_x + lay["fc_len"] // 2 + 44, 50, 136))]
+    for mx, top, (sx0, sx1, sy0, sy1) in masts:
+        stays = Pix()
+        stays.line(mx + 2, top + 4, mx - 46, FAR - 2, "#2e1c0e")
+        stays.line(mx + 2, top + 4, mx + 46, FAR - 2, "#2e1c0e")
+        m = Pix()
+        for x in range(4):
+            m.rect(mx + x, top, 1, NEAR - top, ("#a06a32", "#7a4a24", "#5a3418", "#3e220f")[x])
+        m.rect(mx - 4, top - 2, 10, 2, "#5a3418")
+        pen = Pix()
+        pen.rect(mx - 12, top - 1, 12, 4, "#c0452a")
+        pen.rect(mx - 12, top + 3, 12, 1, dark("#c0452a"))
+        ship += [stays.svg(), sail(sx0, sx1, sy0, sy1, colors), m.svg(), pen.svg(' class="sm-pennant"')]
+    bs = Pix()
+    bs.line(x0 + L - 4, 160, x0 + L + 56, 140, "#5a3418")
+    bs.line(x0 + L - 4, 161, x0 + L + 56, 141, "#7a4a24")
+    bs.line(masts[2][0] + 2, masts[2][1] + 4, x0 + L + 54, 140, "#2e1c0e")
+    lad = Pix()
+    for k in range(2):
+        lad.line(main_x - 38 + 7 * k, FAR, main_x - 8 + 4 * k, 46, "#2e1c0e")
+    for y in range(52, FAR - 2, 7):
+        t = (y - 46) / float(FAR - 46)
+        lad.rect(int(main_x - 8 + (main_x - 38 - main_x + 8) * t), y, 8, 1, "#2e1c0e")
+    ship += [bs.svg(), lad.svg()]
+    # the crow's nest and its lookouts
+    nx, nw = lay["nest"]
+    nest = Pix()
+    for y in range(40, 50):
+        nest.rect(nx, y, nw, 1, mix("#8a5530", "#4e2a12", (y - 40) / 9.0))
+    nest.rect(nx, 40, nw, 1, "#e0b552")
+    for h in hands_at("nest"):
+        ship.append(hand_svg(h, spots[h["id"]], tags, shadow_on=False))
+    ship.append(nest.svg())
+    # the main deck in light perspective, then the castles
+    dlen = lay["deck_len"]
+    deck = Pix()
+    for y in range(FAR, NEAR + 1):
+        deck.rect(deck_x, y, dlen, 1, mix("#a87a48", "#d6a86e", (y - FAR) / float(NEAR - FAR)))
+    for k in range(1, 6):
+        deck.rect(deck_x, FAR + int((NEAR - FAR) * (k / 6.0) ** 1.4), dlen, 1, "#9a6c3c")
+    vp = (deck_x + dlen // 2, 60)
+    for xn in range(deck_x - 200, deck_x + dlen + 200, 24):
+        for y in range(FAR, NEAR + 1):
+            x = int(vp[0] + (xn - vp[0]) * (y - vp[1]) / float(NEAR - vp[1]))
+            if deck_x <= x < deck_x + dlen and (y // 3 + xn // 24) % 3 == 0:
+                deck.dot(x, y, "#8e6234")
+    for y in range(FAR - 8, FAR):
+        deck.rect(deck_x, y, dlen, 1, mix("#7a4524", "#9a6233", (y - FAR + 8) / 8.0))
+    deck.rect(deck_x, FAR - 9, dlen, 1, "#e0b552")
+    for x in range(deck_x + 6, deck_x + dlen, 20):
+        deck.rect(x, FAR - 8, 2, 8, "#5a3418")
+    ship.append(deck.svg())
+    ship.append(polygon([(main_x + 3, FAR + 4), (main_x + 7, FAR + 4), (main_x + 46, NEAR), (main_x + 38, NEAR)],
+                        "#000", ' opacity="0.2"'))
+    hx = lay["hatch_x"]
+    ship.append(polygon([(hx, 182), (hx + 28, 182), (hx + 31, 192), (hx - 3, 192)], "#6b3a1c"))
+    for k in range(6):
+        ship.append(polygon([(hx + 1 + 4.6 * k, 183), (hx + 3 + 4.6 * k, 183), (hx + 2 + 5.4 * k, 191),
+                             (hx - 1 + 5.4 * k, 191)], "#3a2214"))
+
+    def castle(cx0, cx1, top):
+        s = polygon([(cx0, top), (cx1, top), (cx1 - 2, top + 10), (cx0, top + 10)], "#c79a62")
+        s += band(cx0, top - 1, cx1 - cx0, top, "#e0b552")
+        fc = Pix()
+        for y in range(top + 10, NEAR):
+            fc.rect(cx0, y, cx1 - cx0 - 2, 1, mix("#8a5530", "#6b3a1c", (y - top - 10) / float(max(1, NEAR - top - 10))))
+        fc.rect(cx0, top + 10, cx1 - cx0 - 2, 1, "#e0b552")
+        return s + fc.svg()
+    ship.append(castle(x0, x0 + CASTLE, 144))
+    ship.append(castle(fc_x, x0 + L - 8, 158))
+    win = Pix()
+    for wx in (x0 + 8, x0 + 24, x0 + 40, x0 + 56):
+        win.rect(wx, 162, 9, 9, "#3a2214")
+        win.rect(wx + 1, 163, 7, 7, "#f2c35a")
+        win.rect(wx + 1, 163, 3, 3, "#fff0b0")
+        if night:
+            lights.append('<circle cx="%d" cy="166" r="9" fill="#ffd77a" opacity="0.22"/>' % (wx + 4))
+    ship.append(win.svg())
+    # people on deck, far to near; firstmate at the helm on the stern castle
+    people = []
+    fm = Pix()
+    fm.shaded(x0 + 30, 152 - 14, POSES["helm"], {"h": "#2a1d14", "s": "#d9a173"})
+    fm.shaded(x0 + 39, 152 - 10, WHEEL, {})
+    f = sc["firstmate"]
+    ctx = ("context %d%% of the window%s" % (round(f["context"]), ", past the %d%% warning" % f["warn_at"] if f["over"] else "")
+           if f["context"] is not None else "context unknown")
+    people.append((152, shadow(x0 + 37, 153, 16) + '<g class="sm-fm"><title>firstmate at the helm: %s</title>%s</g>'
+                   % (esc(ctx), fm.svg())))
+    for place in ("deck", "hatch", "bow"):
+        for h in hands_at(place):
+            people.append((spots[h["id"]][1], hand_svg(h, spots[h["id"]], tags)))
+    for h in hands_at("nest"):
+        if spots[h["id"]][3] is None:                  # lookouts without a seat in the nest
+            people.append((spots[h["id"]][1], hand_svg(h, spots[h["id"]], tags, shadow_on=False)))
+    ship += [s for _, s in sorted(people, key=lambda t: t[0])]
+    # the hull, cut open: barrels (quota) and the chart table on the orlop, bilge water (context) below
+    hull = Pix()
+    for y in range(NEAR, WL):
+        d = y - NEAR
+        left = x0 + max(0, d - 34) // 2
+        right = x0 + L - int(((max(0, d) / float(WL - NEAR)) ** 1.7) * 70)
+        c = mix("#8a5530", "#3e200d", d / float(WL - NEAR))
+        hull.rect(left, y, right - left, 1, dark(c, 0.25) if d % 7 == 6 else c)
+    hull.rect(x0, NEAR, L, 1, "#e9c06a")
+    hull.rect(x0, NEAR + 1, L, 3, "#9a6233")
+    hull.rect(x0, NEAR + 6, L - 2, 3, "#22345e")
+    ship.append(hull.svg())
+    hx0, hx1 = lay["hold"]
+    hy0, hy1 = NEAR + 14, WL - 6
+    hold = Pix()
+    hold.rect(hx0 - 2, hy0 - 2, hx1 - hx0 + 4, hy1 - hy0 + 4, "#e0b552")
+    for y in range(hy0, hy1):
+        hold.rect(hx0, y, hx1 - hx0, 1, mix("#1c1009", "#3a2414", (y - hy0) / float(hy1 - hy0)))
+    orlop = hy0 + 22
+    room = hy1 - orlop - 2
+    lvl = int(room * min(100.0, f["context"] or 0) / 100.0)
+    thr = int(room * f["warn_at"] / 100.0)
+    for y in range(hy1 - lvl, hy1):
+        hold.rect(hx0, y, hx1 - hx0, 1, "#7fb6d8" if y == hy1 - lvl else mix("#3d82ad", "#1f5579", (y - hy1 + lvl) / float(max(1, lvl))))
+    hold.rect(hx0, hy1 - thr, hx1 - hx0, 1, "#f6f1e3")
+    hold.rect(hx0, orlop, hx1 - hx0, 3, "#6b3a1c")
+    hold.rect(hx0, orlop, hx1 - hx0, 1, "#9a6233")
+    for x in range(hx0 + 40, hx1, 46):
+        hold.rect(x, hy0, 3, hy1 - hy0, "#2a170b")
+    barrels = []
+    for i, b in enumerate(sc["barrels"]):
+        bx = hx0 + 8 + 14 * i
+        bp = Pix()
+        bp.shaded(bx, orlop - 13, BARREL, BARREL_INK)
+        level = int(round(max(0, min(100, b["remaining"] or 0)) / 100.0 * 7))
+        col = "#d8342a" if b["empty"] else "#e0a52e"
+        if b["empty"]:
+            level = max(1, level)
+            for row in (2, 6, 9):
+                bp.rect(bx + 1, orlop - 13 + row, 8, 1, "#d8342a")
+        bp.rect(bx + 3, orlop - 3 - level, 4, level, col)
+        bp.rect(bx + 3, orlop - 3 - level, 1, level, lit(col))
+        tip = "%s: %s%s" % (b["label"], ("%d%% left" % b["remaining"]) if b["remaining"] is not None else "unknown",
+                            ", runs out before it resets" if b["early"] else "")
+        barrels.append('<g class="sm-barrel%s"><title>%s</title>%s</g>' % (" is-empty" if b["empty"] else "", esc(tip), bp.svg()))
+    hold.rect(hx1 - 70, orlop - 6, 46, 2, "#8a5530")
+    hold.rect(hx1 - 66, orlop - 4, 2, 4, "#5a3418")
+    hold.rect(hx1 - 30, orlop - 4, 2, 4, "#5a3418")
+    hold.shaded(hx1 - 62, orlop - 12, MAP, {})
+    ship.append('<g><title>the hold: bilge water is firstmate\'s %s; the white line is the warning threshold</title>%s</g>'
+                % (esc(ctx), hold.svg()))
+    ship += barrels
+    ship.append('<text class="sm-ship__name" x="%d" y="%d">firstmate</text>' % (x0 + L - 60, WL - 12))
+    for h in hands_at("rail"):
+        x = spots[h["id"]][0]
+
+        def line(p, t, x=x):
+            p.line(x + 17, t + 1, x + 17, WL + 10, "#f2f5f8")
+            p.rect(x + 16, WL + 9, 3, 3, "#f6f1e3")
+        ship.append(hand_svg(h, spots[h["id"]], tags, extra=line, shadow_on=False))
+    # the pier: the queue moored behind it, scouts back with their maps, crates of delivered work
     for i, q in enumerate(sc["queue"][:MAX_QUEUE_BOATS]):
-        item = {"id": q["id"], "title_text": "%s: queued (%s)%s" % (q["id"], ", ".join(q["why"]), (" · " + q["title"]) if q["title"] else "")}
-        lower.append(boat_svg(item, 14 + 22 * i, PIER - 1, "sm-boat sm-boat--queue", flag=q["flag"]))
-    more = ""
+        p = boat_pix(lay["queue_x"] + 26 * i, PIER - 2, cargo=True, flag=q["flag"])
+        tip = "%s: queued (%s)%s" % (q["id"], ", ".join(q["why"]), (" · " + q["title"]) if q["title"] else "")
+        ashore.append('<g class="sm-boat" data-id="%s" tabindex="0" role="button" aria-label="%s"><title>%s</title>%s</g>'
+                      % (esc(q["id"]), esc(q["id"] + ": details"), esc(tip), p.svg()))
     if len(sc["queue"]) > MAX_QUEUE_BOATS:
-        more = '<text class="sm-bay__more" x="%d" y="%d">+%d</text>' % (16 + 22 * MAX_QUEUE_BOATS, PIER - 3,
-                                                                       len(sc["queue"]) - MAX_QUEUE_BOATS)
-    pier = pier_svg(w)
+        ashore.append('<text class="sm-ship__more" x="%d" y="%d">+%d</text>'
+                      % (lay["queue_x"] + 26 * MAX_QUEUE_BOATS + 2, PIER - 4, len(sc["queue"]) - MAX_QUEUE_BOATS))
     stuff = Pix()
-    for i in range(0, w, 52):
-        stuff.rect(i + 30, PIER - 3, 3, 4, "#3a2a1a")         # bollards
-    cx = dock_x + 4
-    crates = []
-    for i, c in enumerate(sc["crates"][:MAX_CRATES]):
-        p = Pix()
-        p.sprite(cx + 7 * (i // 3), PIER + 1 - 6 * (i % 3 + 1), CRATE, {})
-        crates.append('<g class="sm-crate"><title>%s delivered (%s)</title>%s</g>' % (esc(c["id"]), esc(c["kind"]), p.svg()))
+    for h in sc["scouts"]:
+        x, wl, pose, upto = lay["scouts"][h["id"]]
+        if h["place"] == "back":
+            mid.append(hand_svg(h, (x + 3, wl - 3, pose, upto), tags, shadow_on=False) + boat_pix(x, wl).svg())
+        elif h["place"] == "dock":
+            ashore.append(hand_svg(h, (x + 3, wl - 3, pose, upto), tags, shadow_on=False) + boat_pix(x, wl).svg())
+            stuff.shaded(x + 4, PIER + 2, MAP, {})
+    pier = Pix()
+    for y in range(PIER, PIER + 12):
+        pier.rect(0, y, W, 1, mix("#c08a55", "#a06c3a", (y - PIER) / 11.0) if (y - PIER) % 4 else "#8a5530")
+    for x in range(0, W, 34):
+        pier.rect(x, PIER, 1, 12, "#8a5530")
+    pier.rect(0, PIER + 12, W, 5, "#6b3a1c")
+    pier.rect(0, PIER + 12, W, 1, "#9a6233")
+    for x in range(6, W, 30):
+        pier.rect(x, PIER + 17, 5, SHIP_H - PIER - 17, "#4f2c14")
+        pier.rect(x, PIER + 17, 1, SHIP_H - PIER - 17, "#6b3a1c")
+    for x in range(40, W, 64):
+        pier.shaded(x, PIER - 4, ["OOO", "OoO", "OoO"], {"O": "#2a1a10", "o": "#4a3020"})
+    ashore.append(pier.svg())
+    for i in range(min(len(sc["crates"]), MAX_CRATES)):
+        stuff.shaded(lay["crates_x"] + 9 * (i // 3), PIER + 2 - 8 * (i % 3 + 1), CRATE, CRATE_INK)
+    ashore.append('<g><title>%d task%s delivered in the last %d days%s</title>%s</g>'
+                  % (len(sc["crates"]), "" if len(sc["crates"]) == 1 else "s", DAYS,
+                     ": " + ", ".join(c["id"] for c in sc["crates"][:20]) if sc["crates"] else "", stuff.svg()))
     if len(sc["crates"]) > MAX_CRATES:
-        crates.append('<text class="sm-bay__more" x="%d" y="%d">+%d</text>' % (cx + 7 * (MAX_CRATES // 3) + 2, PIER - 3,
-                                                                             len(sc["crates"]) - MAX_CRATES))
-    for h in [h for h in sc["scouts"] if h["place"] == "dock"]:
-        stuff.sprite(cx - 26, PIER + 3, MAP, {})
-    label = "The bay: %s" % bay_counts(sc)
-    return ('<svg class="sm-bay__svg" viewBox="0 0 %d %d" style="--w:%dpx;--h:%dpx" role="group" aria-label="%s" '
-            'shape-rendering="crispEdges">%s%s%s%s%s%s%s%s%s</svg>'
-            % (w, BAY_H, w, BAY_H, esc(label), "".join(parts), "".join(far), "".join(ships), "".join(near),
-               "".join(lower), more, pier.svg(), stuff.svg() + "".join(crates), "".join(planks)))
+        ashore.append('<text class="sm-ship__more" x="%d" y="%d">+%d</text>'
+                      % (lay["crates_x"] + 9 * (MAX_CRATES // 3) + 2, PIER - 4, len(sc["crates"]) - MAX_CRATES))
+    (px0, py0), (px1, py1) = lay["plank"]
+    if hands_at("plank"):
+        plank = Pix()
+        for k in range(5):
+            plank.line(px0 + k, py0, px1 + k, py1, ("#e0aa72", "#d6a06a", "#b07a45", "#b07a45", "#6b3a1c")[k])
+        for t in (0.2, 0.4, 0.6, 0.8):
+            plank.rect(int(px0 + (px1 - px0) * t), int(py0 + (py1 - py0) * t), 5, 1, "#5a3418")
+        ashore.append(shadow(px1 + 10, py1, 24, 3, 0.25) + plank.svg())
+        for h in hands_at("plank"):
+            ashore.append(hand_svg(h, spots[h["id"]], tags, shadow_on=False))
+    # the near layer: out of focus, dark and chunky, at the edges so it hides nobody
+    fg = Pix()
+    fg.rect(4, 286, 18, 54, "#1c120a")
+    fg.rect(4, 286, 18, 3, "#2a1a10")
+    for k in range(4):
+        fg.rect(0, 300 + 6 * k, 28, 3, "#3a2414")
+    fg.rect(W - 18, 214, 6, 126, "#1c120a")
+    fg.rect(W - 26, 204, 22, 4, "#1c120a")
+    fg.rect(W - 24, 208, 18, 14, "#24170d")
+    fg.rect(W - 22, 210, 14, 10, "#f2c35a")
+    fg.rect(W - 20, 211, 6, 4, "#fff0b0")
+    for _ in range(W // 16):
+        x = rnd.randrange(-40, W + 40)
+        fg.rect(x, SHIP_H - 3, 14, 3, "#0a1c33" if night else "#24577d")
+        fg.rect(x + 2, SHIP_H - 5, 10, 2, "#0f2846" if night else "#2c6690")
+    near.append(fg.svg())
+    lights.append('<circle class="sm-glow" cx="%d" cy="215" r="%d" fill="#fff0b0" opacity="%s"/>'
+                  % (W - 15, 30 if night else 20, "0.3" if night else "0.18"))
+    shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' opacity="0.38"') if night else ""
+    args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc("The ship: " + ship_counts(sc)), W, SHIP_H)
+            + tuple(lay["crew"])
+            + ("#0c2440" if night else "#2c6f9f", "#0d1631" if night else "#6fb3e0", "".join(far), "".join(mid),
+               "".join(ship), "".join(ashore), shade, "".join(near), "".join(lights), tags.svg()))
+    return ('<svg class="sm-ship__svg sea-%s%s" viewBox="0 0 %d %d" preserveAspectRatio="xMidYMid meet" '
+            'shape-rendering="crispEdges" role="group" aria-label="%s" data-w="%d" data-h="%d" data-crew="%d,%d,%d,%d">'
+            '<rect x="-3000" y="-3000" width="7000" height="7000" fill="%s"/>'
+            '<rect x="-3000" y="-3000" width="7000" height="3010" fill="%s"/>'
+            '<g class="sm-far">%s</g><g class="sm-mid">%s<g class="sm-bob">%s</g>%s</g>%s'
+            '<g class="sm-near">%s</g><g class="sm-lights">%s</g><g class="sm-tags">%s</g></svg>' % args)
 
 
-def block_bay(s):
-    sc = bay_scene(s)
-    return {"bay": render_bay(sc), "counts": bay_counts(sc)}
+def pose_key():
+    """The legend: one small hand per phase, drawn with the same sprites as the ship."""
+    items = [("spy", "exploring: in the crow's nest with a spyglass"), ("hammer", "implementing: on deck with a hammer"),
+             ("signal", "PR open: at the bow with signal flags"), ("fish", "waiting for CI: fishing at the rail"),
+             ("pack", "ready to merge: on the gangplank with a pack"), ("stand", "phase unknown: a question mark"),
+             ("rest", "off duty: idle a while, sitting with the dice")]
+    out = []
+    for pose, text in items:
+        p = Pix()
+        rows = POSES[pose]
+        p.shaded(1, 1, rows, hand_palette({"id": "key", "color": PROJECT_COLORS[0]}))
+        w, h = max(len(r) for r in rows) + 2, len(rows) + 2
+        out.append('<li><svg viewBox="0 0 %d %d" width="%d" height="%d" shape-rendering="crispEdges" aria-hidden="true">%s</svg>%s</li>'
+                   % (w, h, w * 3, h * 3, p.svg(), esc(text)))
+    return "".join(out)
+
+
+def block_ship(s):
+    sc = ship_scene(s)
+    chips = "".join('<li><span class="sm-sw" style="background:%s"></span>%s</li>' % (c, esc(p))
+                    for p, c in sc["colors"].items()) or '<li class="sm-faint">no project aboard</li>'
+    return {"ship": render_ship(sc), "counts": ship_counts(sc), "projects": chips}
 
 
 # ---------------------------------------------------------------- demo (--demo)
@@ -2201,7 +2466,8 @@ def demo_snapshot(now=None):
         agent("DEMO-CACHE", "Cache the tide tables", "harbor-api", 2),
         agent("DEMO-LOGS", "Structured logs for the workers", "harbor-api", 3),
         agent("DEMO-I18N", "Translate the settings page", "harbor-api", 4, crew="done"),
-        agent("DEMO-DARK", "Dark theme for the charts", "lighthouse-web", 0),
+        agent("DEMO-DARK", "Dark theme for the charts", "lighthouse-web", 0, crew="paused"),
+        agent("DEMO-NAV", "Keyboard navigation in the menu", "tide-charts", 1),
         agent("DEMO-FORMS", "Validate the signup form", "lighthouse-web", 3),
         agent("DEMO-ICONS", "Redraw the toolbar icons", "lighthouse-web", 4, crew="done"),
         agent("DEMO-EXPORT", "Export charts as CSV", "tide-charts", 2, crew="blocked"),
@@ -2346,8 +2612,8 @@ def make_handler(panel):
                 return self.send(200, page, "text/html; charset=utf-8", nonce=nonce)
             if u.path == "/blocks":
                 return self.send(200, json.dumps(render_blocks(panel.snapshot())), "application/json")
-            if u.path == "/bay":
-                return self.send(200, json.dumps(block_bay(panel.recent())), "application/json")
+            if u.path == "/ship":
+                return self.send(200, json.dumps(block_ship(panel.recent())), "application/json")
             if u.path == "/detail":
                 tid = (urllib.parse.parse_qs(u.query).get("id") or [""])[0]
                 body = panel.detail(tid)
