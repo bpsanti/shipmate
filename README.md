@@ -84,7 +84,7 @@ On Linux a `systemd --user` service with the same command does the same job.
 | --- | --- |
 | Firstmate session | The session id in the home's `state/.lock-session` (written by `bin/fm-lock.sh` for the session that holds the firstmate lock), looked up in the Claude project folder of `FM_HOME` in every Claude directory read; without a usable id, the newest session in that folder, and the page says so. Context is input plus cache writes plus cache reads of the last model call. Growth compares it with the last call before the past 3 hours, or with the size right after a compaction when one happened since. Today's tokens include that session's subagents. Compactions are the transcript's `compact_boundary` records, with their trigger and the size before and after. |
 | Account bars | `quota-axi --provider claude --full --json --no-credential-refresh`, with `QUOTA_AXI_CLAUDE_PROFILES` set to the non-`ordinary` entries of `config/claude-accounts`, cached 60 s. The bar is the `all_models` effective remaining percentage; the reset is the limiting window's; the projection is quota-axi's runway. Account e-mail and identity are never shown; an account is named by its config directory. |
-| Agent rows | `state/<id>.meta` (project, model, effort, account, worktree, spawn time), `state/<id>.status`, `bin/fm-crew-state.sh <id>` (cached 20 s), task titles from `bin/fm-tasks-axi.sh list`. |
+| Agent rows | `state/<id>.meta` (project, model, effort, account, worktree, spawn time; the account also colours a hand's neckerchief in the ship view), `state/<id>.status`, `bin/fm-crew-state.sh <id>` (cached 20 s), task titles from `bin/fm-tasks-axi.sh list`. |
 | Agent tokens | The worker's Claude Code transcripts in the worktree's project folder, plus their subagent transcripts. Only messages after the task's spawn count, because a pooled worktree's folder also holds earlier tasks' sessions. Each message counts once (one message is written as several lines). |
 | Queue | `bin/fm-tasks-axi.sh list` (held, hold date, blocked-by) and `config/project-capacity` with the live task records that hold a place. |
 | Home lanes | `bin/fm-capacity.sh` (its first `capacity:` line), read at most every 20 s and only when the home has a `config/lane-capacity`; without that file the script sets no target and shipmate does not run it. A queued task nothing else holds waits for a lane (`home lanes n/n`) when it reports no free lane. |
@@ -154,7 +154,9 @@ Each element stands for one thing:
 | A hand under a question mark | an agent whose phase is unknown |
 | A badge on a card in the log | the captain's answer to the decision open now: sent, not woken, received or replied (see below) |
 | A hand sitting with the dice | off duty: an unflagged agent exploring, implementing, at the bow or of unknown phase whose crew state is `paused`, or that has had no transcript activity for 20 minutes without a busy session |
-| A hand's shirt and bandana | its project's colour, in the order of `data/projects.md`; the sails carry one stripe per project aboard |
+| A hand's shirt | its project's colour, in the order of `data/projects.md` (the bandana is a darker shade of it); the sails carry one stripe per project aboard |
+| A hand's neckerchief | its Claude account's colour, in the order of `config/claude-accounts` (an account a worker reports that the list lacks comes after); "Accounts aboard" below the scene names them. A queued hand has no account yet, so its neckerchief is a dark shade of its shirt |
+| A hand's hat | its state: a bandana at work, a straw hat when not working (off duty, or queued on the pier), bare-headed when it waits on the captain, a grey wool cap when its phase is unknown |
 | A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
 | The captain's cabin, in the stern castle | the captain's line: a flagged hand leaves its place and waits here, facing the desk, numbered by how long it has waited, the longest nearest the desk; a scout waits here with its map |
 | The captain | at the desk with a paper and a balloon saying how many wait and who has waited longest; sitting with a mug when nobody waits |
@@ -196,7 +198,9 @@ The tavern's names show only on hover or focus, so a full table stays readable; 
 The ship moves over to make room for the tavern, and the moored scouts and crates move toward the bow past the queue.
 The four stage chips for the pier (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
 A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a sleeper breathes; nothing there looks like progress, and none of it moves when the browser asks for reduced motion.
-Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` and the colours in `hand_palette`, so a new art style replaces those three and nothing else.
+Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` (with `POSE_HEAD`, where each pose puts the head), the hats in `HATS` and the colours in `hand_palette`, so a new art style replaces those and nothing else.
+A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, flags, a rod, a pack, a map, cards, a mug) make some poses wider.
+The captain and firstmate at the helm are drawn on the same scale.
 
 ## Answering the captain's decisions
 

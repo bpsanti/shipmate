@@ -63,7 +63,9 @@
       <p class="sm-faint sm-ship__hint">{{t:Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand, a queued boat or a card in the log for its details.}}</p>
       <div class="sm-key">
         <section><h3 class="fm-sign fm-sign--eyebrow">{{t:Projects aboard}}</h3><ul class="sm-key__projects" id="b-shipprojects">{{SHIPPROJECTS}}</ul>
-          <p class="sm-faint">{{t:A shirt and bandana take the project's colour, and so do the stripes on the sails.}}
+          <h3 class="fm-sign fm-sign--eyebrow">{{t:Accounts aboard}}</h3><ul class="sm-key__projects" id="b-shipaccounts">{{SHIPACCOUNTS}}</ul>
+          <p class="sm-faint">{{t:A shirt takes the project's colour, and so do the stripes on the sails; a neckerchief takes the account's.}}
+          {{t:The hat says how the hand is: a bandana at work, a straw hat off duty or queued ashore, bare-headed before the captain, a grey wool cap when its phase is unknown.}}
           {{t:A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued boat waits on the captain's decision.}}
           {{t:Whoever needs the captain waits in the captain's cabin, and a queued task tied astern, numbered by how long it has waited; the captain attends them at the desk, or sits with a mug when nobody waits.}}
           {{t:Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.}}
@@ -335,6 +337,7 @@
       document.getElementById("b-ship").innerHTML = b.ship;
       document.getElementById("b-shipcounts").textContent = b.counts;
       document.getElementById("b-shipprojects").innerHTML = b.projects;
+      document.getElementById("b-shipaccounts").innerHTML = b.accounts;
       document.getElementById("b-shipstages").innerHTML = b.stages;
       document.getElementById("b-shiplog").innerHTML = b.log;
       ship.bind();

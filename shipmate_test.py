@@ -1050,6 +1050,69 @@ class TestShip(unittest.TestCase):
         for x, feet in spots:
             self.assertTrue(0 <= x < big["width"] and 0 < feet < shipmate.SHIP_H, (x, feet))
 
+    def test_hands_on_one_row_never_stand_on_each_other(self):
+        crowd = ([self.hand("D%02d" % i, 1) for i in range(12)] + [self.hand("R%d" % i, 3) for i in range(6)]
+                 + [self.hand("B%d" % i, 2) for i in range(5)] + [self.hand("N%d" % i, 0) for i in range(6)]
+                 + [self.hand("P%d" % i, 4) for i in range(6)] + [self.hand("U%d" % i, None) for i in range(4)]
+                 + [self.hand("F%d" % i, 1, crew="parked") for i in range(5)])
+        lay = shipmate.ship_layout(shipmate.ship_scene(self.snap(crowd)))
+        rows = {}
+        for k, (x, feet, pose, _upto) in lay["hands"].items():
+            rows.setdefault(feet, []).append((x, x + len(shipmate.POSES[pose][0]), k))
+        for feet, row in rows.items():
+            row.sort()
+            for (_a0, a1, a), (b0, _b1, b) in zip(row, row[1:]):
+                self.assertLessEqual(a1, b0, (feet, a, b))
+
+    def test_every_pose_is_drawn_on_the_hand_grid(self):
+        self.assertEqual((len(shipmate.STAND[0]), len(shipmate.STAND)), (13, 21))
+        self.assertEqual((len(shipmate.HELM[0]), len(shipmate.HELM)), (13, 21))
+        bases = [k for k in shipmate.POSES if not k.endswith("-l")]
+        self.assertEqual(set(bases), set(shipmate.POSE_HEAD))
+        for k in bases:
+            rows = shipmate.POSES[k]
+            self.assertEqual(len({len(r) for r in rows}), 1, k)
+            self.assertEqual(shipmate.POSES[k + "-l"], [r[::-1] for r in rows], k)
+            ox, oy = shipmate.POSE_HEAD[k]
+            self.assertEqual(rows[oy + 3][ox + 3], "h", k)                      # the hair behind the face, where POSE_HEAD says
+        for rows in (shipmate.CAPTAIN_BUSY, shipmate.CAPTAIN_OFF):
+            self.assertEqual(len({len(r) for r in rows}), 1)
+        tip = shipmate.POSES["fish"][shipmate.ROD_TIP[1]][shipmate.ROD_TIP[0]]
+        self.assertEqual(tip, "o")                                              # the line hangs from the rod
+
+    def test_the_hat_follows_the_state(self):
+        hat = shipmate.hand_hat
+        self.assertEqual(hat({"id": "a", "place": "deck"}), "bandana")
+        self.assertEqual(hat({"id": "a", "place": "deck", "off": True}), "straw")
+        self.assertEqual(hat({"id": "a", "place": "pier-cards", "kind": "queue"}), "straw")
+        self.assertEqual(hat({"id": "a", "place": "hatch"}), "wool")
+        self.assertEqual(hat({"id": "a", "place": "deck", "off": True, "flag": True}), "bare")
+        self.assertEqual(hat({"id": "a", "place": "pier-ask", "kind": "queue", "flag": True}), "bare")
+        for pose in ("stand", "hammer", "signal", "doze", "cards-l"):
+            base = pose.split("-")[0]
+            ox, oy = shipmate.POSE_HEAD[base]
+            work = shipmate.hand_rows({"id": "a", "place": "deck"}, pose)
+            off = shipmate.hand_rows({"id": "a", "place": "deck", "off": True}, pose)
+            self.assertEqual(work, shipmate.POSES[pose])
+            head = "".join(off[oy:oy + 5])
+            self.assertNotIn("k", head, pose)
+            self.assertIn("z", head, pose)
+            self.assertEqual(off[oy + 6:], work[oy + 6:], pose)                 # only the head changes
+
+    def test_neckerchief_follows_the_account_list(self):
+        agents = [dict(self.hand("A", 1), account="acct-b"), dict(self.hand("B", 1), account="acct-z"),
+                  dict(self.hand("C", 1), account="acct-b"), self.hand("D", 1)]
+        snap = dict(self.snap(agents, queue=[{"id": "Q", "reasons": [("ready", "r", "r")]}]), accounts=["acct-a", "acct-b"])
+        sc = shipmate.ship_scene(snap)
+        cols = shipmate.ACCOUNT_COLORS
+        self.assertEqual(sc["accounts"], {"acct-b": cols[1], "acct-z": cols[2]})   # acct-a has nobody aboard
+        self.assertEqual({h["id"]: h["neck"] for h in sc["hands"]}, {"A": cols[1], "B": cols[2], "C": cols[1], "D": None})
+        self.assertEqual(shipmate.hand_palette(sc["hands"][0])["n"], cols[1])
+        queued = sc["pier"][0]
+        self.assertEqual(shipmate.hand_palette(queued)["n"], shipmate.dark(queued["color"], 0.55))
+        self.assertNotIn(shipmate.INK["r"], cols)                              # red stays for red flags
+        self.assertIn("acct-b", shipmate.block_ship(snap)["accounts"])
+
     def test_name_tags_never_overlap(self):
         tags = shipmate.Tags()
         boxes = [tags.place("TASK-%d" % i, 100 + 3 * i, 120) for i in range(6)]
@@ -1221,7 +1284,7 @@ class TestShip(unittest.TestCase):
                 self.assertIn(h, page)
             self.assertNotIn("http://", page.replace("http://127.0.0.1", ""))
             st, ship = get("/ship")
-            self.assertEqual(set(json.loads(ship)), {"ship", "counts", "projects", "stages", "log"})
+            self.assertEqual(set(json.loads(ship)), {"ship", "counts", "projects", "accounts", "stages", "log"})
             st, det = get("/detail?id=DEMO-RATE")
             self.assertEqual(st, 200)
             self.assertIn("per user or per key?", det)
