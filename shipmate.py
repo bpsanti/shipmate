@@ -9,16 +9,19 @@ refresh:
   sidebar       today's tokens, firstmate's own session (context against the window,
                 growth, compactions, warning past a threshold) and each Claude
                 account's quota (quota-axi, cached 60 s), tightest first
-  detail drawer read-only facts behind any card: the captain's intent from the brief,
-                phase timeline, latest status lines, PR checks (cached), tokens,
-                context, idle time, report link
+  detail drawer facts behind any card: the captain's intent from the brief, phase
+                timeline, latest status lines, PR checks (cached), tokens, context,
+                idle time, report link; for an item waiting on the captain, a form to
+                answer the decision and the answers sent with firstmate's replies
   usage         tokens per day and per delivered task, folded under the board
   ship view     the same snapshot drawn as one ship, cut away, that zooms and pans: agents
                 as hands whose place on board is their phase (switch with "Ship" in the header)
 
 Read-only over the home, except the add-task form, which runs the same backlog
 command firstmate uses (`bin/fm-tasks-axi.sh add ... --queue`) and then the inbox
-note command (`bin/fm-inbox.sh note`). Standard library only; Python 3.9 or newer.
+note command (`bin/fm-inbox.sh note`), and the answer form, which sends the
+captain's answer with `bin/fm-inbox.sh note --request-id` (and `announce` to
+repair a failed wake). Standard library only; Python 3.9 or newer.
 
 Usage:
   shipmate.py [--home DIR] [--fm-root DIR] [--claude-dir DIR]... [--port N] [--once] [--demo]
@@ -66,6 +69,7 @@ CONTEXT_WINDOWS = (200_000, 1_000_000)   # Claude Code context windows; the tran
 DEFAULT_CONTEXT_WARN = 60                # percent of the window
 CHECKS_TTL = 120                         # PR checks are read from the forge at most this often per PR
 STATUS_TAIL = 8
+DECISION_TEXT = 1000                     # characters of an open decision line kept in the snapshot
 RE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 MAX_BODY = 64 * 1024
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -738,7 +742,8 @@ def open_decisions(status):
     for s in status:
         if s["state"] in ("needs-decision", "blocked"):
             open_ = [o for o in open_ if not (s.get("key") and o.get("key") == s.get("key"))]
-            open_.append({"state": s["state"], "key": s.get("key"), "at": s["at"], "text": s["text"][:240]})
+            # kept whole enough that the ready options a line lists survive for the answer form
+            open_.append({"state": s["state"], "key": s.get("key"), "at": s["at"], "text": s["text"][:DECISION_TEXT]})
         elif s["state"] == "resolved":
             open_ = [o for o in open_ if o.get("key") != s.get("key")]
     return open_
@@ -973,6 +978,219 @@ def delivered(cfg, index, backlog_by_id, now):
     return rows
 
 
+# ---------------------------------------------------------------- the captain's answers
+#
+# A decision that waits on the captain is answered from its drawer. shipmate sends the answer as a
+# note in firstmate's inbox with `bin/fm-inbox.sh note --request-id`, which wakes firstmate and
+# never keeps the same request twice, and reads back with `bin/fm-inbox.sh receipts` whether
+# firstmate took the note and what it replied with `bin/fm-inbox.sh reply`. shipmate never writes
+# the inbox files itself.
+
+ANSWER_PREFIX = "shipmate-answer:"      # an answer's request id: shipmate-answer:<form id>:<task id>
+RE_FORM_ID = re.compile(r"^[A-Za-z0-9_-]{1,10}$")   # short enough that the request id fits fm-inbox's 128
+RECEIPTS_TTL = 10
+MAX_ANSWER = 4000
+ANSWER_MARK = "Answer:"                 # the captain's own words follow this line in the note
+RE_OPTION = re.compile(r"(?:^|(?<=[\s;,:.?!]))\(?([A-Za-z]|[1-9])\)\s+")
+ANSWER_STATES = ("sent", "unwoken", "received", "replied")
+
+
+def decision_options(text):
+    """The ready options a decision line lists as `A) .. B) ..` (also `(a) ..` or `1) ..`): the first
+    run of two or more consecutive labels from A, a or 1, each with its text, the last one ending with
+    its sentence. A line without such a run has no options and is answered in words."""
+    text = text or ""
+    marks = list(RE_OPTION.finditer(text))
+    for i, m in enumerate(marks):
+        if m.group(1) not in ("A", "a", "1"):
+            continue
+        run = [m]
+        for n in marks[i + 1:]:
+            if ord(n.group(1)) == ord(run[-1].group(1)) + 1:
+                run.append(n)
+        if len(run) < 2:
+            continue
+        out = []
+        for j, o in enumerate(run):
+            part = text[o.end():run[j + 1].start() if j + 1 < len(run) else len(text)]
+            if j + 1 == len(run):
+                part = re.split(r"(?<=[.!?])\s", part, 1)[0]
+            part = re.sub(r"(?:[\s;,]|\b(?:or|ou)\b)+$", "", part).rstrip(".").strip()
+            if part:
+                out.append({"label": o.group(1).upper(), "text": part})
+        return out if len(out) >= 2 else []
+    return []
+
+
+def agent_waiting_since(a):
+    """Since when a flagged agent has waited on the captain: its oldest open decision line or, flagged
+    by its crew state alone, since it went quiet."""
+    ats = [d["at"] for d in a.get("decisions") or [] if d.get("at")]
+    return min(ats) if ats else a.get("last_activity")
+
+
+def captain_asks(s, tid):
+    """What the item `tid` waits on the captain for, each one a decision to answer: an agent's open
+    needs-decision and blocked lines (its crew state when it is parked, blocked or failed with no line
+    open), or a queued task's captain hold. None when no card has that id, [] when it waits on nobody."""
+    a = next((x for x in s.get("agents") or [] if x["id"] == tid), None)
+    if a is not None:
+        asks = []
+        for i, d in enumerate(a.get("decisions") or []):
+            ref = d.get("key") or ("at%d" % d["at"] if d.get("at") else "line%d" % i)
+            asks.append({"ref": ref, "kind": "line", "state": d["state"], "key": d.get("key"), "at": d.get("at"),
+                         "text": d["text"], "options": decision_options(d["text"])})
+        if not asks and a.get("crew") in CAPTAIN_STATES:
+            asks.append({"ref": "crew", "kind": "crew", "state": a["crew"], "key": None, "at": a.get("last_activity"),
+                         "text": "", "options": []})
+        return asks
+    q = next((x for x in s.get("queue") or [] if x["id"] == tid), None)
+    if q is None:
+        return None
+    if not any(r[0] == "decision" for r in q.get("reasons") or []):
+        return []
+    text = q.get("hold_reason") or ""
+    return [{"ref": "hold", "kind": "hold", "state": "captain hold", "key": None, "at": q.get("waiting_since"),
+             "text": text, "options": decision_options(text)}]
+
+
+def item_title(s, tid):
+    x = next((x for x in (s.get("agents") or []) + (s.get("queue") or []) if x["id"] == tid), None)
+    return re.sub(r"\s+", " ", (x or {}).get("title") or "").strip() or tid
+
+
+def utc_text(ts):
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts)) if ts else "an unknown time"
+
+
+def answer_note(tid, title, ask, option, words):
+    """The note firstmate receives, in English whatever the page's language: the task and the
+    decision it answers, how to reply, then the captain's answer after an `Answer:` line."""
+    if ask["kind"] == "line":
+        about = "its %s line%s of %s: %s" % (ask["state"], " [key=%s]" % ask["key"] if ask["key"] else "",
+                                            utc_text(ask["at"]), ask["text"])
+    elif ask["kind"] == "crew":
+        about = "its crew state, %s, with no needs-decision or blocked line open" % ask["state"]
+    else:
+        about = "its captain hold: %s" % (ask["text"] or "no reason recorded")
+    answer = []
+    if option:
+        answer.append("%s) %s" % (option["label"], option["text"]))
+    if words:
+        answer.append(words)
+    return "\n".join(["Captain's answer from shipmate on %s (%s)." % (tid, title),
+                      "Decision: %s" % about,
+                      "Reply to the captain with `bin/fm-inbox.sh reply <this note's id> <text>`; shipmate shows it.",
+                      ANSWER_MARK] + answer)
+
+
+def note_words(body):
+    """The captain's own words in an answer note: what follows its `Answer:` line."""
+    head, sep, words = (body or "").partition("\n%s\n" % ANSWER_MARK)
+    return words if sep else body or ""
+
+
+def prepare_answer(s, tid, ref, option, words):
+    """The note for an answer to decision `ref` of item `tid`, checked against the snapshot:
+    {"body": ...} or {"error": ...}."""
+    asks = captain_asks(s, tid)
+    if asks is None:
+        return {"error": tr("this item is no longer on the board")}
+    ask = next((x for x in asks if x["ref"] == ref), None)
+    if ask is None:
+        return {"error": tr("this decision is no longer open; reopen the drawer")}
+    chosen = None
+    if option:
+        chosen = next((o for o in ask["options"] if o["label"] == option), None)
+        if chosen is None:
+            return {"error": tr("that option is not on this decision")}
+    if not chosen and not words:
+        return {"error": tr("pick an option or write an answer")}
+    if len(words) > MAX_ANSWER:
+        return {"error": tr("the answer is longer than %d characters") % MAX_ANSWER}
+    return {"body": answer_note(tid, item_title(s, tid), ask, chosen, words)}
+
+
+def answer_request_id(form_id, tid):
+    return "%s%s:%s" % (ANSWER_PREFIX, form_id, tid)
+
+
+def answers_from_receipts(doc):
+    """The captain's answers sent from shipmate, by task and oldest first, out of the receipts JSON,
+    each with what became of it: sent, unwoken (saved but firstmate was not woken), received
+    (firstmate took it from its inbox) or replied."""
+    by = {}
+    for n in (doc.get("pending") or []) + (doc.get("handled") or []):
+        rid = n.get("request_id") or ""
+        if not rid.startswith(ANSWER_PREFIX):
+            continue
+        tid = rid[len(ANSWER_PREFIX):].partition(":")[2]
+        if not valid_id(tid):
+            continue
+        reply = n.get("reply") or None
+        state = ("replied" if reply else "received" if n.get("acknowledged")
+                 else "unwoken" if n.get("announced") is False else "sent")
+        by.setdefault(tid, []).append({
+            "note": n.get("id") or "", "at": parse_ts(n.get("at")), "words": note_words(n.get("body")), "state": state,
+            "reply": {"at": parse_ts(reply.get("at")), "text": reply.get("body") or ""} if reply else None})
+    for rows in by.values():
+        rows.sort(key=lambda x: (x["at"] or 0, x["note"]))
+    return by
+
+
+def read_answers(cfg):
+    """(answers by task, error): every pending and handled note, since an answer's state must not
+    drop out of a bounded page while its decision is still open."""
+    rc, out, err = run([cfg.bin("fm-inbox.sh"), "receipts", "--all-pending", "--all-handled"], env=cfg.env())
+    if rc != 0:
+        return {}, (err or out).strip()[:300] or "exit %d" % rc
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        return {}, tr("the inbox receipts are not JSON")
+    return (answers_from_receipts(doc), None) if isinstance(doc, dict) else ({}, tr("the inbox receipts are not JSON"))
+
+
+class ReceiptsCache:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.at = 0.0
+        self.val = ({}, None)
+
+    def get(self, cfg):
+        with self.lock:
+            if time.time() - self.at > RECEIPTS_TTL:
+                self.val, self.at = read_answers(cfg), time.time()
+            return self.val
+
+    def drop(self):
+        with self.lock:
+            self.at = 0.0
+
+
+def live_answer(answers, since):
+    """The latest answer sent since the item began to wait on the captain, or None: an answer to an
+    earlier decision says nothing about the one open now."""
+    fresh = [x for x in answers or [] if since is None or (x["at"] or 0) >= since]
+    return fresh[-1] if fresh else None
+
+
+def answer_marks(s):
+    """The state of the live answer of every item that waits on the captain, by id."""
+    answers, marks = s.get("answers") or {}, {}
+    for a in s.get("agents") or []:
+        if a["id"] in answers and captain_reasons(a):
+            x = live_answer(answers[a["id"]], agent_waiting_since(a))
+            if x:
+                marks[a["id"]] = x["state"]
+    for q in s.get("queue") or []:
+        if q["id"] in answers and any(r[0] == "decision" for r in q.get("reasons") or []):
+            x = live_answer(answers[q["id"]], q.get("waiting_since"))
+            if x:
+                marks[q["id"]] = x["state"]
+    return marks
+
+
 # ---------------------------------------------------------------- detail readers (read only)
 
 
@@ -1075,6 +1293,7 @@ class Panel:
         self.token = secrets.token_urlsafe(32)   # per server run: a page from elsewhere cannot know it
         self.requests = {}                       # form request id -> result: a resubmitted form never queues twice
         self.checks = ChecksCache()
+        self.inbox = ReceiptsCache()
         self.last = None                         # latest snapshot, reused by the detail view while fresh
 
     def snapshot(self):
@@ -1094,6 +1313,7 @@ class Panel:
                 "delivered": delivered(self.cfg, self.index, by_id, now),
                 "machine": machine_load(),
             }
+            snap["answers"], snap["answers_error"] = self.inbox.get(self.cfg)
             snap["quota"] = quota.result()
             self.last = snap
             return snap
@@ -1110,19 +1330,51 @@ class Panel:
             return None
         snap = self.recent()
         now = time.time()
+        answers, answers_err = self.inbox.get(self.cfg)       # fresher than the snapshot right after a send
+        answer = answer_section(tid, captain_asks(snap, tid) or [], answers.get(tid, []), self.token, now, answers_err)
         agent = next((a for a in snap["agents"] if a["id"] == tid), None)
         if agent is not None:
             status = read_status(os.path.join(self.cfg.home, "state", tid + ".status"))[-STATUS_TAIL:]
             checks = self.checks.get(self.cfg, agent["pr"]) if agent["pr"] else None
             return render_agent_detail(agent, captain_intent(self.cfg.home, tid), status, checks,
-                                       report_files(self.cfg.home, tid), now)
+                                       report_files(self.cfg.home, tid), now, answer)
         item = next((q for q in snap["queue"] if q["id"] == tid), None)
         if item is not None:
             rc, out, _err = run([self.cfg.bin("fm-tasks-axi.sh"), "show", tid, "--full"], env=self.cfg.env())
             full = parse_show(out) if rc == 0 else {}
             return render_queue_detail(item, full, captain_intent(self.cfg.home, tid),
-                                       report_files(self.cfg.home, tid), now)
+                                       report_files(self.cfg.home, tid), now, answer)
         return None
+
+    def answer(self, tid, ref, option, words, form_id):
+        """Sends the captain's answer to one waiting decision as an inbox note. The request id comes
+        from the form, so sending the same form again (a double click, a retry after an error) gives
+        back the note it already made instead of a second one."""
+        prep = prepare_answer(self.recent(), tid, ref, option, words)
+        if "error" in prep:
+            return {"ok": False, "error": prep["error"]}
+        rc, out, err = run([self.cfg.bin("fm-inbox.sh"), "note", "--request-id", answer_request_id(form_id, tid),
+                            "--json", "--", prep["body"]], env=self.cfg.env(), timeout=60)
+        self.inbox.drop()
+        try:
+            res = json.loads(out)
+        except ValueError:
+            res = None
+        if not isinstance(res, dict) or rc not in (0, 3) or not res.get("saved"):
+            return {"ok": False, "error": tr("the inbox refused it: %s") % ((err or out).strip()[:300] or "exit %d" % rc)}
+        state = "received" if res.get("acknowledged") else "sent" if rc == 0 else "unwoken"
+        return {"ok": True, "state": state, "note": res.get("id"), "message": answer_message(state)}
+
+    def announce(self, note_id):
+        """Wakes firstmate for an answer saved without its wake; only a note shipmate sent as an answer."""
+        answers, _err = self.inbox.get(self.cfg)
+        if not any(x["note"] == note_id for rows in answers.values() for x in rows):
+            return {"ok": False, "error": tr("no answer from shipmate has that note id")}
+        rc, out, err = run([self.cfg.bin("fm-inbox.sh"), "announce", "--json", note_id], env=self.cfg.env(), timeout=60)
+        self.inbox.drop()
+        if rc != 0:
+            return {"ok": False, "error": tr("firstmate was not woken: %s") % ((err or out).strip()[:300] or "exit %d" % rc)}
+        return {"ok": True, "message": tr("Firstmate was woken.")}
 
     def add_task(self, title, project, text, request_id):
         with self.lock:
@@ -1333,6 +1585,42 @@ PT_BR.update({
     "+%d more below": "+%d abaixo", "Loading…": "Carregando…", "Add a task": "Adicionar tarefa",
     "This item is no longer on the board.": "Este item não está mais no quadro.",
 })
+# the captain's answers
+PT_BR.update({
+    "this item is no longer on the board": "este item não está mais no quadro",
+    "this decision is no longer open; reopen the drawer": "esta decisão não está mais aberta; reabra a gaveta",
+    "that option is not on this decision": "essa opção não é desta decisão",
+    "pick an option or write an answer": "escolha uma opção ou escreva uma resposta",
+    "the answer is longer than %d characters": "a resposta passa de %d caracteres",
+    "the inbox receipts are not JSON": "os recibos da caixa de entrada não são JSON",
+    "the inbox refused it: %s": "a caixa de entrada recusou: %s",
+    "no answer from shipmate has that note id": "nenhuma resposta do shipmate tem esse id de bilhete",
+    "firstmate was not woken: %s": "o firstmate não foi acordado: %s", "Firstmate was woken.": "O firstmate foi acordado.",
+    "sent": "enviado", "not woken": "sem aviso", "received": "recebido", "replied": "respondido",
+    "no needs-decision or blocked line is open": "nenhuma linha needs-decision ou blocked aberta",
+    "waiting since %s": "esperando desde %s", "Ready options": "Opções prontas", "Your answer": "Sua resposta",
+    "Add your own words (optional when you pick an option)": "Complemente com suas palavras (opcional quando escolhe uma opção)",
+    "Write your answer": "Escreva sua resposta",
+    "Goes to firstmate as a note that names %s and this decision.": "Vai para o firstmate como bilhete que nomeia %s e esta decisão.",
+    "Send to firstmate": "Enviar ao firstmate", "firstmate · %s": "firstmate · %s", "you · %s": "você · %s",
+    "Saved, but firstmate was not woken.": "Gravado, mas o firstmate não foi acordado.", "Wake firstmate": "Acordar o firstmate",
+    "Firstmate took it from its inbox and has not replied yet.": "O firstmate tirou da caixa de entrada e ainda não respondeu.",
+    "Waiting for firstmate to take it from its inbox.": "Esperando o firstmate tirar da caixa de entrada.",
+    "Answers sent": "Respostas enviadas", "Answers unavailable: %s": "Respostas indisponíveis: %s",
+    "Firstmate acts on your answer under its usual rules: a merge or a destructive action still needs your explicit word on that PR.":
+        "O firstmate age sobre a sua resposta com as regras de sempre: um merge ou uma ação destrutiva ainda precisa da sua "
+        "palavra explícita sobre aquela PR.",
+    "this form has no request id; reopen the drawer": "este formulário não tem id de envio; reabra a gaveta",
+    "Demo: the answer stays on this page; nothing reached firstmate.": "Demo: a resposta fica só nesta página; nada chegou ao firstmate.",
+    "this is the demo: firstmate is not here": "isto é a demo: o firstmate não está aqui",
+    "Sent: firstmate was woken and will read it at its next check.": "Enviado: o firstmate foi acordado e lê na próxima verificação.",
+    "Saved, but firstmate was not woken; wake it from the answer below.":
+        "Gravado, mas o firstmate não foi acordado; acorde-o pela resposta abaixo.",
+    "Firstmate already has this answer.": "O firstmate já tem esta resposta.",
+    "Sending…": "Enviando…", "Not sent: %s": "Não enviado: %s", "Waking firstmate…": "Acordando o firstmate…",
+    "Not sent: shipmate could not be reached. Try again: the same answer is never sent twice.":
+        "Não enviado: o shipmate não respondeu. Tente de novo: a mesma resposta nunca vai duas vezes.",
+})
 RE_PHRASE = re.compile(r"\{\{([tj]):(.+?)\}\}")
 
 
@@ -1522,7 +1810,7 @@ def lane_of(a):
     return a["phase"] if a["kind"] != "scout" else {0: 0, 1: 1, 2: 4}[a["phase"]]
 
 
-def agent_card(a, now):
+def agent_card(a, now, mark=None):
     tok = a["tokens"]
     meta = " · ".join(x for x in (a["project"], a["model"], a["account"]) if x)
     since = (tr("for %s") % fmt_dur(now - a["phase_since"])) if a["phase_since"] else tr("phase start unknown")
@@ -1530,32 +1818,34 @@ def agent_card(a, now):
     title = a["title"] or a["id"]
     return ('<article class="sm-card" data-id="%s" tabindex="0" role="button" aria-label="%s">'
             '<div class="sm-card__top"><span class="sm-id">%s</span>%s</div>'
-            '<div class="sm-card__title" title="%s">%s</div>'
+            '<div class="sm-card__title" title="%s">%s</div>%s'
             '<div class="sm-card__line" title="%s">%s</div>'
             '<div class="sm-card__line">%s%s</div>'
             '<div class="sm-card__line sm-mono">%s</div></article>'
             % (esc(a["id"]), esc(tr("%s: details") % a["id"]), esc(a["id"]), badge(tr(a["crew"]), CREW_TONE.get(a["crew"], "neutral")),
-               esc(title), esc(title), esc(meta), esc(meta), esc(since),
+               esc(title), esc(title), '<div class="sm-card__ans">%s</div>' % answer_pill(mark) if mark else "", esc(meta), esc(meta), esc(since),
                (" · " + link(a["pr"], pr_text(a["pr"]))) if a["pr"] else "", esc(toks)))
 
 
-def queue_card(q):
+def queue_card(q, mark=None):
     reasons = " ".join(badge(short, REASON_TONE.get(k, "neutral"), full) for k, short, full in q["reasons"])
+    if mark:
+        reasons += " " + answer_pill(mark)
     return ('<article class="sm-card sm-card--queue" data-id="%s" tabindex="0" role="button" aria-label="%s">'
             '<div class="sm-card__top"><span class="sm-id">%s</span><span class="sm-faint sm-card__repo">%s</span></div>'
             '<div class="sm-card__title" title="%s">%s</div><div class="sm-reasons">%s</div></article>'
             % (esc(q["id"]), esc(tr("%s: details") % q["id"]), esc(q["id"]), esc(q["repo"]), esc(q["title"]), esc(q["title"]), reasons))
 
 
-def block_board(agents, queue, err, now):
+def block_board(agents, queue, err, now, marks=None):
     """Queue lane, then one lane per phase. A phase with no card shrinks to a labelled strip so
     the lanes with work get the width, and keeps its place so the order never changes."""
     lanes = [[] for _ in LANE_NAMES]
     unknown = []
     for a in agents:
         i = lane_of(a)
-        (unknown if i is None else lanes[i]).append(agent_card(a, now))
-    spec = [(tr("Queue"), [queue_card(q) for q in queue], True)] + [(tr(n), c, False) for n, c in zip(LANE_NAMES, lanes)]
+        (unknown if i is None else lanes[i]).append(agent_card(a, now, (marks or {}).get(a["id"])))
+    spec = [(tr("Queue"), [queue_card(q, (marks or {}).get(q["id"])) for q in queue], True)] + [(tr(n), c, False) for n, c in zip(LANE_NAMES, lanes)]
     if unknown:
         spec.append((tr("phase unknown"), unknown, False))
     cols, html_lanes = [], []
@@ -1642,11 +1932,89 @@ def status_lines(status):
     return '<ol class="sm-status">%s</ol>' % "".join(rows)
 
 
+ANSWER_PILLS = {"sent": ("✉", "sent"), "unwoken": ("!", "not woken"), "received": ("✓", "received"), "replied": ("↩", "replied")}
+
+
+def answer_pill(state):
+    mark, label = ANSWER_PILLS[state]
+    return '<span class="sm-ans sm-ans--%s">%s %s</span>' % (state, mark, esc(tr(label)))
+
+
+ANSWER_MESSAGES = {"sent": "Sent: firstmate was woken and will read it at its next check.",
+                   "unwoken": "Saved, but firstmate was not woken; wake it from the answer below.",
+                   "received": "Firstmate already has this answer."}
+
+
+def answer_message(state):
+    return tr(ANSWER_MESSAGES[state])
+
+
+def ask_head(ask, now):
+    """The small line above a decision in the answer form: what kind of wait, its key, since when."""
+    if ask["kind"] == "line":
+        bits = [ask["state"]] + ([ask["key"]] if ask["key"] else []) + [fmt_when(ask["at"], now) if ask["at"] else tr("time unknown")]
+    elif ask["kind"] == "crew":
+        bits = [tr("crew is %s") % tr(ask["state"]), tr("no needs-decision or blocked line is open")]
+    else:
+        bits = [tr("captain's decision"), tr("waiting since %s") % fmt_when(ask["at"], now) if ask["at"] else tr("time unknown")]
+    return " · ".join(bits)
+
+
+def answer_form(tid, ask, now):
+    opts = ""
+    if ask["options"]:
+        opts = '<div class="sm-opts" role="radiogroup" aria-label="%s">%s</div>' % (esc(tr("Ready options")), "".join(
+            '<label class="sm-opt" title="%s"><input type="radio" name="option" value="%s"><b>%s)</b> <span>%s</span></label>'
+            % (esc(o["text"]), esc(o["label"]), esc(o["label"]), esc(o["text"])) for o in ask["options"]))
+    return ('<form class="sm-answer__form" method="post" action="/answer" data-answer data-ref="%s">'
+            '<input type="hidden" name="request" value="%s"><input type="hidden" name="task" value="%s">'
+            '<input type="hidden" name="ref" value="%s">'
+            '<div class="sm-ask"><small>%s</small>%s</div>%s'
+            '<textarea name="text" rows="3" maxlength="%d" aria-label="%s" placeholder="%s"></textarea>'
+            '<div class="sm-answer__foot"><span class="sm-faint">%s</span>'
+            '<button class="fm-btn fm-btn--sm fm-btn--primary" type="submit">%s</button></div>'
+            '<p class="sm-answer__msg" role="status" aria-live="polite"></p></form>'
+            % (esc(ask["ref"]), esc(secrets.token_urlsafe(8)[:10]), esc(tid), esc(ask["ref"]), esc(ask_head(ask, now)),
+               '<span>%s</span>' % esc(ask["text"]) if ask["text"] else "", opts, MAX_ANSWER, esc(tr("Your answer")),
+               esc(tr("Add your own words (optional when you pick an option)") if ask["options"] else tr("Write your answer")),
+               esc(tr("Goes to firstmate as a note that names %s and this decision.") % tid), esc(tr("Send to firstmate"))))
+
+
+def answer_thread(answers, now):
+    rows = []
+    for x in answers:
+        if x["state"] == "replied":
+            after = ('<div class="sm-thread__fm"><b>%s</b><blockquote>%s</blockquote></div>'
+                     % (esc(tr("firstmate · %s") % fmt_when(x["reply"]["at"], now)), esc(x["reply"]["text"])))
+        elif x["state"] == "unwoken":
+            after = ('<div class="sm-thread__warn">%s <button type="button" class="sm-linkbtn" data-announce="%s">%s</button></div>'
+                     % (esc(tr("Saved, but firstmate was not woken.")), esc(x["note"]), esc(tr("Wake firstmate"))))
+        elif x["state"] == "received":
+            after = '<div class="sm-faint">%s</div>' % esc(tr("Firstmate took it from its inbox and has not replied yet."))
+        else:
+            after = '<div class="sm-faint">%s</div>' % esc(tr("Waiting for firstmate to take it from its inbox."))
+        rows.append('<li><div class="sm-thread__head"><b>%s</b>%s</div><blockquote>%s</blockquote>%s</li>'
+                    % (esc(tr("you · %s") % fmt_when(x["at"], now)), answer_pill(x["state"]), esc(x["words"]), after))
+    return '<ol class="sm-thread" aria-label="%s">%s</ol>' % (esc(tr("Answers sent")), "".join(rows)) if rows else ""
+
+
+def answer_section(tid, asks, answers, token, now, err=None):
+    """The top of a drawer whose item waits on the captain, or that the captain has answered: one
+    form per open decision, then every answer sent about the item and what became of it."""
+    if not asks and not answers:
+        return ""
+    return ('<section class="sm-answer" data-token="%s" aria-label="%s"><h3>%s</h3>%s%s%s<p class="sm-faint sm-answer__rule">%s</p></section>'
+            % (esc(token), esc(tr("Your answer")), esc(tr("Your answer")), "".join(answer_form(tid, a, now) for a in asks),
+               answer_thread(answers, now),
+               '<p class="sm-faint">%s</p>' % esc(tr("Answers unavailable: %s") % err) if err else "",
+               esc(tr("Firstmate acts on your answer under its usual rules: a merge or a destructive action still needs your explicit word on that PR."))))
+
+
 def pre(text, empty):
     return ('<div class="sm-pre">%s</div>' % esc(text)) if text else '<div class="sm-faint">%s</div>' % esc(empty)
 
 
-def render_agent_detail(a, intent, status, checks, reports, now):
+def render_agent_detail(a, intent, status, checks, reports, now, answer=""):
     tok = a["tokens"]
     model = a["model"] or "?"
     if a["model_seen"]:
@@ -1661,14 +2029,14 @@ def render_agent_detail(a, intent, status, checks, reports, now):
     idle = (tr("last action %s ago") % fmt_dur(now - a["last_activity"])) if a["last_activity"] else tr("unknown")
     phase = tr(a["phases"][a["phase"]]) if a["phase"] is not None else tr("unknown")
     return (
-        '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>'
+        '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>%s'
         '<div class="sm-facts">%s</div>'
         '<h3>%s</h3>%s<div class="sm-faint">%s</div>'
         '<h3>%s</h3><div>%s</div>'
         '<h3>%s</h3><div>%s</div>'
         '<h3>%s</h3>%s'
         '<h3>%s</h3>%s'
-        % (esc(a["id"]), badge(tr(a["crew"]), CREW_TONE.get(a["crew"], "neutral")), esc(a["title"] or a["id"]),
+        % (esc(a["id"]), badge(tr(a["crew"]), CREW_TONE.get(a["crew"], "neutral")), esc(a["title"] or a["id"]), answer,
            "".join([fact(tr("Project"), esc(a["project"] or "?")), fact(tr("Kind"), esc(a["kind"])), fact(tr("Model"), esc(model)),
                     fact(tr("Effort"), esc(a["effort"] or "?")), fact(tr("Account"), esc(a["account"])),
                     fact(tr("Harness"), esc(a["harness"])), fact(tr("Started"), esc(fmt_when(a["spawn"], now))),
@@ -1683,15 +2051,15 @@ def render_agent_detail(a, intent, status, checks, reports, now):
            esc(tr("Latest status lines")), status_lines(status)))
 
 
-def render_queue_detail(q, full, intent, reports, now):
+def render_queue_detail(q, full, intent, reports, now, answer=""):
     reasons = "".join('<li>%s%s</li>' % (badge(short, REASON_TONE.get(k, "neutral")),
                                          (" <span>%s</span>" % esc(long_)) if long_ != short else "")
                       for k, short, long_ in q["reasons"])
     return (
-        '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>'
+        '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>%s'
         '<div class="sm-facts">%s</div><h3>%s</h3><ul class="sm-reasonlist">%s</ul>'
         '<h3>%s</h3>%s%s<h3>%s</h3><div>%s</div>'
-        % (esc(q["id"]), badge(tr("queued"), "info"), esc(full.get("title") or q["title"]),
+        % (esc(q["id"]), badge(tr("queued"), "info"), esc(full.get("title") or q["title"]), answer,
            "".join([fact(tr("Project"), esc(q["repo"] or "?")), fact(tr("Kind"), esc(q["kind"] or tr("not set"))),
                     fact(tr("Since"), esc(fmt_date_iso(q["created"]) if q["created"] else "?")),
                     fact(tr("Priority"), esc(full.get("priority") or "-")), fact(tr("Depends on"), esc(full.get("deps") or tr("none")))]),
@@ -1791,7 +2159,7 @@ def block_usage(daily, deliv):
 
 def render_blocks(s):
     return {
-        "board": block_board(s["agents"], s["queue"], s["backlog_error"], s["now"]),
+        "board": block_board(s["agents"], s["queue"], s["backlog_error"], s["now"], answer_marks(s)),
         "today": block_today(s["daily"]),
         "firstmate": block_firstmate(s.get("firstmate"), s["now"]),
         "accounts": block_accounts(s["quota"], s["now"]),
@@ -1971,10 +2339,7 @@ def ship_scene(s):
              "color": colors.get(a.get("project") or "", "#8a8a8a"), "kind": "scout" if scout else "hand",
              "phase": tr(phases[ph] if ph is not None and ph < len(phases) else "unknown")}
         h["off"] = off_duty(a, place, h["flag"], now)
-        # a flagged hand waits since its oldest open decision line; flagged by its crew state
-        # alone, since it went quiet
-        ats = [d["at"] for d in a.get("decisions") or [] if d.get("at")]
-        h["since"] = (min(ats) if ats else a.get("last_activity")) if h["flag"] else None
+        h["since"] = agent_waiting_since(a) if h["flag"] else None
         h["exact"] = True
         (scouts if scout else hands).append(h)
     order = {p: i for i, p in enumerate(PLACES + ["hatch"])}
@@ -2000,8 +2365,10 @@ def ship_scene(s):
     for x in hands + scouts + queue:
         x["line"], x["wait"] = 0, None
     line = captain_line(hands + scouts, queue)
+    marks = answer_marks(s)
     for i, x in enumerate(line):
         x["line"], x["wait"] = i + 1, wait_text(x["since"], now, x["exact"])
+        x["answer"] = marks.get(x["id"])
         x["tag"] = "%d · %s · %s" % (x["line"], x["id"], x["wait"])
     return {
         "line": line, "captain": {"busy": bool(line), "waiting": len(line), "oldest": line[0] if line else None},
@@ -2977,8 +3344,9 @@ def captain_log(sc):
                 said = x["why"][1:] if x["crew"] in CAPTAIN_STATES else x["why"]      # the open line says more than the crew state
                 icon, what, why = pose_icon(pose, 2, x["color"]), "%s, %s" % (x["phase"], x["project"] or tr("no project")), (said or x["why"])[0]
             cards.append('<button type="button" class="sm-logcard" data-id="%s" title="%s"><span class="sm-logcard__n">%d</span>%s'
-                         '<span class="sm-logcard__body"><b>%s</b><span>%s</span><em>%s</em></span><span class="sm-logcard__wait">%s</span></button>'
-                         % (esc(x["id"]), esc("%s: %s" % (x["id"], why)), x["line"], icon, esc(x["id"]), esc(what), esc(why), esc(x["wait"])))
+                         '<span class="sm-logcard__body"><b>%s</b><span>%s</span><em>%s</em></span><span class="sm-logcard__wait">%s</span>%s</button>'
+                         % (esc(x["id"]), esc("%s: %s" % (x["id"], why)), x["line"], icon, esc(x["id"]), esc(what), esc(why), esc(x["wait"]),
+                            '<span class="sm-logcard__ans">%s</span>' % answer_pill(x["answer"]) if x.get("answer") else ""))
         body = "".join(cards)
     else:
         say, body = tr("All clear. Nothing waits on my word."), '<span class="sm-log__none">%s</span>' % esc(tr("Nobody is waiting for you."))
@@ -3021,7 +3389,7 @@ def demo_snapshot(now=None):
         agent("DEMO-SEARCH", "Find where the search index drifts", "harbor-api", 0),
         agent("DEMO-AUTH", "Rotate session tokens on login", "harbor-api", 1),
         agent("DEMO-RATE", "Rate limit the public endpoints", "harbor-api", 1, crew="parked",
-              decisions=[("needs-decision", "limits", "per user or per key?", 50 * 60)]),
+              decisions=[("needs-decision", "limits", "per user or per key? A) per user B) per key", 50 * 60)]),
         agent("DEMO-CACHE", "Cache the tide tables", "harbor-api", 2),
         agent("DEMO-LOGS", "Structured logs for the workers", "harbor-api", 3),
         agent("DEMO-I18N", "Translate the settings page", "harbor-api", 4, crew="done"),
@@ -3096,6 +3464,15 @@ def demo_snapshot(now=None):
                             lane("account-b", 41, 50, "through_reset"),
                             lane("ordinary", 86, 90, "through_reset")], "at": None, "error": None},
         "machine": {"load": 6.0, "cpus": 8},
+        # the captain has answered two of the decisions: firstmate replied to one and has read the other
+        "answers": {
+            "DEMO-Q-BILL": [{"note": "demo-1", "at": now - 20 * 60, "state": "replied",
+                             "words": "Plan B first; plan A after the holidays.",
+                             "reply": {"at": now - 12 * 60, "text": "Released DEMO-Q-BILL with plan B; plan A stays queued with a date."}}],
+            "DEMO-EXPORT": [{"note": "demo-2", "at": now - 8 * 60, "state": "received",
+                             "words": "I gave the worker write access to the bucket; try again.", "reply": None}],
+        },
+        "answers_error": None,
     }
 
 
@@ -3109,22 +3486,43 @@ class DemoPanel:
         self.cfg = argparse.Namespace(port=port, home=os.devnull)   # no report file can exist under it
         self.token = secrets.token_urlsafe(32)
         self.last = None
+        self.sent = {}                       # answers sent on this page, kept here only: task id -> rows
 
     def snapshot(self):
-        self.last = demo_snapshot()
-        return self.last
+        snap = demo_snapshot()
+        for tid, rows in self.sent.items():
+            snap["answers"].setdefault(tid, []).extend(rows)
+        self.last = snap
+        return snap
 
     def recent(self):
         return self.last if self.last and time.time() - self.last["now"] < REFRESH_SECONDS else self.snapshot()
 
     def detail(self, tid):
         snap, now = self.recent(), time.time()
+        answer = answer_section(tid, captain_asks(snap, tid) or [], snap["answers"].get(tid, []), self.token, now)
         a = next((x for x in snap["agents"] if x["id"] == tid), None)
         if a is not None:
             status = [{"state": d["state"], "at": d["at"], "key": d["key"], "text": d["text"]} for d in a["decisions"]]
-            return render_agent_detail(a, "A made-up task for the demo.", status, None, [], now)
+            return render_agent_detail(a, "A made-up task for the demo.", status, None, [], now, answer)
         q = next((x for x in snap["queue"] if x["id"] == tid), None)
-        return render_queue_detail(q, {}, None, [], now) if q is not None else None
+        return render_queue_detail(q, {}, None, [], now, answer) if q is not None else None
+
+    def answer(self, tid, ref, option, words, form_id):
+        prep = prepare_answer(self.recent(), tid, ref, option, words)
+        if "error" in prep:
+            return {"ok": False, "error": prep["error"]}
+        rows = self.sent.setdefault(tid, [])
+        rid = answer_request_id(form_id, tid)
+        if not any(x["request"] == rid for x in rows):          # the same form sent again is the same answer
+            rows.append({"note": "demo-sent-%d" % (sum(map(len, self.sent.values())) + 1), "request": rid, "at": time.time(),
+                         "state": "sent", "words": note_words(prep["body"]), "reply": None})
+        self.last = None
+        return {"ok": True, "state": "sent", "note": rows[-1]["note"],
+                "message": tr("Demo: the answer stays on this page; nothing reached firstmate.")}
+
+    def announce(self, note_id):
+        return {"ok": False, "error": tr("this is the demo: firstmate is not here")}
 
     def add_task(self, title, project, text, request_id):
         return {"ok": False, "error": tr("this is the demo: nothing was queued")}
@@ -3210,7 +3608,8 @@ def make_handler(panel):
                 return self.send(403, "forbidden")
             if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
                 return self.send(403, "forbidden")
-            if urllib.parse.urlsplit(self.path).path != "/task":
+            path = urllib.parse.urlsplit(self.path).path
+            if path not in ("/task", "/answer", "/announce"):
                 return self.send(404, "not found")
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -3222,6 +3621,18 @@ def make_handler(panel):
             get = lambda k: (form.get(k) or [""])[0]
             if not hmac.compare_digest(get("token").encode(), panel.token.encode()):
                 return self.send(403, "invalid token: reload the page")
+            if path == "/answer":
+                if not RE_FORM_ID.match(get("request")):
+                    res = {"ok": False, "error": tr("this form has no request id; reopen the drawer")}
+                else:
+                    res = panel.answer(get("task"), get("ref"), get("option").strip(),
+                                       get("text").replace("\r\n", "\n").strip(), get("request"))
+                return self.send(200, json.dumps(res), "application/json")
+            if path == "/announce":
+                note = get("note")
+                res = (panel.announce(note) if re.match(r"^[A-Za-z0-9._-]{1,128}$", note) and ".." not in note
+                       else {"ok": False, "error": tr("no answer from shipmate has that note id")})
+                return self.send(200, json.dumps(res), "application/json")
             title = re.sub(r"\s+", " ", get("title")).strip()[:200]
             project = get("project").strip()
             text = get("text").replace("\r\n", "\n").strip()[:5000]

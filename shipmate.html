@@ -398,8 +398,88 @@
       if (r.status === 404) return '<div class="sm-empty">' + {{j:This item is no longer on the board.}} + '</div>';
       if (!r.ok) throw new Error(String(r.status));
       return r.text();
-    }).then(function (h) { if (openId === id) detail.innerHTML = h; }).catch(function () {});
+    }).then(function (h) { if (openId === id) refill(h); }).catch(function () {});
   }
+
+  // the captain's answer, in the drawer of a decision that waits on the captain. The 30 s refresh
+  // redraws the drawer; an answer being written keeps its words, its choice and its focus through it.
+  function dirty(f) {
+    return !f.hasAttribute("data-sent") && (f.contains(document.activeElement) ||
+      f.querySelector("textarea").value.trim() !== "" || !!f.querySelector("input[name=option]:checked"));
+  }
+  function refill(h) {
+    var keep = [].filter.call(detail.querySelectorAll("form[data-answer]"), dirty);
+    if (!keep.length) { detail.innerHTML = h; return; }
+    var box = document.createElement("div");
+    box.innerHTML = h;
+    var spots = keep.map(function (f) {
+      return [].filter.call(box.querySelectorAll("form[data-answer]"), function (n) {
+        return n.getAttribute("data-ref") === f.getAttribute("data-ref");
+      })[0];
+    });
+    if (spots.indexOf(undefined) >= 0) return;   // that decision closed while being answered: keep the words on screen
+    var act = document.activeElement, sel = act && act.tagName === "TEXTAREA" ? [act.selectionStart, act.selectionEnd] : null;
+    spots.forEach(function (n, i) { n.replaceWith(keep[i]); });
+    detail.innerHTML = "";
+    while (box.firstChild) detail.appendChild(box.firstChild);
+    if (act && detail.contains(act)) {
+      act.focus();
+      if (sel) act.setSelectionRange(sel[0], sel[1]);
+    }
+  }
+  function post(path, data) {
+    return fetch(path, { method: "POST", body: new URLSearchParams(data), cache: "no-store" }).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: r.status + " " + r.statusText }; });
+    });
+  }
+  function token(el) { return el.closest(".sm-answer").getAttribute("data-token"); }
+  detail.addEventListener("submit", function (e) {
+    var f = e.target.closest("form[data-answer]");
+    if (!f) return;
+    e.preventDefault();
+    var btn = f.querySelector("button[type=submit]"), msg = f.querySelector(".sm-answer__msg");
+    if (btn.disabled) return;
+    var data = new FormData(f);
+    data.append("token", token(f));
+    btn.disabled = true;
+    msg.className = "sm-answer__msg";
+    msg.textContent = {{j:Sending…}};
+    post("/answer", data).then(function (res) {
+      msg.textContent = res.ok ? res.message : {{j:Not sent: %s}}.replace("%s", res.error || "?");
+      msg.classList.add(res.ok ? "is-ok" : "is-err");
+      if (!res.ok) { btn.disabled = false; return; }
+      f.setAttribute("data-sent", "");
+      tick();
+    }).catch(function () {
+      // the form keeps its request id, so sending it again can never make a second note
+      msg.textContent = {{j:Not sent: shipmate could not be reached. Try again: the same answer is never sent twice.}};
+      msg.classList.add("is-err");
+      btn.disabled = false;
+    });
+  });
+  detail.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-announce]");
+    if (!b || b.disabled) return;
+    var data = new FormData();
+    data.append("token", token(b));
+    data.append("note", b.getAttribute("data-announce"));
+    b.disabled = true;
+    b.textContent = {{j:Waking firstmate…}};
+    post("/announce", data).then(function (res) {
+      if (res.ok) { tick(); return; }
+      b.disabled = false;
+      b.textContent = {{j:Not sent: %s}}.replace("%s", res.error || "?");
+    }).catch(function () { b.disabled = false; });
+  });
+  // a ready option is a radio button that a second click lets go of
+  detail.addEventListener("pointerdown", function (e) {
+    var l = e.target.closest && e.target.closest(".sm-opt");
+    if (l) { var i = l.querySelector("input"); i.setAttribute("data-was", i.checked ? "1" : ""); }
+  });
+  detail.addEventListener("click", function (e) {
+    var i = e.target;
+    if (i.name === "option" && i.getAttribute("data-was") === "1") { i.checked = false; i.setAttribute("data-was", ""); }
+  });
   function openDetail(id) {
     openId = id;
     dtitle.textContent = {{j:Details}};

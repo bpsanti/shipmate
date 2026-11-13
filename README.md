@@ -6,7 +6,8 @@ It shows one page, read live from the home's own records every time the page loa
 - **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, ready / delivered.
   A phase with nothing in it shrinks to a thin labelled strip so the busy lanes get the width; a lane taller than the screen scrolls inside itself and says how many cards are below; when lanes are out of view the board says so.
 - **A fixed sidebar** on the right keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
-- **A detail drawer** opens from any card: read-only facts about that piece of work, gathered from the home's records.
+- **A detail drawer** opens from any card: facts about that piece of work, gathered from the home's records.
+  When the item waits on the captain, the drawer opens with the decision and a place to answer it, which reaches firstmate as an inbox note; firstmate's reply comes back to the same place.
 - **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
 - **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as one ship in pixel art, seen from the side and cut away: each agent is a hand whose place on board is its phase, and signs painted on the ship say what each place means. Whoever waits on the captain lines up in the captain's cabin, longest wait first, and a log below the scene lists them. Chips above it light one stage at a time. It zooms and pans, and the page remembers the choice of view in the browser.
 
@@ -46,7 +47,7 @@ Text read from the home's records (task titles, status lines, hold reasons, note
 
 `GET /state.json` returns the same snapshot the page is built from.
 `GET /ship` returns the ship view drawn from that snapshot.
-`GET /detail?id=<task>` returns one card's drawer and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
+`GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
 
 ### Keep it running (optional)
 
@@ -88,6 +89,7 @@ On Linux a `systemd --user` service with the same command does the same job.
 | Queue | `bin/fm-tasks-axi.sh list` (held, hold date, blocked-by) and `config/project-capacity` with the live task records that hold a place. |
 | How long a queued task has waited for the captain | The `Captain hold set:` time that `bin/fm-captain-hold.sh` writes first in a held task's body, read with `bin/fm-tasks-axi.sh list --state queued --fields held,body` only while some queued task is held; without that line, the day the task was created. |
 | How long a hand has waited for the captain | Its oldest `needs-decision` or `blocked` status line still open; a hand flagged by its crew state alone waits since its last transcript activity. |
+| The captain's answers and what became of them | `bin/fm-inbox.sh receipts --all-pending --all-handled`, cached 10 s and read again right after an answer is sent: the notes whose request id starts with `shipmate-answer:`, whether firstmate was woken, whether it took the note from its inbox, and its reply. Every note is read, so an answer's state never drops out of a bounded page while its decision is open. |
 | Machine load | `os.getloadavg()` and the CPU count, read with every snapshot; only the ship view's sea uses it. |
 | Per day | Every transcript under the Claude directories, by local day, each message once. `workers` are sessions launched from a Firstmate brief, `firstmate` is the home's own folder, `validation` is no-mistakes, `other` is the rest. |
 | Per delivered task | The home's session sheets (`data/fichas/fichas.jsonl`), with the new/cache split recomputed from each sheet's session transcript and its subagents. |
@@ -120,7 +122,7 @@ The bar under each agent shows the phases completed; hover `why?` for the eviden
 ## The detail drawer
 
 Clicking a card (or Enter on a focused card) opens a drawer; Escape or the close button shuts it.
-Everything in it is read-only and comes from records, never from transcript text:
+Apart from the answer form described below, everything in it is read-only and comes from records, never from transcript text:
 
 | In the drawer | Source |
 | --- | --- |
@@ -149,6 +151,7 @@ Each element stands for one thing:
 | A hand fishing at the rail | an agent waiting for CI |
 | A hand on the gangplank with a pack | an agent ready to merge |
 | A hand under a question mark | an agent whose phase is unknown |
+| A badge on a card in the log | the captain's answer to the decision open now: sent, not woken, received or replied (see below) |
 | A hand sitting with the dice | off duty: an unflagged agent exploring, implementing, at the bow or of unknown phase whose crew state is `paused`, or that has had no transcript activity for 20 minutes without a busy session |
 | A hand's shirt and bandana | its project's colour, in the order of `data/projects.md`; the sails carry one stripe per project aboard |
 | A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
@@ -172,6 +175,33 @@ The chips above the scene name each stage, say where its hands stand and who is 
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand or boat, and clicking it opens its drawer.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only when the browser does not ask for reduced motion.
 
+## Answering the captain's decisions
+
+The drawer of an item that waits on the captain opens with "Your answer": a hand or scout with an open `needs-decision` or `blocked` line (one form per open line), one flagged by its crew state alone, or a queued task held for the captain's decision.
+Each form quotes the decision, offers its ready options when the line lists them as `A) .. B) ..` (also `(a) ..` or `1) ..`), and takes words of the captain's own; an option, words, or both.
+"Send to firstmate" runs, with `FM_HOME` set:
+
+```bash
+bin/fm-inbox.sh note --request-id shipmate-answer:<form id>:<task> --json -- "<note>"
+```
+
+The note, in English whatever the page's language, names the task and its title, quotes the decision with its key and time, says how to reply, and ends with the answer after an `Answer:` line.
+The form id is drawn when the drawer is drawn, so sending the same form again, after a double click or a failed request, gives back the note it already made; fm-inbox keeps one note per request id.
+A half-written answer keeps its words, its choice and its focus through the 30-second refresh.
+
+Below the forms, every answer sent about the item shows what became of it, read from `bin/fm-inbox.sh receipts`:
+
+| State | Meaning |
+| --- | --- |
+| sent | the note is saved and firstmate was woken (`announced`) |
+| not woken | the note is saved but the wake failed (fm-inbox exit 3); "Wake firstmate" runs `bin/fm-inbox.sh announce --json <note>`, only for a note shipmate sent as an answer |
+| received | firstmate took the note from its inbox (`handled/`) |
+| replied | firstmate recorded its answer with `bin/fm-inbox.sh reply <note> <text>`, shown under the captain's words |
+
+The card of a waiting item, in the board and in the ship's log, carries the state of the latest answer sent since the item began to wait, so an answer to an earlier decision never marks a new one.
+shipmate only delivers the answer: firstmate acts on it under its usual rules, so a merge or a destructive action still needs the captain's explicit word on that PR.
+`POST /answer` and `POST /announce` take the same guards as the add form below.
+
 ## Adding a task
 
 "+ Add task" at the top of the queue lane opens the form in the drawer, beside where the task will appear.
@@ -183,7 +213,7 @@ bin/fm-inbox.sh note --request-id shipmate-<form id> --json -- "New task queued 
 ```
 
 The project list comes from `data/projects.md`.
-Only `POST` from `127.0.0.1` with this server's `Host`, a matching `Origin` when the browser sends one, and the per-run token embedded in the page is accepted.
+Only `POST` from `127.0.0.1` with this server's `Host`, a matching `Origin` when the browser sends one, no cross-site `Sec-Fetch-Site`, and the per-run token embedded in the page is accepted.
 A resubmitted form (same hidden request id) never queues twice.
 
 ## Tests

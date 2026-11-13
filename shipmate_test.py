@@ -88,8 +88,23 @@ f="$FAKE_DIR/crew/$1"
 if [ -f "$f" ]; then cat "$f"; else echo "state: working · source: pane · busy"; fi
 """
 FAKE_INBOX = r"""#!/bin/sh
+# fake fm-inbox.sh: canned receipts; note and announce logged; a repeated --request-id replays, as the real one does
+if [ "$1" = receipts ]; then
+  printf '%s\n' "$*" >> "$FAKE_DIR/receipts.log"
+  cat "$FAKE_DIR/receipts.json" 2>/dev/null || echo '{"pending":[],"handled":[]}'
+  exit 0
+fi
 printf '%s' "$*" | tr '\n' '|' >> "$FAKE_DIR/inbox.log"; echo >> "$FAKE_DIR/inbox.log"
-echo '{"schema":"fm-inbox-note.v1","outcome":"created","id":"1-x","saved":true,"announced":true}'
+if [ "$1" = announce ]; then echo '{"outcome":"created","id":"'"$3"'","saved":true,"announced":true}'; exit 0; fi
+out=created
+if [ "$2" = "--request-id" ]; then
+  mkdir -p "$FAKE_DIR/requests"
+  if [ -e "$FAKE_DIR/requests/$3" ]; then out=replay; else : > "$FAKE_DIR/requests/$3"; fi
+fi
+rc=$(cat "$FAKE_DIR/note.rc" 2>/dev/null || echo 0)
+ann=true; [ "$rc" = 3 ] && ann=false
+echo '{"schema":"fm-inbox-note.v1","outcome":"'$out'","id":"1-x","saved":true,"announced":'$ann',"acknowledged":false}'
+exit "$rc"
 """
 FAKE_GH = r"""#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DIR/gh.log"
@@ -558,6 +573,187 @@ class TestServer(Base):
         self.assertIn("already+exists", r.getheader("Location"))
         self.assertEqual(self.log("inbox.log"), [])
 
+    def waiting(self):
+        self.status("TASK-A", ["working [at=%d]: go" % T0, "needs-decision [key=pick] [at=%d]: which way? A) left B) right" % (T0 + 5)])
+
+    def answer(self, **kw):
+        f = {"token": self.panel.token, "request": "f0rm1", "task": "TASK-A", "ref": "pick", "option": "B", "text": "carefully\r\nplease"}
+        f.update(kw)
+        r, body = self.req("POST", "/answer", f, {"Origin": "http://127.0.0.1:%d" % self.cfg.port, "Sec-Fetch-Site": "same-origin"})
+        return r, json.loads(body) if r.status == 200 else body
+
+    def test_an_answer_becomes_one_note_however_often_it_is_sent(self):
+        self.waiting()
+        r, res = self.answer()
+        self.assertEqual(r.status, 200)
+        self.assertEqual((res["ok"], res["state"], res["note"]), (True, "sent", "1-x"))
+        notes = self.log("inbox.log")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("note --request-id shipmate-answer:f0rm1:TASK-A --json -- Captain's answer from shipmate on TASK-A", notes[0])
+        self.assertIn("Decision: its needs-decision line [key=pick]", notes[0])
+        self.assertIn("Answer:|B) right|carefully|please", notes[0])
+        self.answer()                                                    # a second click sends the same request id
+        notes = self.log("inbox.log")
+        self.assertEqual(len(notes), 2)
+        self.assertEqual(notes[0].split(" --json")[0], notes[1].split(" --json")[0])
+        self.assertEqual(len(os.listdir(os.path.join(self.fake, "requests"))), 1)   # so the inbox keeps one note
+        self.answer(request="f0rm2", option="", text="another thought")
+        self.assertEqual(len(os.listdir(os.path.join(self.fake, "requests"))), 2)   # a new form is a new answer
+
+    def test_an_answer_saved_without_its_wake_says_so(self):
+        self.waiting()
+        write(os.path.join(self.fake, "note.rc"), "3")
+        r, res = self.answer()
+        self.assertEqual((res["ok"], res["state"]), (True, "unwoken"))
+        write(os.path.join(self.fake, "note.rc"), "1")
+        r, res = self.answer(request="f0rm2")
+        self.assertFalse(res["ok"])
+        self.assertIn("the inbox refused it", res["error"])
+
+    def test_answers_are_refused_when_they_answer_nothing_or_come_from_elsewhere(self):
+        self.waiting()
+        for kw, err in (({"ref": "gone"}, "no longer open"), ({"task": "TASK-B"}, "no longer open"), ({"task": "NOPE"}, "no longer on the board"),
+                        ({"option": "Z"}, "not on this decision"), ({"option": "", "text": " "}, "pick an option"),
+                        ({"request": "../x"}, "no request id"), ({"request": "x" * 11}, "no request id")):
+            r, res = self.answer(**kw)
+            self.assertFalse(res["ok"], kw)
+            self.assertIn(err, res["error"], kw)
+        r, _ = self.answer(token="wrong")
+        self.assertEqual(r.status, 403)
+        r, _ = self.req("POST", "/answer", {"token": self.panel.token}, {"Origin": "https://evil.example"})
+        self.assertEqual(r.status, 403)
+        r, _ = self.req("POST", "/answer", {"token": self.panel.token}, {"Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(r.status, 403)
+        self.assertEqual(self.log("inbox.log"), [])
+
+    def test_receipts_come_back_to_the_drawer_the_cards_and_the_wake(self):
+        self.waiting()
+        at = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+        write(os.path.join(self.fake, "receipts.json"), json.dumps({"pending": [
+            {"id": "n9", "at": at(T0 + 60), "request_id": "shipmate-answer:f9:TASK-A", "body": "x\nAnswer:\nB) right",
+             "announced": False, "acknowledged": False, "reply": None}], "handled": [
+            {"id": "n8", "at": at(T0 + 30), "request_id": "shipmate-answer:f8:TASK-A", "body": "x\nAnswer:\nwait",
+             "announced": True, "acknowledged": True, "reply": {"at": at(T0 + 40), "body": "waited"}}]}))
+        r, body = self.req("GET", "/detail?id=TASK-A")
+        for piece in ("Your answer", 'data-ref="pick"', "B) right", "waited", 'data-announce="n9"', "sm-ans--replied", "sm-ans--unwoken"):
+            self.assertIn(piece, body)
+        self.assertLess(body.index("Your answer"), body.index("Phases"))
+        self.assertIn("--all-pending --all-handled", self.log("receipts.log")[0])
+        r, blocks = self.req("GET", "/blocks")
+        self.assertIn("sm-ans--unwoken", json.loads(blocks)["board"])          # the latest answer to the open decision
+        r, ship = self.req("GET", "/ship")
+        self.assertIn("sm-ans--unwoken", json.loads(ship)["log"])
+        post = lambda note: json.loads(self.req("POST", "/announce", {"token": self.panel.token, "note": note})[1])
+        self.assertTrue(post("n9")["ok"])
+        self.assertEqual(self.log("inbox.log"), ["announce --json n9"])
+        for bad in ("someone-elses-note", "../n9"):
+            self.assertFalse(post(bad)["ok"])
+        self.assertEqual(len(self.log("inbox.log")), 1)
+
+
+class TestAnswers(unittest.TestCase):
+    """The captain's answer: ready options, what waits, the note firstmate gets, and its receipts."""
+
+    def agent(self, tid="TASK-A", crew="working", decisions=(), last=T0 - 60):
+        return {"id": tid, "title": "Fix  the thing", "crew": crew, "last_activity": last,
+                "decisions": [{"state": st, "key": k, "at": at, "text": t} for st, k, at, t in decisions]}
+
+    def snap(self, agents=(), queue=(), answers=None):
+        return {"now": T0, "agents": list(agents), "queue": list(queue), "answers": answers or {}}
+
+    def test_ready_options_from_the_decision_line(self):
+        opts = lambda t: [(o["label"], o["text"]) for o in shipmate.decision_options(t)]
+        self.assertEqual(opts("per user or per key? A) per user B) per key"), [("A", "per user"), ("B", "per key")])
+        self.assertEqual(opts("Pick one: (a) keep the cache; (b) drop it, or (c) ask first. I lean to b."),
+                         [("A", "keep the cache"), ("B", "drop it"), ("C", "ask first")])
+        self.assertEqual(opts("1) ship now 2) wait for the review"), [("1", "ship now"), ("2", "wait for the review")])
+        self.assertEqual(opts("A) the card (fast; cramped); B) the drawer (room). Recommend B."),
+                         [("A", "the card (fast; cramped)"), ("B", "the drawer (room)")])
+        for none in ("per user or per key?", "only a) one", "see f(x) and g(y)", "B) starts late C) and goes on", ""):
+            self.assertEqual(opts(none), [], none)
+
+    def test_what_waits_on_the_captain(self):
+        a = self.agent(decisions=[("needs-decision", "pick", T0 - 50, "A) x B) y"), ("blocked", None, T0 - 20, "stuck")])
+        asks = shipmate.captain_asks(self.snap([a]), "TASK-A")
+        self.assertEqual([(x["ref"], x["kind"], len(x["options"])) for x in asks], [("pick", "line", 2), ("at%d" % (T0 - 20), "line", 0)])
+        parked = self.agent(crew="parked")
+        self.assertEqual([(x["ref"], x["kind"]) for x in shipmate.captain_asks(self.snap([parked]), "TASK-A")], [("crew", "crew")])
+        self.assertEqual(shipmate.captain_asks(self.snap([self.agent()]), "TASK-A"), [])
+        held = {"id": "Q1", "title": "Q", "reasons": [("decision", "captain's decision", "x")], "hold_reason": "1) now 2) later",
+                "waiting_since": T0 - 900}
+        free = {"id": "Q2", "title": "Q", "reasons": [("ready", "ready", "x")], "hold_reason": ""}
+        s = self.snap(queue=[held, free])
+        self.assertEqual([(x["ref"], x["at"], len(x["options"])) for x in shipmate.captain_asks(s, "Q1")], [("hold", T0 - 900, 2)])
+        self.assertEqual(shipmate.captain_asks(s, "Q2"), [])
+        self.assertIsNone(shipmate.captain_asks(s, "NOPE"))
+
+    def test_the_note_names_the_task_and_the_decision(self):
+        a = self.agent(decisions=[("needs-decision", "pick", T0, "which way? A) left B) right")])
+        s = self.snap([a])
+        body = shipmate.prepare_answer(s, "TASK-A", "pick", "B", "and mind the step\nplease")["body"]
+        lines = body.split("\n")
+        self.assertEqual(lines[0], "Captain's answer from shipmate on TASK-A (Fix the thing).")
+        self.assertEqual(lines[1], "Decision: its needs-decision line [key=pick] of %s: which way? A) left B) right"
+                         % time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(T0)))
+        self.assertIn("bin/fm-inbox.sh reply", lines[2])
+        self.assertEqual(shipmate.note_words(body), "B) right\nand mind the step\nplease")
+        self.assertEqual(shipmate.note_words(shipmate.prepare_answer(s, "TASK-A", "pick", "", "just words")["body"]), "just words")
+        for ref, opt, words, err in (("gone", "", "x", "no longer open"), ("pick", "C", "", "not on this decision"),
+                                     ("pick", "", "", "pick an option"), ("pick", "", "x" * 4001, "longer than")):
+            self.assertIn(err, shipmate.prepare_answer(s, "TASK-A", ref, opt, words)["error"])
+        self.assertIn("no longer on the board", shipmate.prepare_answer(s, "NOPE", "pick", "", "x")["error"])
+        crew = shipmate.prepare_answer(self.snap([self.agent(crew="failed")]), "TASK-A", "crew", "", "retry it")["body"]
+        self.assertIn("Decision: its crew state, failed, with no needs-decision or blocked line open", crew)
+        held = {"id": "Q1", "title": "Bill", "reasons": [("decision", "d", "x")], "hold_reason": "which plan", "waiting_since": T0}
+        self.assertIn("Decision: its captain hold: which plan", shipmate.prepare_answer(self.snap(queue=[held]), "Q1", "hold", "", "B")["body"])
+        self.assertEqual(shipmate.answer_request_id("f0rm-1d", "TASK-A"), "shipmate-answer:f0rm-1d:TASK-A")
+
+    def test_receipts_become_answers_with_their_state(self):
+        note = lambda nid, rid, at, **kw: dict({"id": nid, "at": iso(at)[:19] + "Z", "request_id": rid,
+                                                 "body": "head\nAnswer:\nsaid " + nid, "announced": True, "reply": None}, **kw)
+        doc = {"pending": [note("n3", "shipmate-answer:f3:TASK-A", T0 + 30),
+                           note("n4", "shipmate-answer:f4:TASK-A", T0 + 40, announced=False),
+                           note("n5", "shipmate-x", T0 + 50), note("n6", "shipmate-answer:f6:../x", T0 + 60),
+                           note("n7", None, T0 + 70)],
+               "handled": [note("n2", "shipmate-answer:f2:TASK-A", T0 + 20, acknowledged=True),
+                           note("n1", "shipmate-answer:f1:Q1", T0 + 10, acknowledged=True,
+                                reply={"at": iso(T0 + 99)[:19] + "Z", "body": "done it"})]}
+        got = shipmate.answers_from_receipts(doc)
+        self.assertEqual(sorted(got), ["Q1", "TASK-A"])
+        self.assertEqual([(x["note"], x["state"], x["words"]) for x in got["TASK-A"]],
+                         [("n2", "received", "said n2"), ("n3", "sent", "said n3"), ("n4", "unwoken", "said n4")])
+        self.assertEqual((got["Q1"][0]["state"], got["Q1"][0]["reply"]), ("replied", {"at": T0 + 99, "text": "done it"}))
+
+    def test_a_card_shows_the_answer_to_the_decision_open_now(self):
+        old = {"note": "n1", "at": T0 - 500, "state": "replied", "words": "x", "reply": None}
+        new = {"note": "n2", "at": T0 + 10, "state": "received", "words": "y", "reply": None}
+        ask = self.agent(decisions=[("needs-decision", "k", T0, "?")])
+        self.assertEqual(shipmate.answer_marks(self.snap([ask], answers={"TASK-A": [old]})), {})   # it answered an earlier decision
+        self.assertEqual(shipmate.answer_marks(self.snap([ask], answers={"TASK-A": [old, new]})), {"TASK-A": "received"})
+        self.assertEqual(shipmate.answer_marks(self.snap([self.agent()], answers={"TASK-A": [new]})), {})   # nothing waits any more
+        held = {"id": "Q1", "title": "Q", "reasons": [("decision", "d", "x")], "hold_reason": "", "waiting_since": T0 - 900}
+        self.assertEqual(shipmate.answer_marks(self.snap(queue=[held], answers={"Q1": [old]})), {"Q1": "replied"})
+        sc = shipmate.ship_scene(dict(shipmate.demo_snapshot(T0)))
+        self.assertEqual({x["id"]: x["answer"] for x in sc["line"]},
+                         {"DEMO-Q-BILL": "replied", "DEMO-EXPORT": "received", "DEMO-RATE": None, "DEMO-Q-TILES": None})
+        log = shipmate.captain_log(sc)
+        self.assertIn('class="sm-ans sm-ans--replied"', log)
+        self.assertIn('class="sm-ans sm-ans--received"', log)
+
+    def test_the_drawer_asks_and_shows_the_thread(self):
+        ask = shipmate.captain_asks(self.snap([self.agent(decisions=[("needs-decision", "pick", T0, "A) left B) right")])]), "TASK-A")
+        answers = [{"note": "n1", "at": T0 + 5, "state": "replied", "words": "go <left>", "reply": {"at": T0 + 9, "text": "went"}},
+                   {"note": "n2", "at": T0 + 6, "state": "unwoken", "words": "w", "reply": None}]
+        out = shipmate.answer_section("TASK-A", ask, answers, "tok", T0 + 10)
+        for piece in ('data-token="tok"', 'data-ref="pick"', 'name="task" value="TASK-A"', 'value="A"', "<b>B)</b> <span>right</span>",
+                      "Send to firstmate", "go &lt;left&gt;", "went", 'data-announce="n2"', "explicit word on that PR"):
+            self.assertIn(piece, out)
+        self.assertRegex(out, r'name="request" value="[A-Za-z0-9_-]{1,10}"')
+        self.assertEqual(shipmate.answer_section("TASK-A", [], [], "tok", T0), "")
+        thread_only = shipmate.answer_section("TASK-A", [], answers[:1], "tok", T0 + 10)
+        self.assertNotIn("<form", thread_only)
+        self.assertIn("went", thread_only)
+
 
 class TestFirstmateSession(Base):
     """The supervisor's own session, found through the home's lock in the home's project folder."""
@@ -883,7 +1079,21 @@ class TestShip(unittest.TestCase):
             st, det = get("/detail?id=DEMO-RATE")
             self.assertEqual(st, 200)
             self.assertIn("per user or per key?", det)
-            self.assertEqual(get("/detail?id=DEMO-Q-BILL")[0], 200)
+            st, bill = get("/detail?id=DEMO-Q-BILL")
+            self.assertEqual(st, 200)
+            self.assertIn("Released DEMO-Q-BILL with plan B", bill)
+            self.assertIn('<b>B)</b> <span>per key</span>', det)
+            c = http.client.HTTPConnection("127.0.0.1", panel.cfg.port, timeout=30)
+            c.request("POST", "/answer", body=urllib.parse.urlencode({"token": panel.token, "request": "d1", "task": "DEMO-RATE",
+                                                                      "ref": "limits", "option": "B", "text": "keys"}),
+                      headers={"Host": "127.0.0.1:%d" % panel.cfg.port, "Content-Type": "application/x-www-form-urlencoded"})
+            res = json.loads(c.getresponse().read().decode())
+            c.close()
+            self.assertEqual((res["ok"], res["state"]), (True, "sent"))
+            self.assertIn("nothing reached firstmate", res["message"])
+            st, det = get("/detail?id=DEMO-RATE")
+            self.assertIn("B) per key\nkeys", det)
+            self.assertIn("sm-ans--sent", json.loads(get("/ship")[1])["log"])
             self.assertEqual(get("/report?id=DEMO-RATE&f=md")[0], 404)
         finally:
             srv.shutdown()
@@ -913,6 +1123,7 @@ class TestLanguage(unittest.TestCase):
         phrases |= {x for _k, _p, name, where in shipmate.STAGES for x in (name, where)}
         phrases |= set(shipmate.PLACE_TEXT.values()) | set(shipmate.LANE_NAMES) | set(shipmate.SHIP_PHASES)
         phrases |= set(shipmate.SCOUT_PHASES) | set(shipmate.CREW_TONE) | set(shipmate.CLASSES) | {"unknown", "inferred", "configured"}
+        phrases |= {label for _mark, label in shipmate.ANSWER_PILLS.values()} | set(shipmate.ANSWER_MESSAGES.values())
         phrases |= set(m[1] for m in shipmate.RE_PHRASE.findall(shipmate.asset("shipmate.html")))
         phrases = {p.replace('\\"', '"') for p in phrases if p}
         self.assertGreater(len(phrases), 150)
@@ -938,6 +1149,9 @@ class TestLanguage(unittest.TestCase):
             self.assertIn(phrase, english)
         self.assertEqual(shipmate.fmt_date_iso("2026-11-13"), "sex 13 nov")
         self.assertIn("estado da tripulação: parado", " ".join(shipmate.captain_reasons({"crew": "parked"})))
+        det = panel.detail("DEMO-RATE")
+        for phrase in ("Sua resposta", "Enviar ao firstmate", "Opções prontas"):
+            self.assertIn(phrase, det)
 
     def test_the_language_is_a_setting(self):
         with open(os.path.join(os.path.dirname(shipmate.__file__), "README.md"), encoding="utf-8") as fh:

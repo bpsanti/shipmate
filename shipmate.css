@@ -363,6 +363,52 @@ body.sm-locked { overflow: hidden; }
 .sm-reasonlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .sm-reasonlist li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 
+/* ---- the captain's answer (top of a waiting item's drawer) ---- */
+.sm-answer { display: grid; gap: 10px; margin: 0 0 14px; padding: 4px 14px 12px; background: var(--surface-card-warm);
+  border: 2px solid var(--edge); border-radius: var(--radius-md); box-shadow: var(--shadow-hard-sm); }
+.sm-answer > h3 { margin: 10px 0 0; }
+.sm-answer__form { display: grid; gap: 8px; }
+.sm-answer__form + .sm-answer__form { border-top: 1px dashed var(--border-default); padding-top: 10px; }
+.sm-ask { display: grid; gap: 2px; border-left: 4px solid var(--rust-500); background: color-mix(in srgb, var(--rust-500) 8%, transparent);
+  padding: 6px 10px; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; overflow-wrap: anywhere; color: var(--text-strong); }
+.sm-ask small { font: var(--fs-2xs) var(--font-mono); color: var(--text-muted); }
+.sm-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.sm-opt { display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%; padding: 5px 12px; cursor: pointer; font-size: var(--fs-sm);
+  border: 2px solid var(--edge); border-radius: 999px; background: var(--surface-card); color: var(--text-strong); }
+.sm-opt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-opt b { font-family: var(--font-mono); color: inherit; }
+.sm-opt input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.sm-opt:has(input:checked) { background: var(--navy-600); color: var(--white); }
+.sm-opt:has(input:focus-visible) { box-shadow: var(--focus-ring); }
+.sm-answer textarea { font: inherit; font-size: var(--fs-sm); color: var(--text-strong); background: var(--surface-card); resize: vertical;
+  border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; min-height: 64px; }
+.sm-answer textarea:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+.sm-answer__foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: var(--fs-xs); }
+.sm-answer__foot .fm-btn { flex: none; }
+.sm-answer__msg { margin: 0; font-size: var(--fs-xs); font-weight: 700; min-height: 1em; }
+.sm-answer__msg:empty { display: none; }
+.sm-answer__msg.is-ok { color: var(--ok); } .sm-answer__msg.is-err { color: var(--danger); }
+.sm-answer__rule { margin: 0; font-size: var(--fs-2xs); }
+.sm-thread { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.sm-thread li { display: grid; gap: 4px; font-size: var(--fs-xs); border-left: 3px solid var(--gold-500); padding-left: 10px; }
+.sm-thread__head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sm-thread b { font-family: var(--font-mono); font-size: var(--fs-2xs); }
+.sm-thread blockquote { margin: 0; padding: 6px 9px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm);
+  background: var(--surface-card); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); color: var(--text-strong); }
+.sm-thread__fm { display: grid; gap: 4px; margin-top: 2px; padding-left: 10px; border-left: 3px solid var(--sea-500); }
+.sm-thread__warn { color: var(--danger); font-weight: 700; }
+.sm-linkbtn { font: inherit; font-weight: 700; color: var(--link); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+/* an answer's state, on its card and in the drawer */
+.sm-ans { display: inline-flex; align-items: center; gap: 3px; padding: 0 7px; border-radius: 999px; border: 1.5px solid var(--edge);
+  font: 700 var(--fs-2xs) var(--font-mono); white-space: nowrap; color: var(--ink-900); line-height: 1.6; }
+.sm-ans--sent { background: var(--gold-100); }
+.sm-ans--unwoken { background: var(--rust-100); color: var(--rust-700); }
+.sm-ans--received { background: var(--ocean-200); }
+.sm-ans--replied { background: var(--sea-200); }
+.sm-card__ans { margin: 2px 0; }
+.sm-logcard { position: relative; }
+.sm-logcard__ans { position: absolute; right: 6px; top: -9px; }
+
 /* ---- form (in the drawer) ---- */
 .sm-form { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .sm-form label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
