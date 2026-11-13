@@ -87,6 +87,7 @@ On Linux a `systemd --user` service with the same command does the same job.
 | Agent rows | `state/<id>.meta` (project, model, effort, account, worktree, spawn time), `state/<id>.status`, `bin/fm-crew-state.sh <id>` (cached 20 s), task titles from `bin/fm-tasks-axi.sh list`. |
 | Agent tokens | The worker's Claude Code transcripts in the worktree's project folder, plus their subagent transcripts. Only messages after the task's spawn count, because a pooled worktree's folder also holds earlier tasks' sessions. Each message counts once (one message is written as several lines). |
 | Queue | `bin/fm-tasks-axi.sh list` (held, hold date, blocked-by) and `config/project-capacity` with the live task records that hold a place. |
+| Home lanes | `bin/fm-capacity.sh` (its first `capacity:` line), read at most every 20 s and only when the home has a `config/lane-capacity`; without that file the script sets no target and shipmate does not run it. A queued task nothing else holds waits for a lane (`home lanes n/n`) when it reports no free lane. |
 | How long a queued task has waited for the captain | The `Captain hold set:` time that `bin/fm-captain-hold.sh` writes first in a held task's body, read with `bin/fm-tasks-axi.sh list --state queued --fields held,body` only while some queued task is held; without that line, the day the task was created. |
 | How long a hand has waited for the captain | Its oldest `needs-decision` or `blocked` status line still open; a hand flagged by its crew state alone waits since its last transcript activity. |
 | The captain's answers and what became of them | `bin/fm-inbox.sh receipts --all-pending --all-handled`, cached 10 s and read again right after an answer is sent: the notes whose request id starts with `shipmate-answer:`, whether firstmate was woken, whether it took the note from its inbox, and its reply. Every note is read, so an answer's state never drops out of a bounded page while its decision is open. |
@@ -157,12 +158,12 @@ Each element stands for one thing:
 | A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
 | The captain's cabin, in the stern castle | the captain's line: a flagged hand leaves its place and waits here, facing the desk, numbered by how long it has waited, the longest nearest the desk; a scout waits here with its map |
 | The captain | at the desk with a paper and a balloon saying how many wait and who has waited longest; sitting with a mug when nobody waits |
-| Boats tied astern | queued tasks held for the captain's decision, numbered in the same line; past six, the rest stay moored at the pier with their red flag |
+| Boats tied astern | queued tasks held for the captain's decision, numbered in the same line; past six, the rest wait on the pier with their red flag and their number |
 | A skiff on the horizon, rowing back with the map, moored at the pier | a scout exploring, writing the report, report delivered |
 | Barrels in the hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
 | Water in the hold | firstmate's context; the white line is the warning threshold |
-| Boats moored at the pier | the rest of the queue |
-| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, astern, queue); the "signs" button puts them away, and the browser remembers it |
+| Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, astern, and on the pier the slot each tavern waits for, ready, waiting for a task, asleep); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
 | Day or night | the local hour: night from 18:00 to 06:00 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
@@ -170,10 +171,32 @@ Each element stands for one thing:
 The scene is larger than its frame and grows with the crew so no hand stands on another.
 It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the buttons zoom in and out, frame the crew again, or fit everything.
 Names show from a readable zoom up, never overlap, and come back on hover or focus when zoomed out.
-Clicking a hand or a queued boat opens the same drawer as its card.
+Clicking a hand, on board or on the pier, or a queued boat opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand or boat, and clicking it opens its drawer.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only when the browser does not ask for reduced motion.
+
+### The queue on the pier
+
+Every queued task that is not tied astern is a hand on the pier, and what it does there is decided by the first reason the queue gives for it, nothing else:
+
+| On the pier | Reason in the queue |
+| --- | --- |
+| Playing cards at a table by the tavern, under the stern (three to a table: one each side, one standing behind) | waits for a build slot (`config/project-capacity`) or a home lane (`bin/fm-capacity.sh`), and was created today |
+| Drinking from a mug on the tavern bench, by the keg | the same wait, created on an earlier day: it has waited longer |
+| Standing at the foot of the gangplank with a sea bag | nothing holds it: firstmate can dispatch it |
+| Standing under a hand aboard, talking up to it, with a balloon and a dotted line to that hand | it waits for that task (`blocked-by`), and that task is aboard; it stands as close below it as the others allow |
+| Standing apart, its tag naming what it waits for | it waits for a task that is not aboard (still queued, or gone) |
+| Asleep on the bench under the forecastle, with its date | held until a date that has not come |
+| A red flag and its number in the captain's line | held for the captain's decision, when the six places astern are taken |
+
+Each tavern has its sign with the slot it waits for (`SLOT <project> · 2/2 taken · 13 waiting`, or the home's lanes), and the other groups have theirs (ready, waiting for a task, asleep).
+The tavern takes four tables and one bench of eight; the rest are counted (`+N`, with their ids on hover), and so are lines past eight.
+The tavern's names show only on hover or focus, so a full table stays readable; the others keep their names on.
+The ship moves over to make room for the tavern, and the moored scouts and crates move toward the bow past the queue.
+The four stage chips for the pier (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
+A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a sleeper breathes; nothing there looks like progress, and none of it moves when the browser asks for reduced motion.
+Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` and the colours in `hand_palette`, so a new art style replaces those three and nothing else.
 
 ## Answering the captain's decisions
 

@@ -784,7 +784,42 @@ def hold_stamps(cfg):
     return stamps
 
 
-def queue_rows(cfg, backlog):
+LANES_TTL = 20
+
+
+def parse_capacity_line(text):
+    """The first line of `bin/fm-capacity.sh`: `capacity: free_lanes=.. reason=.. lanes=.. target=..`.
+    Returns {"free", "reason", "lanes", "target"} when the home sets a numeric lane target, else None."""
+    line = (text or "").splitlines()[0] if text else ""
+    if not line.startswith("capacity:"):
+        return None
+    kv = dict(x.split("=", 1) for x in line[len("capacity:"):].split() if "=" in x)
+    if not kv.get("target", "").isdigit() or not kv.get("lanes", "").isdigit():
+        return None
+    free = kv.get("free_lanes", "")
+    return {"free": int(free) if free.isdigit() else None, "reason": kv.get("reason") or "", "lanes": int(kv["lanes"]),
+            "target": int(kv["target"])}
+
+
+class LanesCache:
+    """The home's own lane capacity, from `bin/fm-capacity.sh`, read only when `config/lane-capacity`
+    exists (without it the script sets no target) and at most every LANES_TTL seconds."""
+
+    def __init__(self):
+        self.at, self.val = 0, None
+
+    def get(self, cfg):
+        if not os.path.exists(os.path.join(cfg.home, "config", "lane-capacity")) or not os.path.exists(cfg.bin("fm-capacity.sh")):
+            return None
+        if time.time() - self.at > LANES_TTL:
+            rc, out, _err = run([cfg.bin("fm-capacity.sh")], env=cfg.env(), timeout=20)
+            self.val, self.at = parse_capacity_line(out) if rc == 0 else None, time.time()
+        return self.val
+
+
+def queue_rows(cfg, backlog, lanes=None):
+    """The queued tasks with why each waits, most telling reason first. `lanes` is the home's lane
+    capacity (LanesCache), which holds back a task nothing else holds when no lane is free."""
     if backlog is None:
         return []
     held = any(r.get("state") == "queued" and r.get("held") == "yes" for r in backlog)
@@ -815,17 +850,23 @@ def queue_rows(cfg, backlog):
         if deps:
             reasons.append(("task", tr("waits for %s") % ", ".join(deps), tr("waits for %s") % ", ".join(deps)))
         repo = r.get("repo") or ""
+        slot = None
         if not reasons and repo in caps:
             h = sorted(holders.get(repo, []))
             if len(h) >= caps[repo]:
                 reasons.append(("slot", tr("build slot %d/%d") % (len(h), caps[repo]),
                                 tr("build slots for %s: %d of %d taken (%s)") % (repo, len(h), caps[repo], ", ".join(h))))
+                slot = {"group": repo, "cap": caps[repo], "taken": len(h), "holders": h}
+        if not reasons and lanes and lanes["free"] == 0:
+            reasons.append(("lane", tr("home lanes %d/%d") % (lanes["lanes"], lanes["target"]),
+                            tr("no free lane in this home (%s): %d of %d in use") % (lanes["reason"], lanes["lanes"], lanes["target"])))
+            slot = {"group": "", "cap": lanes["target"], "taken": lanes["lanes"], "holders": []}
         if not reasons:
             reasons.append(("ready", tr("ready to dispatch"), tr("nothing holds it: firstmate can dispatch it")))
         since, exact = stamps.get(r["id"]) or parse_hold_set("Captain hold set: " + (r.get("created") or ""))
         out.append({"id": r["id"], "title": r.get("title", ""), "repo": repo, "kind": r.get("kind", ""),
                     "created": r.get("created", ""), "reasons": reasons,
-                    "hold_reason": (r.get("hold_reason") or "")[:240],
+                    "hold_reason": (r.get("hold_reason") or "")[:240], "deps": deps, "slot": slot,
                     # how long it has waited for the captain, when it does: since the hold was set,
                     # or since the day it was created when the hold carries no stamp
                     "waiting_since": since if any(x[0] == "decision" for x in reasons) else None,
@@ -1294,6 +1335,7 @@ class Panel:
         self.requests = {}                       # form request id -> result: a resubmitted form never queues twice
         self.checks = ChecksCache()
         self.inbox = ReceiptsCache()
+        self.lanes = LanesCache()
         self.last = None                         # latest snapshot, reused by the detail view while fresh
 
     def snapshot(self):
@@ -1306,7 +1348,7 @@ class Panel:
                 "now": now,
                 "firstmate": firstmate_session(self.cfg, self.index, now),
                 "agents": live_agents(self.cfg, self.index, self.crew, by_id),
-                "queue": queue_rows(self.cfg, backlog),
+                "queue": queue_rows(self.cfg, backlog, self.lanes.get(self.cfg)),
                 "backlog_error": berr,
                 "projects": read_projects(self.cfg.home),
                 "daily": daily_usage(self.cfg, self.index, now),
@@ -1450,6 +1492,8 @@ PT_BR = {
     "held until %s": "segura até %s", "captain's decision": "decisão do capitão", "waits for %s": "espera %s",
     "build slot %d/%d": "vaga de build %d/%d", "build slots for %s: %d of %d taken (%s)": "vagas de build de %s: %d de %d ocupadas (%s)",
     "ready to dispatch": "pronta para despachar", "nothing holds it: firstmate can dispatch it": "nada a segura: o firstmate pode despachá-la",
+    "home lanes %d/%d": "vagas da casa %d/%d",
+    "no free lane in this home (%s): %d of %d in use": "nenhuma vaga livre nesta casa (%s): %d de %d em uso",
     # drawer
     "not reached": "não alcançada", "time unknown": "hora desconhecida", "no report": "sem relatório", "no PR": "sem PR",
     "(checks unknown: %s)": "(checks desconhecidos: %s)", "%d passed": "%d passaram", "%d failed": "%d falharam",
@@ -1504,7 +1548,7 @@ PT_BR = {
     "rowing back with the map": "voltando a remo com o mapa", "moored at the pier with the map": "atracado no cais com o mapa",
     "crew is %s": "estado da tripulação: %s", "%d hand aboard": "%d marujo a bordo", "%d hands aboard": "%d marujos a bordo",
     "%d red flag": "%d bandeira vermelha", "%d red flags": "%d bandeiras vermelhas", "%d off duty": "%d de folga",
-    "%d boat moored": "%d bote atracado", "%d boats moored": "%d botes atracados", "today": "hoje",
+    "%d in the queue": "%d na fila", "today": "hoje",
     "no project": "sem projeto", "; off duty": "; de folga", "; needs the captain: ": "; precisa do capitão: ",
     "; number %d in line for the captain, waiting %s": "; número %d na fila do capitão, esperando há %s",
     "%s: queued (%s)%s%s": "%s: na fila (%s)%s%s",
@@ -1516,7 +1560,22 @@ PT_BR = {
     "RAIL · waiting for CI": "AMURADA · esperando o CI", "BOW · PR open": "PROA · PR aberto",
     "HOLD · quota barrels, context water": "PORÃO · barris de cota, água de contexto",
     "GANGPLANK · ready to merge": "PRANCHA · pronto para o merge", "ASTERN · queued, waiting for you": "POPA · na fila, esperando você",
-    "QUEUE": "FILA", "SCOUTS": "BATEDORES", "DELIVERED · %d days": "ENTREGUES · %d dias",
+    "SCOUTS": "BATEDORES", "DELIVERED · %d days": "ENTREGUES · %d dias",
+    "SLOT %s · %d/%d taken · %d waiting": "VAGA %s · %d/%d ocupadas · %d esperando",
+    "HOME LANES · %d/%d in use · %d waiting": "VAGAS DA CASA · %d/%d em uso · %d esperando",
+    "READY · boards next": "PRONTAS · embarcam em seguida", "WAITS FOR YOU": "ESPERAM VOCÊ",
+    "WAITS FOR A TASK": "ESPERAM UMA TAREFA", "ASLEEP · held until a date": "DORMINDO · seguras até uma data",
+    "%s waits for %s": "%s espera %s",
+    "playing cards on the pier: queued today, waits for a free build slot or lane":
+        "jogando cartas no cais: entrou na fila hoje, espera uma vaga de build ou da casa",
+    "at the tavern bench with a mug: queued before today, waits for a free build slot or lane":
+        "no banco da taverna com uma caneca: entrou na fila antes de hoje, espera uma vaga de build ou da casa",
+    "at the foot of the gangplank with a sea bag: nothing holds it, ready to board":
+        "ao pé da prancha com a bolsa: nada a segura, pronta para embarcar",
+    "on the pier, talking up to the hand it waits for": "no cais, conversando com o marujo que ela espera",
+    "on the pier: waits for a task that is not aboard": "no cais: espera uma tarefa que não está a bordo",
+    "asleep on the bench: held until its date": "dormindo no banco: segura até a data",
+    "on the pier with a red flag: waits for your decision": "no cais com uma bandeira vermelha: espera a sua decisão",
     "context %d%% of the window%s": "contexto em %d%% da janela%s", ", past the %d%% warning": ", acima do aviso de %d%%",
     "context unknown": "contexto desconhecido", "firstmate at the helm: %s": "o firstmate no leme: %s",
     "%s: %s%s": "%s: %s%s", ", runs out before it resets": ", acaba antes de renovar",
@@ -1536,6 +1595,15 @@ PT_BR = {
     "in a skiff: rowing out to explore, back with the map, then moored at the pier with the report":
         "num bote: rema para explorar, volta com o mapa e atraca no cais com o relatório",
     "sitting with the dice: paused, or quiet for a while": "sentado com os dados: pausado, ou quieto há um tempo",
+    "waiting for a slot": "esperando vaga", "ready to board": "pronta para embarcar", "waiting for a task": "esperando uma tarefa",
+    "held until a date": "segura até uma data",
+    "at a card table on the pier, or at the tavern bench when queued before today: waits for a free build slot or lane":
+        "numa mesa de cartas no cais, ou no banco da taverna quando entrou na fila antes de hoje: espera uma vaga de build "
+        "ou da casa",
+    "at the foot of the gangplank with a sea bag: queued, and nothing holds it": "ao pé da prancha com a bolsa: na fila, e nada a segura",
+    "on the pier talking up to the hand it waits for, or standing apart when that task is not aboard":
+        "no cais conversando com o marujo que ela espera, ou de pé à parte quando essa tarefa não está a bordo",
+    "asleep on the bench: queued and held until its date": "dormindo no banco: na fila e segura até a data",
     "a red flag: needs your decision; hands wait in your cabin and queued tasks are tied astern, longest wait first, "
     "and the log below lists them all":
         "uma bandeira vermelha: precisa da sua decisão; os marujos esperam na sua cabine e as tarefas da fila ficam "
@@ -1574,8 +1642,10 @@ PT_BR.update({
         "Água no porão: o contexto do firstmate, a linha branca é o limite de aviso.",
     "Scouts row out to the horizon, back with the map, and moor at the pier with it.":
         "Os batedores remam até o horizonte, voltam com o mapa e atracam no cais com ele.",
-    "Boats at the pier: the queue. Crates: tasks delivered in the last 7 days.":
-        "Botes no cais: a fila. Caixotes: tarefas entregues nos últimos 7 dias.",
+    "On the pier, the queue: cards or a mug at the tavern while it waits for a free slot, a sea bag at the gangplank when nothing holds it, talking up to the hand it waits for, asleep until its date.":
+        "No cais, a fila: cartas ou uma caneca na taverna enquanto espera uma vaga livre, a bolsa ao pé da prancha quando "
+        "nada a segura, conversando com o marujo que ela espera, dormindo até a data.",
+    "Crates: tasks delivered in the last 7 days.": "Caixotes: tarefas entregues nos últimos 7 dias.",
     "The sky follows the local time, the sea the machine's load.": "O céu segue a hora local, o mar a carga da máquina.",
     "Usage": "Uso", "per day and per delivered task": "por dia e por tarefa entregue",
     "Firstmate session and accounts": "Sessão do firstmate e contas", "Firstmate session": "Sessão do firstmate",
@@ -1800,7 +1870,7 @@ def block_sumline(s):
 LANE_NAMES = ["exploring", "implementing / writing", "PR open", "waiting for CI", "ready / delivered"]
 LANE_MIN = 165       # six full lanes still fit beside the sidebar at 1400 px
 CREW_TONE = {"working": "online", "paused": "info", "blocked": "danger", "failed": "danger", "done": "online"}
-REASON_TONE = {"slot": "warn", "date": "info", "task": "info", "decision": "danger", "ready": "online"}
+REASON_TONE = {"slot": "warn", "lane": "warn", "date": "info", "task": "info", "decision": "danger", "ready": "online"}
 
 
 def lane_of(a):
@@ -2236,12 +2306,25 @@ PLACE_TEXT = {
     "dock": "moored at the pier with the map",
 }
 PLACE_POSE = {"nest": "spy", "deck": "hammer", "bow": "signal", "rail": "fish", "plank": "pack", "hatch": "stand"}
+# The queue waits on the pier, and what a queued hand does there says why it waits. Only the
+# queue's own reasons decide it (pier_activity); nothing a queued hand does looks like work.
+PIER_ACTS = {
+    "cards": "playing cards on the pier: queued today, waits for a free build slot or lane",
+    "drink": "at the tavern bench with a mug: queued before today, waits for a free build slot or lane",
+    "board": "at the foot of the gangplank with a sea bag: nothing holds it, ready to board",
+    "talk": "on the pier, talking up to the hand it waits for",
+    "wait": "on the pier: waits for a task that is not aboard",
+    "doze": "asleep on the bench: held until its date",
+    "ask": "on the pier with a red flag: waits for your decision",
+}
+PLACE_TEXT.update({"pier-" + k: v for k, v in PIER_ACTS.items()})
+PIER_POSE = {"cards": "cards", "drink": "drink", "board": "stand", "talk": "talk", "wait": "stand", "doze": "doze", "ask": "stand"}
+PIER_STAGE = {"cards": "slot", "drink": "slot", "board": "board", "talk": "task", "wait": "task", "doze": "date", "ask": "flag"}
 CAPTAIN_STATES = {"parked", "blocked", "failed"}   # fm-crew-state.sh reports a needs-decision crew as parked
 SEA_LOAD = (0.6, 1.0)                              # load per CPU where the sea turns choppy, then rough
 OFF_DUTY_AFTER = 20 * 60                           # seconds without activity before an idle hand rests
 OFF_DUTY_PLACES = {"nest", "deck", "bow", "hatch"}  # waiting for CI or to go ashore is the job itself
 DAY_HOURS = (6, 18)                                # local hours of daylight in the picture
-MAX_QUEUE_BOATS = 8
 MAX_CRATES = 12
 NEST_SEATS = 6
 # strong project colours, none of them the red that marks a red flag
@@ -2316,11 +2399,29 @@ def off_duty(a, place, flagged, now):
 def project_colors(s):
     """A colour per project, in the order of data/projects.md so it stays put across refreshes."""
     names = list(s.get("projects") or [])
-    for a in s.get("agents") or []:
-        p = a.get("project") or ""
+    for p in [a.get("project") for a in s.get("agents") or []] + [q.get("repo") for q in s.get("queue") or []]:
         if p and p not in names:
             names.append(p)
     return {p: PROJECT_COLORS[i % len(PROJECT_COLORS)] for i, p in enumerate(names)}
+
+
+def pier_activity(q, aboard, today):
+    """What a queued task does on the pier, and the hand aboard it talks to: a slot or lane wait
+    plays cards when queued today and drinks at the tavern when queued on an earlier day, a task
+    with nothing holding it waits to board, one that waits for a hand aboard talks up to it (or
+    stands apart when what it waits for is not aboard), a dated hold dozes, and the captain's
+    decisions not tied astern wave a red flag. `today` is the local date as YYYY-MM-DD."""
+    k = q.get("reason")
+    if k == "decision":
+        return "ask", None
+    if k == "date":
+        return "doze", None
+    if k == "task":
+        partner = next((d for d in q.get("deps") or [] if d in aboard), None)
+        return ("talk", partner) if partner else ("wait", None)
+    if k in ("slot", "lane"):
+        return ("drink" if q.get("created") and q["created"][:10] < today else "cards"), None
+    return ("board" if k == "ready" else "wait"), None
 
 
 def ship_scene(s):
@@ -2356,6 +2457,9 @@ def ship_scene(s):
     queue = [{"id": q["id"], "title": q.get("title") or "", "repo": q.get("repo") or "", "kind": "queue",
               "flag": any(r[0] == "decision" for r in q.get("reasons") or []),
               "why": [r[1] for r in q.get("reasons") or []], "hold": q.get("hold_reason") or "",
+              "reason": (q.get("reasons") or [("ready",)])[0][0], "deps": list(q.get("deps") or []),
+              "slot": q.get("slot"), "created": q.get("created") or "",
+              "until": next((r[1] for r in q.get("reasons") or [] if r[0] == "date"), ""),
               "since": q.get("waiting_since"), "exact": q.get("waiting_exact", True)} for q in s.get("queue") or []]
     for q in queue:
         if not q["flag"]:
@@ -2370,9 +2474,24 @@ def ship_scene(s):
         x["line"], x["wait"] = i + 1, wait_text(x["since"], now, x["exact"])
         x["answer"] = marks.get(x["id"])
         x["tag"] = "%d · %s · %s" % (x["line"], x["id"], x["wait"])
+    # the captain's queued decisions tie up astern, the longest wait first; the rest of the queue is on the pier
+    astern = [x["id"] for x in line if x["kind"] == "queue"][:MAX_ASTERN]
+    aboard = {h["id"] for h in hands + scouts}
+    today = dt.date.fromtimestamp(now).isoformat()
+    pier = [q for q in queue if q["id"] not in astern]
+    for q in pier:
+        q["act"], q["partner"] = pier_activity(q, aboard, today)
+        q.update(place="pier-" + q["act"], stage=PIER_STAGE[q["act"]], project=q["repo"], phase=tr("queued"), off=False,
+                 color=colors.get(q["repo"], "#8a8a8a"))
+        if q["act"] == "talk":
+            q["tag"] = "%s → %s" % (q["id"], q["partner"])
+        elif q["act"] == "wait":
+            q["tag"] = tr("%s waits for %s") % (q["id"], ", ".join(q["deps"]) or "?")
+        elif q["act"] == "doze":
+            q["tag"] = "%s · %s" % (q["id"], q["until"])
     return {
         "line": line, "captain": {"busy": bool(line), "waiting": len(line), "oldest": line[0] if line else None},
-        "hands": hands, "scouts": scouts, "queue": queue, "crates": crates, "barrels": barrels,
+        "hands": hands, "scouts": scouts, "queue": queue, "astern": astern, "pier": pier, "crates": crates, "barrels": barrels,
         "firstmate": {"context": pct, "warn_at": warn, "over": pct is not None and pct >= warn,
                       "tokens": fm.get("context"), "limit": fm.get("limit"), "known": bool(fm)},
         "colors": {p: c for p, c in colors.items() if p in used},
@@ -2389,7 +2508,7 @@ def ship_counts(sc):
         parts.append(tr("%d red flag" if sc["flags"] == 1 else "%d red flags") % sc["flags"])
     if sc["off"]:
         parts.append(tr("%d off duty") % sc["off"])
-    parts.append(tr("%d boat moored" if len(sc["queue"]) == 1 else "%d boats moored") % len(sc["queue"]))
+    parts.append(tr("%d in the queue") % len(sc["queue"]))
     return " · ".join(parts)
 
 
@@ -2404,13 +2523,132 @@ CABIN_DOOR = 22       # the open door onto the main deck
 CABIN_TOP, CABIN_FLOOR = 156, 194
 ASTERN_STEP = 28      # between queued boats tied astern
 MAX_ASTERN = 6        # queued boats tied astern; the log below the scene lists every request
+TABLE_SEATS = 3       # a card table: one each side and one standing behind
+TABLE_W = 36          # a card table and its players
+MAX_TABLES = 4        # card tables per group waiting for a slot; the rest are counted
+MAX_ROW = 8           # hands on one bench or in one line on the pier; the rest are counted
+BENCH_STEP = 13
+LINE_STEP = 15
+DOZE_STEP = 20
+PIER_FEET = PIER + 8  # where a hand on the pier stands
+PIER_WEST = 32        # the tavern starts here, clear of the post in the near layer
+
+
+def sign_w(text):
+    return int(len(text) * 2.75) + 8
+
+
+def tavern_units(sc):
+    """The card tables and tavern bench of each group that waits for a slot (one per project, and
+    one for the home's lanes), in queue order, with the width each takes on the pier."""
+    units = {}
+    for q in sc["pier"]:
+        if q["act"] in ("cards", "drink"):
+            slot = q.get("slot") or {}
+            u = units.setdefault(slot.get("group", ""), {"slot": slot, "cards": [], "drink": []})
+            u[q["act"]].append(q)
+    out = []
+    for g, u in units.items():
+        n = len(u["cards"]) + len(u["drink"])
+        sl = u["slot"]
+        u["sign"] = (tr("SLOT %s · %d/%d taken · %d waiting") % (g, sl.get("taken", 0), sl.get("cap", 0), n) if g else
+                     tr("HOME LANES · %d/%d in use · %d waiting") % (sl.get("taken", 0), sl.get("cap", 0), n))
+        u["tables"] = -(-min(len(u["cards"]), TABLE_SEATS * MAX_TABLES) // TABLE_SEATS)
+        u["bench"] = min(len(u["drink"]), MAX_ROW)
+        more = len(u["cards"]) > TABLE_SEATS * MAX_TABLES or len(u["drink"]) > MAX_ROW
+        body = 6 + u["tables"] * TABLE_W + (BENCH_STEP * u["bench"] + 22 if u["bench"] else 0) + (12 if more else 0)
+        u["w"] = max(body, sign_w(u["sign"]) + 6)
+        out.append(u)
+    return out
+
+
+def pier_layout(sc, lay, x0):
+    """Where the queue stands on the pier: the tavern west of the ship, under the stern; then, from
+    the gangplank on, the talkers, each under the hand it talks to, the lines in the gaps they
+    leave, and the dozing bench under the forecastle. Nothing overlaps: the talkers claim their
+    places first, and a group that would land on another moves toward the bow to the first gap
+    wide enough. Returns the spots, the props, the signs, the counted overflow and where it ends."""
+    spots, props, signs, more = {}, [], [], []
+    x = PIER_WEST
+    for u in lay["tavern"]:
+        signs.append((u["sign"], x + u["w"] // 2, ""))
+        props.append(("lantern", x + 1))
+        tx = x + 16
+        players = u["cards"][:TABLE_SEATS * MAX_TABLES]
+        for t in range(u["tables"]):
+            seat = players[TABLE_SEATS * t:TABLE_SEATS * t + TABLE_SEATS]
+            props.append(("table", tx))
+            for i, q in enumerate(seat):
+                spots[q["id"]] = [(tx - 10, PIER_FEET, "cards", None), (tx + 9, PIER_FEET, "cards-l", None),
+                                  (tx + 1, PIER_FEET - 3, "stand", None)][i]
+            tx += TABLE_W
+        if u["bench"]:
+            props.append(("bench", tx - 4, tx + BENCH_STEP * u["bench"] + 2))
+            for i, q in enumerate(u["drink"][:MAX_ROW]):
+                spots[q["id"]] = (tx + BENCH_STEP * i, PIER_FEET, "drink", None)
+            tx += BENCH_STEP * u["bench"] + 2
+            props.append(("keg", tx))
+            tx += 18
+        hidden = u["cards"][TABLE_SEATS * MAX_TABLES:] + u["drink"][MAX_ROW:]
+        if hidden:
+            more.append((tx, hidden))
+        x += u["w"] + 14
+    # from the gangplank toward the bow
+    groups = []
+    for act, label, cls in (("board", tr("READY · boards next"), ""), ("ask", tr("WAITS FOR YOU"), " sm-sign--red"),
+                            ("wait", tr("WAITS FOR A TASK"), "")):
+        who = [q for q in sc["pier"] if q["act"] == act]
+        if who:
+            n = min(len(who), MAX_ROW)
+            groups.append({"act": act, "who": who, "pref": x0 + 92, "sign": (label, cls),
+                           "w": max(LINE_STEP * n + (12 if len(who) > n else 0), sign_w(label) + 4)})
+    for q in sc["pier"]:
+        if q["act"] == "talk":
+            spot = lay["hands"].get(q["partner"]) or lay["scouts"].get(q["partner"])
+            groups.append({"act": "talk", "who": [q], "pref": (spot[0] - 2) if spot else x0 + 92, "sign": None, "w": 16})
+    dozing = [q for q in sc["pier"] if q["act"] == "doze"]
+    if dozing:
+        n = min(len(dozing), MAX_ROW)
+        label = tr("ASLEEP · held until a date")
+        groups.append({"act": "doze", "who": dozing, "pref": lay["fc_x"] + 6, "sign": (label, ""),
+                       "w": max(DOZE_STEP * n + 8 + (12 if len(dozing) > n else 0), sign_w(label) + 4)})
+    taken, end = [], x0 + 92
+    order = {"talk": 0, "board": 1, "ask": 2, "wait": 3, "doze": 4}
+    for g in sorted(groups, key=lambda g: (order[g["act"]], g["pref"])):
+        gx = max(g["pref"], x0 + 92)
+        for a, b in sorted(taken):                         # the first gap at or after gx that fits it
+            if gx + g["w"] + 8 <= a:
+                break
+            gx = max(gx, b)
+        taken.append((gx, gx + g["w"] + 8))
+        end = max(end, gx + g["w"] + 8)
+        if g["sign"]:
+            signs.append((g["sign"][0], gx + g["w"] // 2, g["sign"][1]))
+        shown = g["who"][:MAX_ROW]
+        if g["act"] == "talk":
+            spots[g["who"][0]["id"]] = (gx + 2, PIER_FEET, "talk", None)
+        elif g["act"] == "doze":
+            props.append(("bench", gx, gx + DOZE_STEP * len(shown) + 4))
+            for i, q in enumerate(shown):
+                spots[q["id"]] = (gx + 4 + DOZE_STEP * i, PIER_FEET, "doze", None)
+        else:
+            for i, q in enumerate(shown):
+                spots[q["id"]] = (gx + LINE_STEP * i, PIER_FEET, "stand", None)
+                if g["act"] == "board":
+                    props.append(("bag", gx + LINE_STEP * i + 10))
+        if len(g["who"]) > len(shown):
+            more.append((gx + (DOZE_STEP if g["act"] == "doze" else LINE_STEP) * len(shown) + 4, g["who"][len(shown):]))
+    return spots, props, signs, more, end
 
 
 def ship_layout(sc):
     """Where every hand, boat and part of the ship goes. Hands get (x, feet, pose, upto) with x
     the sprite's left edge and feet its lowest painted row; nothing here depends on the clock."""
     cabin = [h for h in sc["line"] if h["kind"] != "queue"]
-    astern = [q for q in sc["line"] if q["kind"] == "queue"][:MAX_ASTERN]
+    by_q = {q["id"]: q for q in sc["queue"]}
+    astern = [by_q[i] for i in sc["astern"]]
+    tavern = tavern_units(sc)
+    west = sum(u["w"] + 14 for u in tavern)
     by = {k: [h for h in sc["hands"] if h["place"] == k and not h["line"]] for k in PLACES + ["hatch"]}
     n = {k: len(v) for k, v in by.items()}
     castle = CABIN_X + CABIN_DESK + CABIN_STEP * max(CABIN_MIN, len(cabin)) + CABIN_DOOR
@@ -2419,7 +2657,7 @@ def ship_layout(sc):
     rail_zone = max(40, 26 * n["rail"] + 16)
     deck_len = max(260, deck_zone + hatch_zone + rail_zone)
     fc_len = max(104, 46 * n["bow"] + 18)
-    x0 = 70 + 22 * max(0, n["plank"] - 3) + (ASTERN_STEP * len(astern) + 14 if astern else 0)
+    x0 = 22 * max(0, n["plank"] - 3) + max(70 + (ASTERN_STEP * len(astern) + 14 if astern else 0), PIER_WEST + west + 16)
     length = castle + deck_len + fc_len
     deck_x, fc_x = x0 + castle, x0 + castle + deck_len
     hatch_x = deck_x + deck_zone + 4
@@ -2428,7 +2666,7 @@ def ship_layout(sc):
     nest_w = max(54, 22 * min(n["nest"], NEST_SEATS) + 10)
     out = {"x0": x0, "length": length, "castle": castle, "cabin": (x0 + CABIN_X, x0 + castle - 4), "deck_x": deck_x, "deck_len": deck_len, "fc_x": fc_x, "fc_len": fc_len,
            "hatch_x": hatch_x, "rail_x": rail_x, "main_x": main_x, "nest": (main_x + 2 - nest_w // 2, nest_w),
-           "hold": (x0 + 98, deck_x + deck_zone + hatch_zone - 8), "hands": {}}
+           "hold": (x0 + 98, deck_x + deck_zone + hatch_zone - 8), "hands": {}, "tavern": tavern}
     put = out["hands"]
     ladder = ((main_x - 38, FAR), (main_x - 8, 46))
     for i, h in enumerate(by["nest"]):
@@ -2471,6 +2709,8 @@ def ship_layout(sc):
     out["scouts"] = {}
     for i, h in enumerate(sb["out"]):
         out["scouts"][h["id"]] = (right + 30 * i, HOR + 14, "spy", 9)
+    out["pier"], out["pier_props"], out["pier_signs"], out["pier_more"], pier_end = pier_layout(sc, out, x0)
+    right = max(right, pier_end + 30)                   # moored scouts and crates keep clear of the queue
     for i, h in enumerate(sb["back"]):                  # rowing back: out at sea, clear of the pier
         out["scouts"][h["id"]] = (right + 44 + 30 * i, WL + 16, "scroll", 10)
     for i, h in enumerate(sb["dock"]):
@@ -2478,12 +2718,13 @@ def ship_layout(sc):
     out["crates_x"] = right + 30 * max(1, len(sb["dock"])) + 10
     widest = max([1] + [len(v) for v in sb.values()] + [len(sb["back"]) + 2])
     out["width"] = max(640, right + 30 * widest + 9 * ((min(len(sc["crates"]), MAX_CRATES) + 2) // 3) + 70)
-    out["queue_x"] = x0 + 160
     # the opening frame: the deck and every hand aboard, with a margin; the nest only when manned
     # the opening frame also takes in the captain's cabin and the boats tied astern
-    xs = ([x0 + CABIN_X - 10, fc_x + fc_len] + [x for x, _f, _p, _u in put.values()] + [x + 18 for x, _f, _p, _u in put.values()]
+    # and the queue on the pier below it; the tavern, west of the ship, is a pan or a stage chip away
+    every = list(put.values()) + list(out["pier"].values())
+    xs = ([x0 + CABIN_X - 10, fc_x + fc_len] + [x for x, _f, _p, _u in every if x >= x0] + [x + 18 for x, _f, _p, _u in every if x >= x0]
           + list(out["astern"].values()))
-    ys = ([FAR - 50, NEAR + 20] + [f - 26 for _x, f, _p, _u in put.values()] + [f + 4 for _x, f, _p, _u in put.values()]
+    ys = ([FAR - 50, NEAR + 20] + [f - 26 for _x, f, _p, _u in every] + [f + 8 for _x, f, _p, _u in every]
           + ([WL + 8] if astern else []))
     out["crew"] = (min(xs) - 12, min(ys) - 8, max(xs) - min(xs) + 24, max(ys) - min(ys) + 16)
     return out
@@ -2551,6 +2792,20 @@ POSES = {
                        + [(x, y, "O") for x in range(1, 6) for y in (12, 13)]
                        + [(11, 12, "w"), (12, 12, "w"), (11, 13, "w"), (12, 13, "w"), (13, 13, "w"), (14, 13, "w"), (14, 12, "w")],
                        clear=LEGS),
+    # the queue on the pier, sitting on a stool: holding cards, or a mug at the mouth
+    "cards": build_pose(12, 14, 0, 0, [(x, 11, "p") for x in range(2, 8)] + [(7, 12, "p"), (8, 12, "p"), (8, 13, "b"), (9, 13, "b")]
+                        + [(x, y, "O") for x in range(1, 6) for y in (12, 13)] + [(7, 8, "c"), (8, 8, "s")]
+                        + [(x, y, "w") for x in (9, 10) for y in (6, 7)] + [(11, 6, "w"), (10, 6, "r")],
+                        clear=LEGS + ARMS_R),
+    "drink": build_pose(11, 14, 0, 0, [(x, 11, "p") for x in range(2, 8)] + [(7, 12, "p"), (8, 12, "p"), (8, 13, "b"), (9, 13, "b")]
+                        + [(x, y, "O") for x in range(1, 6) for y in (12, 13)] + [(7, 7, "c"), (8, 6, "c"), (8, 5, "s")]
+                        + [(x, y, "l") for x in (7, 8) for y in (3, 4)] + [(9, 4, "l"), (7, 2, "w"), (8, 2, "w")],
+                        clear=LEGS + ARMS_R),
+    # standing, looking up at the hand it waits for, one arm up
+    "talk": build_pose(10, 14, 0, 0, [(7, 7, "c"), (8, 6, "c"), (9, 5, "s"), (5, 3, "s"), (5, 2, "E")], clear=ARMS_R),
+    # asleep sitting up, eyes shut
+    "doze": build_pose(11, 14, 0, 0, [(x, 11, "p") for x in range(2, 8)] + [(7, 12, "p"), (8, 12, "p"), (8, 13, "b"), (9, 13, "b")]
+                       + [(x, y, "O") for x in range(1, 6) for y in (12, 13)] + [(4, 3, "E"), (5, 3, "E")], clear=LEGS),
     "helm": ["..NNNNN..", ".NNNNNNN.", "..ggggg..", "..hssss..", "..hssEs..", "..hssss..", "...sss...",
              "..nnnnn..", ".nngnnnn.", ".nnngnnn.", ".snnnnns.", "..nnnnn..", "..pp.pp..", "..pp.pp..", ".bbb.bbb."],
 }
@@ -2720,8 +2975,15 @@ class Tags:
     def __init__(self):
         self.boxes, self.out = [], []
 
-    def place(self, text, cx, top, owner=""):
+    def place(self, text, cx, top, owner="", hover=False):
+        """A tag over (cx, top). A hover tag shows only while its hand is hovered or focused, alone,
+        so it takes no room from the others."""
         w, h = int(len(text) * 2.75) + 5, 7
+        if hover:
+            x0, y0 = int(cx - w / 2), top - h - 2
+            self.out.append('<g class="sm-tag is-hover" data-for="%s" data-ax="%d" data-ay="%d"><rect x="%d" y="%d" width="%d" height="%d" rx="1.5"/>'
+                            '<text x="%d" y="%.1f">%s</text></g>' % (esc(owner), cx, top, x0, y0, w, h, cx, y0 + 5.2, esc(text)))
+            return (x0, y0, x0 + w, y0 + h)
         for dy in (0, -8, -16, 8, -24, 16, -32, -40):
             x0, y0 = int(cx - w / 2), top - h - 2 + dy
             box = (x0, y0, x0 + w, y0 + h)
@@ -2737,20 +2999,30 @@ class Tags:
         return "".join(self.out)
 
 
-def hand_svg(h, spot, tags, extra=None, shadow_on=True):
-    """One clickable hand at its spot, with its flag, its rest marks, and its name tag."""
-    x, feet, pose, upto = spot
+def hand_sprite(p, h, x, feet, pose, upto=None):
+    """The one place that paints a hand: its pose's rows (cut at `upto` rows), in its own colours,
+    with its feet on row `feet` and its left edge at x. Returns the rows painted and the top row.
+    Every hand, aboard or on the pier, and every chip icon of a hand comes through here, so a new
+    art style replaces POSES, hand_palette and this function and nothing else."""
     rows = POSES[pose][:upto]
-    base, left = pose.split("-")[0], pose.endswith("-l")
     top = feet - len(rows) + 1
-    p = Pix()
     p.shaded(x, top, rows, hand_palette(h))
+    return rows, top
+
+
+def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
+    """One clickable hand at its spot, with its flag, its rest marks, and its name tag (shown only
+    on hover or focus with hover_tag)."""
+    x, feet, pose, upto = spot
+    base, left = pose.split("-")[0], pose.endswith("-l")
+    p = Pix()
+    rows, top = hand_sprite(p, h, x, feet, pose, upto)
     if extra:
         extra(p, top)
     if h["place"] == "hatch":
         p.sprite(x + 2, top - 8, QMARK, {})
-    if pose == "rest":
-        p.sprite(x + 9, top - 7, ZZZ, {})
+    if base in ("rest", "doze"):
+        p.sprite(x - 2 if left else x + 9, top - 7, ZZZ, {})
     flag = ""
     if h["flag"]:
         f = Pix()
@@ -2758,13 +3030,16 @@ def hand_svg(h, spot, tags, extra=None, shadow_on=True):
         flag = f.svg(' class="sm-redflag"')
     off = {"signal": 8, "pack": 7}.get(base, 4)
     cx = x + (len(rows[0]) - 1 - off if left else off)
-    tags.place(h.get("tag") or h["id"], cx, top - (10 if h["flag"] else 1) + (4 if base in ("hammer", "signal") else 0), h["id"])
+    tags.place(h.get("tag") or h["id"], cx, top - (10 if h["flag"] else 1) + (4 if base in ("hammer", "signal") else 0), h["id"],
+               hover=hover_tag)
     state = tr("; off duty") if h["off"] else ""
     title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or tr("no project"), tr(PLACE_TEXT[h["place"]]), h["phase"], state,
                                        tr("; needs the captain: ") + "; ".join(h["why"]) if h["flag"] else "")
+    if h.get("kind") == "queue":
+        title += " · %s%s" % (", ".join(h["why"]), (" · " + h["title"]) if h.get("title") else "")
     if h.get("line"):
         title += tr("; number %d in line for the captain, waiting %s") % (h["line"], h["wait"])
-    stage = "scouts" if h.get("kind") == "scout" else h["place"]
+    stage = h.get("stage") or ("scouts" if h.get("kind") == "scout" else h["place"])
     return ('%s<g class="sm-hand pose-%s%s" data-id="%s" data-stage="%s"%s tabindex="0" role="button" aria-label="%s"><title>%s</title>%s%s</g>'
             % (shadow(cx, feet + 1) if shadow_on else "", base, " has-flag" if h["flag"] else "", esc(h["id"]), stage,
                ' data-off="1"' if h["off"] else "", esc(tr("%s: details") % title), esc(title), p.svg(), flag))
@@ -2986,12 +3261,84 @@ def paint_signs(sc, lay, tags):
     if lay["astern"]:
         xs = list(lay["astern"].values())
         sign(tags, tr("ASTERN · queued, waiting for you"), (min(xs) + max(xs) + 16) // 2, WL + 11, " sm-sign--red")
-    pier = len(sc["queue"]) - len(lay["astern"])
-    if pier:
-        sign(tags, tr("QUEUE"), lay["queue_x"] + 13 * min(pier, MAX_QUEUE_BOATS), PIER + 10)
+    for text, cx, cls in lay["pier_signs"]:
+        sign(tags, text, cx, PIER + 11, cls)
     if lay["scouts"]:
         sign(tags, tr("SCOUTS"), min(v[0] for v in lay["scouts"].values()) + 20, HOR - 4)
     sign(tags, tr("DELIVERED · %d days") % DAYS, lay["crates_x"] + 14, PIER + 10)
+
+
+def pier_prop(p, kind, x, x1=None):
+    """The pier's furniture: a card table, a bench, a keg, a sea bag, a lantern post."""
+    if kind == "table":
+        p.rect(x, PIER + 3, 10, 2, "#8a5530")
+        p.rect(x, PIER + 3, 10, 1, "#b07a45")
+        p.rect(x + 1, PIER + 5, 1, 4, "#5a3418")
+        p.rect(x + 8, PIER + 5, 1, 4, "#5a3418")
+    elif kind == "bench":
+        p.rect(x, PIER + 5, x1 - x, 2, "#7a4a24")
+        p.rect(x, PIER + 5, x1 - x, 1, "#a06a32")
+        for lx in sorted({x + 1, x1 - 2} | set(range(x + 26, x1 - 8, 26))):
+            p.rect(lx, PIER + 7, 1, 2, "#3e220f")
+    elif kind == "keg":
+        p.shaded(x, PIER_FEET - 11, BARREL, BARREL_INK)
+    elif kind == "bag":
+        p.rect(x, PIER_FEET - 4, 4, 5, "#c9b48a")
+        p.rect(x, PIER_FEET - 4, 4, 1, lit("#c9b48a"))
+        p.rect(x + 1, PIER_FEET - 5, 2, 1, "#7a5a30")
+    elif kind == "lantern":
+        p.rect(x, PIER - 12, 1, 20, "#3e220f")
+        p.rect(x - 2, PIER - 17, 5, 5, "#24170d")
+        p.rect(x - 1, PIER - 16, 3, 3, "#f2c35a")
+        p.dot(x - 1, PIER - 16, "#fff0b0")
+
+
+def talk_bubble(x, y):
+    """A small speech balloon with three dots, its tail at (x, y): a hand talking."""
+    p = Pix()
+    p.rect(x - 1, y - 7, 10, 6, "#1d140c")
+    p.rect(x, y - 6, 8, 4, "#fffdf7")
+    for k in range(3):
+        p.dot(x + 1 + 2 * k + (k > 0), y - 4, "#1d140c")
+    p.dot(x, y - 1, "#1d140c")
+    p.dot(x + 1, y - 2, "#fffdf7")
+    return p.svg(' class="sm-talk"')
+
+
+def draw_pier(sc, lay, tags, lights, night):
+    """The queue on the pier: the tavern's tables, bench and keg, the lines, the talkers with their
+    balloons and a dotted line up to the hand they wait for, the dozing bench, and the counts of
+    those with no room left."""
+    spots, out = lay["pier"], []
+    props, cards = Pix(), Pix()
+    for kind, x, *rest in lay["pier_props"]:
+        pier_prop(props, kind, x, *(rest or [None]))
+        if kind == "table":
+            cards.rect(x + 3, PIER + 2, 2, 1, "#fbf6ea")            # cards laid on the table
+            cards.dot(x + 6, PIER + 2, "#fbf6ea")
+        if kind == "lantern" and night:
+            lights.append('<circle cx="%d" cy="%d" r="12" fill="#ffd77a" opacity="0.25"/>' % (x, PIER - 14))
+    who = sorted((q for q in sc["pier"] if q["id"] in spots), key=lambda q: (spots[q["id"]][1], spots[q["id"]][0]))
+    behind = [q for q in who if spots[q["id"]][1] < PIER_FEET]
+    for q in behind:
+        out.append(hand_svg(q, spots[q["id"]], tags, hover_tag=True))
+    out += [props.svg(), cards.svg(' class="sm-deal"')]
+    for q in who:
+        if q in behind:
+            continue
+        x, feet, pose, _u = spots[q["id"]]
+        out.append(hand_svg(q, spots[q["id"]], tags, hover_tag=q["act"] in ("cards", "drink")))
+        if q["act"] == "talk":
+            to = lay["hands"].get(q["partner"]) or lay["scouts"].get(q["partner"])
+            if to:
+                out.append('<line class="sm-talkline" x1="%d" y1="%d" x2="%d" y2="%d"/>' % (x + 8, feet - 15, to[0] + 5, to[1] - 12))
+            out.append(talk_bubble(x + 11, feet - 6))           # beside the face, under its name tag
+        if q["act"] == "ask" and q.get("line"):
+            out.append(line_number(q["line"], x - 1, feet + 1))
+    for x, hidden in lay["pier_more"]:
+        out.append('<g><title>%s</title><text class="sm-ship__more" x="%d" y="%d">+%d</text></g>'
+                   % (esc(", ".join(q["id"] for q in hidden)), x, PIER_FEET - 3, len(hidden)))
+    return "".join(out)
 
 
 def render_ship(sc):
@@ -3181,14 +3528,9 @@ def render_ship(sc):
             p.line(x + 17, t + 1, x + 17, WL + 10, "#f2f5f8")
             p.rect(x + 16, WL + 9, 3, 3, "#f6f1e3")
         ship.append(hand_svg(h, spots[h["id"]], tags, extra=line, shadow_on=False))
-    # the pier: the queue moored behind it, scouts back with their maps, crates of delivered work
+    # the pier: the captain's queued decisions tied astern, the rest of the queue on the pier (drawn
+    # after it), scouts back with their maps, crates of delivered work
     ship.append(draw_astern(sc, lay, tags))
-    moored = [q for q in sc["queue"] if q["id"] not in lay["astern"]]
-    for i, q in enumerate(moored[:MAX_QUEUE_BOATS]):
-        ashore.append(queue_boat(q, lay["queue_x"] + 26 * i, PIER - 2))
-    if len(moored) > MAX_QUEUE_BOATS:
-        ashore.append('<text class="sm-ship__more" x="%d" y="%d">+%d</text>'
-                      % (lay["queue_x"] + 26 * MAX_QUEUE_BOATS + 2, PIER - 4, len(moored) - MAX_QUEUE_BOATS))
     stuff = Pix()
     for h in sc["scouts"]:
         if h["line"]:
@@ -3212,6 +3554,7 @@ def render_ship(sc):
     for x in range(40, W, 64):
         pier.shaded(x, PIER - 4, ["OOO", "OoO", "OoO"], {"O": "#2a1a10", "o": "#4a3020"})
     ashore.append(pier.svg())
+    ashore.append(draw_pier(sc, lay, tags, lights, night))
     for i in range(min(len(sc["crates"]), MAX_CRATES)):
         stuff.shaded(lay["crates_x"] + 9 * (i // 3), PIER + 2 - 8 * (i % 3 + 1), CRATE, CRATE_INK)
     ashore.append('<g><title>%s</title>%s</g>'
@@ -3233,10 +3576,10 @@ def render_ship(sc):
             ashore.append(hand_svg(h, spots[h["id"]], tags, shadow_on=False))
     # the near layer: out of focus, dark and chunky, at the edges so it hides nobody
     fg = Pix()
-    fg.rect(4, 286, 18, 54, "#1c120a")
-    fg.rect(4, 286, 18, 3, "#2a1a10")
-    for k in range(4):
-        fg.rect(0, 300 + 6 * k, 28, 3, "#3a2414")
+    fg.rect(4, PIER + 13, 18, SHIP_H - PIER - 13, "#1c120a")      # below the pier's surface: the queue stands on it
+    fg.rect(4, PIER + 13, 18, 3, "#2a1a10")
+    for k in range(3):
+        fg.rect(0, PIER + 18 + 6 * k, 28, 3, "#3a2414")
     fg.rect(W - 18, 214, 6, 126, "#1c120a")
     fg.rect(W - 26, 204, 22, 4, "#1c120a")
     fg.rect(W - 24, 208, 18, 14, "#24170d")
@@ -3272,7 +3615,12 @@ def sprite_icon(rows, pal, scale=2):
 
 
 def pose_icon(pose, scale=2, color=None):
-    return sprite_icon(POSES[pose], hand_palette({"id": "key", "color": color or PROJECT_COLORS[0]}), scale)
+    """A small inline picture of a hand in a pose, painted by hand_sprite like the hands in the scene."""
+    p = Pix()
+    rows, _top = hand_sprite(p, {"id": "key", "color": color or PROJECT_COLORS[0]}, 1, len(POSES[pose]), pose)
+    w, h = max(len(r) for r in rows) + 2, len(rows) + 2
+    return ('<svg class="sm-icon" viewBox="0 0 %d %d" width="%d" height="%d" shape-rendering="crispEdges" aria-hidden="true">%s</svg>'
+            % (w, h, w * scale, h * scale, p.svg()))
 
 
 def flag_icon(scale=2):
@@ -3297,9 +3645,17 @@ STAGES = [
     ("hatch", "stand", "phase unknown", "under a question mark: no sign of its phase yet"),
     ("scouts", "scroll", "scouts", "in a skiff: rowing out to explore, back with the map, then moored at the pier with the report"),
     ("off", "rest", "off duty", "sitting with the dice: paused, or quiet for a while"),
+    ("slot", "cards", "waiting for a slot", "at a card table on the pier, or at the tavern bench when queued before today: "
+                                            "waits for a free build slot or lane"),
+    ("board", "stand", "ready to board", "at the foot of the gangplank with a sea bag: queued, and nothing holds it"),
+    ("task", "talk", "waiting for a task", "on the pier talking up to the hand it waits for, or standing apart when that task is not aboard"),
+    ("date", "doze", "held until a date", "asleep on the bench: queued and held until its date"),
     ("flag", None, "waiting for you", "a red flag: needs your decision; hands wait in your cabin and queued tasks are tied astern, "
                                       "longest wait first, and the log below lists them all"),
 ]
+
+
+PIER_STAGES = ("slot", "board", "task", "date")
 
 
 def stage_members(sc, key):
@@ -3309,6 +3665,8 @@ def stage_members(sc, key):
         return [h for h in sc["hands"] if h["off"]]
     if key == "scouts":
         return sc["scouts"]
+    if key in PIER_STAGES:
+        return [q for q in sc["pier"] if q["stage"] == key]
     return [h for h in sc["hands"] if h["place"] == key]
 
 
@@ -3317,7 +3675,7 @@ def stage_chips(sc):
     out = []
     for key, pose, name, where in STAGES:
         who = stage_members(sc, key)
-        if not who and key in ("hatch", "scouts"):
+        if not who and key in ("hatch", "scouts") + PIER_STAGES:
             continue
         name, where = tr(name), tr(where)
         desc = "%s: %s. %s" % (name[0].upper() + name[1:], where,
@@ -3405,24 +3763,34 @@ def demo_snapshot(now=None):
         agent("DEMO-SCOUT-UX", "Review the onboarding flow", "lighthouse-web", 2, crew="done", kind="scout"),
     ]
     day = dt.date.fromtimestamp(now)
+    slot = {"group": "harbor-api", "cap": 2, "taken": 2, "holders": ["DEMO-AUTH", "DEMO-RATE"]}
+
+    def queued(tid, title, repo, reason, kind="ship", hold="", deps=(), days=0):
+        short, full = {
+            "slot": (tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % (repo, 2, 2, "DEMO-AUTH, DEMO-RATE")),
+            "decision": (tr("captain's decision"), hold),
+            "date": (tr("held until %s") % fmt_date_iso((day + dt.timedelta(days=3)).isoformat()), "held"),
+            "task": (tr("waits for %s") % ", ".join(deps), tr("waits for %s") % ", ".join(deps)),
+            "ready": (tr("ready to dispatch"), tr("nothing holds it: firstmate can dispatch it")),
+        }[reason]
+        return {"id": tid, "title": title, "repo": repo, "kind": kind, "created": (day - dt.timedelta(days=days)).isoformat(),
+                "reasons": [(reason, short, full)], "hold_reason": hold, "deps": list(deps),
+                "slot": slot if reason == "slot" else None}
+
+    # every way to wait: for a build slot (cards today, the tavern since an earlier day), with nothing
+    # holding it, for a hand aboard or for a queued task, for a date, and for the captain
     queue = [
-        {"id": "DEMO-Q-PUSH", "title": "Push notifications", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("slot", tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % ("harbor-api", 2, 2, "DEMO-AUTH, DEMO-RATE"))],
-         "hold_reason": ""},
-        {"id": "DEMO-Q-BILL", "title": "New billing plan", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("decision", tr("captain's decision"), "which plan ships first")], "hold_reason": "which plan ships first"},
-        {"id": "DEMO-Q-MAPS", "title": "Offline maps", "repo": "lighthouse-web", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("date", tr("held until %s") % fmt_date_iso((day + dt.timedelta(days=3)).isoformat()), "held")],
-         "hold_reason": ""},
-        {"id": "DEMO-Q-AUDIT", "title": "Audit log", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("task", tr("waits for %s") % "DEMO-AUTH", tr("waits for %s") % "DEMO-AUTH")], "hold_reason": ""},
-        {"id": "DEMO-Q-THEME", "title": "Theme picker", "repo": "lighthouse-web", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("ready", tr("ready to dispatch"), tr("nothing holds it: firstmate can dispatch it"))], "hold_reason": ""},
-        {"id": "DEMO-Q-TILES", "title": "Faster chart tiles", "repo": "tide-charts", "kind": "scout", "created": day.isoformat(),
-         "reasons": [("decision", tr("captain's decision"), "worth a scout?")], "hold_reason": "worth a scout?"},
-        {"id": "DEMO-Q-DOCS", "title": "API reference pages", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("slot", tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % ("harbor-api", 2, 2, "DEMO-AUTH, DEMO-RATE"))],
-         "hold_reason": ""},
+        queued("DEMO-Q-PUSH", "Push notifications", "harbor-api", "slot"),
+        queued("DEMO-Q-BILL", "New billing plan", "harbor-api", "decision", hold="which plan ships first"),
+        queued("DEMO-Q-MAPS", "Offline maps", "lighthouse-web", "date"),
+        queued("DEMO-Q-AUDIT", "Audit log", "harbor-api", "task", deps=["DEMO-AUTH"]),
+        queued("DEMO-Q-THEME", "Theme picker", "lighthouse-web", "ready"),
+        queued("DEMO-Q-TILES", "Faster chart tiles", "tide-charts", "decision", kind="scout", hold="worth a scout?"),
+        queued("DEMO-Q-DOCS", "API reference pages", "harbor-api", "slot"),
+        queued("DEMO-Q-WEBHOOK", "Outgoing webhooks", "harbor-api", "slot"),
+        queued("DEMO-Q-QUOTAS", "Per-team quotas", "harbor-api", "slot", days=2),
+        queued("DEMO-Q-EXPORT2", "Export to spreadsheets", "tide-charts", "task", deps=["DEMO-EXPORT"]),
+        queued("DEMO-Q-AUDITUI", "Audit log page", "lighthouse-web", "task", deps=["DEMO-Q-AUDIT"]),
     ]
 
     def lane(label, rem, reset_h, runway, exhaust_h=None):
