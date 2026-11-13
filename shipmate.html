@@ -46,22 +46,26 @@
         <h2 class="fm-sign fm-sign--eyebrow">The ship</h2>
         <span class="sm-faint sm-counts" id="b-shipcounts">{{SHIPCOUNTS}}</span>
       </div>
+      <div class="sm-stages" id="b-shipstages" role="group" aria-label="Light a stage">{{SHIPSTAGES}}</div>
+      <p class="sm-stage" id="sm-stage" aria-live="polite">Click a stage to light its hands and take the view to them.</p>
       <div class="sm-ship" id="sm-ship">
         <div class="sm-ship__tools">
           <button type="button" data-zoom="in" aria-label="Zoom in">+</button>
           <button type="button" data-zoom="out" aria-label="Zoom out">−</button>
           <button type="button" class="is-wide" data-zoom="crew" aria-label="Frame the crew">crew</button>
           <button type="button" class="is-wide" data-zoom="all" aria-label="Fit everything">fit all</button>
+          <button type="button" class="is-wide" data-signs aria-pressed="true" aria-label="Show the signs on the ship">signs</button>
         </div>
         <div class="sm-ship__zoom" id="sm-ship-zoom" aria-hidden="true"></div>
         <div id="b-ship">{{SHIP}}</div>
       </div>
-      <p class="sm-faint sm-ship__hint">Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand or a queued boat for its details.</p>
+      <div class="sm-log" id="b-shiplog" aria-label="Waiting for you">{{SHIPLOG}}</div>
+      <p class="sm-faint sm-ship__hint">Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand, a queued boat or a card in the log for its details.</p>
       <div class="sm-key">
-        <section><h3 class="fm-sign fm-sign--eyebrow">Where a hand stands is its phase</h3><ul class="sm-key__poses">{{SHIPKEY}}</ul></section>
         <section><h3 class="fm-sign fm-sign--eyebrow">Projects aboard</h3><ul class="sm-key__projects" id="b-shipprojects">{{SHIPPROJECTS}}</ul>
           <p class="sm-faint">A shirt and bandana take the project's colour, and so do the stripes on the sails.
           A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued boat waits on the captain's decision.
+          Whoever needs the captain waits in the captain's cabin, and a queued task tied astern, numbered by how long it has waited; the captain attends them at the desk, or sits with a mug when nobody waits.
           Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.
           Water in the hold: firstmate's context, the white line its warning threshold.
           Scouts row out to the horizon, back with the map, and moor at the pier with it.
@@ -113,7 +117,7 @@
   var dtitle = document.getElementById("sm-drawer-title");
   var openId = null;
   var lastFocus = null;
-  var OPENS = ".sm-card[data-id], .sm-hand[data-id], .sm-boat[data-id]";
+  var OPENS = ".sm-card[data-id], .sm-hand[data-id], .sm-boat[data-id], .sm-logcard[data-id]";
   var view = "board";
   try { if (localStorage.getItem("shipmate.view") === "ship") view = "ship"; } catch (e) {}
 
@@ -250,6 +254,78 @@
   })();
   window.shipView = ship;
 
+  // the stage chips: one lights its hands, fades the rest, and takes the view to them; the
+  // choice survives the refresh, which only swaps the drawing and the chips
+  var stages = (function () {
+    var lit = null, note = document.getElementById("sm-stage"), HINT = note.textContent;
+    function svg() { return document.querySelector("#b-ship svg"); }
+    function members(s, key) {
+      if (key === "flag") return [].slice.call(s.querySelectorAll(".sm-hand.has-flag, .sm-boat[data-flag]"));
+      if (key === "off") return [].slice.call(s.querySelectorAll(".sm-hand[data-off]"));
+      return [].slice.call(s.querySelectorAll('.sm-hand[data-stage="' + key + '"]'));
+    }
+    function frame(els) {
+      var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      els.forEach(function (e) {
+        var b = e.getBBox();
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.width); y1 = Math.max(y1, b.y + b.height);
+      });
+      var w = Math.max(80, x1 - x0 + 40), h = Math.max(60, y1 - y0 + 40);
+      ship.box((x0 + x1) / 2 - w / 2, (y0 + y1) / 2 - h / 2 - 6, w, h);
+    }
+    function light(key, move) {
+      var s = svg(), chip = key && document.querySelector('.sm-chip[data-stage="' + key + '"]');
+      if (key && (!chip || chip.disabled)) key = null;
+      lit = key;
+      [].forEach.call(document.querySelectorAll(".sm-chip"), function (c) {
+        c.setAttribute("aria-pressed", String(c.getAttribute("data-stage") === key));
+      });
+      note.textContent = chip && key ? chip.getAttribute("data-desc") : HINT;
+      if (!s) return;
+      [].forEach.call(s.querySelectorAll(".is-lit"), function (e) { e.classList.remove("is-lit"); });
+      if (!key) { s.removeAttribute("data-lit"); return; }
+      s.setAttribute("data-lit", key);
+      var els = members(s, key);
+      els.forEach(function (e) {
+        e.classList.add("is-lit");
+        var t = s.querySelector('.sm-tag[data-for="' + e.getAttribute("data-id") + '"]');
+        if (t) t.classList.add("is-lit");
+      });
+      if (move && els.length) frame(els);
+    }
+    document.getElementById("b-shipstages").addEventListener("click", function (e) {
+      var c = e.target.closest(".sm-chip");
+      if (c) { var k = c.getAttribute("data-stage"); light(lit === k ? null : k, lit !== k); }
+    });
+    return { light: light, lit: function () { return lit; } };
+  })();
+
+  // the painted signs can be put away; the browser remembers it
+  var signsBtn = document.querySelector("[data-signs]");
+  function signs(on) {
+    document.getElementById("sm-ship").classList.toggle("no-signs", !on);
+    signsBtn.setAttribute("aria-pressed", String(on));
+  }
+  try { signs(localStorage.getItem("shipmate.signs") !== "off"); } catch (e) { signs(true); }
+  signsBtn.addEventListener("click", function () {
+    var on = signsBtn.getAttribute("aria-pressed") !== "true";
+    signs(on);
+    try { localStorage.setItem("shipmate.signs", on ? "on" : "off"); } catch (e) {}
+  });
+
+  // a card in the log lights its hand or boat in the scene while pointed at
+  function logLight(e, on) {
+    var c = e.target.closest && e.target.closest(".sm-logcard[data-id]"), s = document.querySelector("#b-ship svg");
+    if (!c || !s) return;
+    var g = s.querySelector('[data-id="' + c.getAttribute("data-id").replace(/"/g, "") + '"]');
+    if (g) g.classList.toggle("is-hl", on);
+  }
+  var logEl = document.getElementById("b-shiplog");
+  logEl.addEventListener("pointerover", function (e) { logLight(e, true); });
+  logEl.addEventListener("pointerout", function (e) { logLight(e, false); });
+  logEl.addEventListener("focusin", function (e) { logLight(e, true); });
+  logEl.addEventListener("focusout", function (e) { logLight(e, false); });
+
   function loadShip() {
     fetch("/ship", { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error(String(r.status));
@@ -258,7 +334,10 @@
       document.getElementById("b-ship").innerHTML = b.ship;
       document.getElementById("b-shipcounts").textContent = b.counts;
       document.getElementById("b-shipprojects").innerHTML = b.projects;
+      document.getElementById("b-shipstages").innerHTML = b.stages;
+      document.getElementById("b-shiplog").innerHTML = b.log;
       ship.bind();
+      stages.light(stages.lit(), false);
     }).catch(function () {});
   }
   function setView(v, fresh) {

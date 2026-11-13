@@ -8,7 +8,7 @@ It shows one page, read live from the home's own records every time the page loa
 - **A fixed sidebar** on the right keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
 - **A detail drawer** opens from any card: read-only facts about that piece of work, gathered from the home's records.
 - **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
-- **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as one ship in pixel art, seen from the side and cut away: each agent is a hand whose place on board is its phase. It zooms and pans, and the page remembers the choice of view in the browser.
+- **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as one ship in pixel art, seen from the side and cut away: each agent is a hand whose place on board is its phase, and signs painted on the ship say what each place means. Whoever waits on the captain lines up in the captain's cabin, longest wait first, and a log below the scene lists them. Chips above it light one stage at a time. It zooms and pans, and the page remembers the choice of view in the browser.
 
 Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
 
@@ -82,6 +82,8 @@ On Linux a `systemd --user` service with the same command does the same job.
 | Agent rows | `state/<id>.meta` (project, model, effort, account, worktree, spawn time), `state/<id>.status`, `bin/fm-crew-state.sh <id>` (cached 20 s), task titles from `bin/fm-tasks-axi.sh list`. |
 | Agent tokens | The worker's Claude Code transcripts in the worktree's project folder, plus their subagent transcripts. Only messages after the task's spawn count, because a pooled worktree's folder also holds earlier tasks' sessions. Each message counts once (one message is written as several lines). |
 | Queue | `bin/fm-tasks-axi.sh list` (held, hold date, blocked-by) and `config/project-capacity` with the live task records that hold a place. |
+| How long a queued task has waited for the captain | The `Captain hold set:` time that `bin/fm-captain-hold.sh` writes first in a held task's body, read with `bin/fm-tasks-axi.sh list --state queued --fields held,body` only while some queued task is held; without that line, the day the task was created. |
+| How long a hand has waited for the captain | Its oldest `needs-decision` or `blocked` status line still open; a hand flagged by its crew state alone waits since its last transcript activity. |
 | Machine load | `os.getloadavg()` and the CPU count, read with every snapshot; only the ship view's sea uses it. |
 | Per day | Every transcript under the Claude directories, by local day, each message once. `workers` are sessions launched from a Firstmate brief, `firstmate` is the home's own folder, `validation` is no-mistakes, `other` is the rest. |
 | Per delivered task | The home's session sheets (`data/fichas/fichas.jsonl`), with the new/cache split recomputed from each sheet's session transcript and its subagents. |
@@ -131,7 +133,7 @@ A queue card's drawer shows the item from `bin/fm-tasks-axi.sh show <task> --ful
 
 ## The ship view
 
-The ship view reads nothing new: it is drawn from the snapshot the board uses.
+The ship view is drawn from the snapshot the board uses.
 Each element stands for one thing:
 
 | In the picture | What it is |
@@ -146,10 +148,14 @@ Each element stands for one thing:
 | A hand sitting with the dice | off duty: an unflagged agent exploring, implementing, at the bow or of unknown phase whose crew state is `paused`, or that has had no transcript activity for 20 minutes without a busy session |
 | A hand's shirt and bandana | its project's colour, in the order of `data/projects.md`; the sails carry one stripe per project aboard |
 | A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
+| The captain's cabin, in the stern castle | the captain's line: a flagged hand leaves its place and waits here, facing the desk, numbered by how long it has waited, the longest nearest the desk; a scout waits here with its map |
+| The captain | at the desk with a paper and a balloon saying how many wait and who has waited longest; sitting with a mug when nobody waits |
+| Boats tied astern | queued tasks held for the captain's decision, numbered in the same line; past six, the rest stay moored at the pier with their red flag |
 | A skiff on the horizon, rowing back with the map, moored at the pier | a scout exploring, writing the report, report delivered |
 | Barrels in the hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
 | Water in the hold | firstmate's context; the white line is the warning threshold |
-| Boats moored at the pier | the queue; a red flag marks one held for the captain's decision |
+| Boats moored at the pier | the rest of the queue |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, astern, queue); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
 | Day or night | the local hour: night from 18:00 to 06:00 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
@@ -158,6 +164,8 @@ The scene is larger than its frame and grows with the crew so no hand stands on 
 It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the buttons zoom in and out, frame the crew again, or fit everything.
 Names show from a readable zoom up, never overlap, and come back on hover or focus when zoomed out.
 Clicking a hand or a queued boat opens the same drawer as its card.
+The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
+The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand or boat, and clicking it opens its drawer.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only when the browser does not ask for reduced motion.
 
 ## Adding a task

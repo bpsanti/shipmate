@@ -234,7 +234,7 @@ body.sm-locked { overflow: hidden; }
 .sm-hand, .sm-boat[data-id] { cursor: pointer; outline: none; }
 .sm-hand:hover > g, .sm-boat[data-id]:hover > g { filter: brightness(1.15); }
 .sm-hand:focus-visible, .sm-boat[data-id]:focus-visible { filter: drop-shadow(0 0 1.2px #fff3b0) drop-shadow(0 0 1.2px #fff3b0); }
-.sm-key { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; }
+.sm-key { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .sm-key > section { background: var(--surface-card); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 10px 14px; min-width: 0; }
 .sm-key h3 { margin: 0 0 8px; }
 .sm-key ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 4px 14px; }
@@ -242,6 +242,52 @@ body.sm-locked { overflow: hidden; }
 .sm-key li svg { flex: none; }
 .sm-key p { margin: 8px 0 0; font-size: var(--fs-xs); }
 .sm-sw { display: inline-block; width: 14px; height: 14px; border: 1px solid var(--edge); border-radius: 3px; flex: none; }
+/* the ship's legend and line: painted signs, the captain's balloon, numbers in line, stage chips, the log */
+.sm-icon { display: block; flex: none; }
+.sm-sign rect { fill: #6b3a1c; stroke: #e0b552; stroke-width: 0.5px; opacity: 0.95; }
+.sm-sign text { fill: #f8ecc9; font-size: 4.4px; }
+.sm-sign--red rect { fill: #a32218; stroke: #fbf6ea; }
+.sm-balloon rect, .sm-balloon polygon { fill: #fffdf7; stroke: #1d140c; stroke-width: 0.6px; opacity: 1; }
+.sm-balloon text { fill: #1d140c; }
+.sm-ship__svg.is-far .sm-tag.sm-sign, .sm-ship__svg.is-far .sm-tag.sm-balloon { display: inline; }
+.sm-ship.no-signs .sm-sign { display: none; }
+.sm-ship__tools button[data-signs][aria-pressed="true"] { background: var(--navy-600); color: var(--white); }
+.sm-num rect { fill: #d8342a; stroke: #fbf6ea; stroke-width: 0.5px; }
+.sm-num text { font: 700 5px var(--font-mono); fill: #ffffff; text-anchor: middle; }
+.sm-ship__svg[data-lit] .sm-hand, .sm-ship__svg[data-lit] .sm-boat[data-id] { opacity: 0.22; }
+.sm-ship__svg[data-lit] .sm-tag[data-for] { opacity: 0.2; }
+.sm-ship__svg[data-lit] [data-id].is-lit { opacity: 1; }
+.sm-ship__svg[data-lit] .sm-tag.is-lit { display: inline; opacity: 1; }
+.sm-hand.is-hl > g, .sm-boat.is-hl > g { filter: drop-shadow(0 0 1px #fff3b0) drop-shadow(0 0 1.5px #fff3b0); }
+.sm-stages { display: flex; flex-wrap: wrap; gap: 6px; }
+.sm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 5px; border: 2px solid var(--edge); border-radius: 999px;
+  background: var(--surface-card); color: var(--text-body); font: 600 var(--fs-xs) var(--font-sans); cursor: pointer; }
+.sm-chip .sm-icon { height: 20px; width: auto; }
+.sm-chip b { font: 700 var(--fs-2xs) var(--font-mono); background: var(--bar-track); border-radius: 5px; padding: 0 5px; }
+.sm-chip[aria-pressed="true"] { background: var(--navy-600); color: var(--white); }
+.sm-chip[aria-pressed="true"] b { background: var(--navy-300); color: var(--white); }
+.sm-chip--red b { background: #d8342a; color: #ffffff; }
+.sm-chip:disabled { opacity: 0.45; cursor: default; }
+.sm-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.sm-stage { margin: 0; min-height: 1.4em; font-size: var(--fs-sm); color: var(--text-body); }
+.sm-view > .sm-ship:has(+ .sm-log) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.sm-log { display: flex; gap: 8px; align-items: stretch; padding: 8px; margin-top: -12px; background: var(--navy-600);
+  border: 2px solid var(--edge); border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); }
+.sm-log__capt { display: flex; align-items: center; gap: 8px; flex: 0 0 270px; padding: 4px 8px; color: #fffdf7; }
+.sm-log__capt p { margin: 0; display: grid; font-size: var(--fs-xs); }
+.sm-log__capt b { font: 700 var(--fs-xs) var(--font-mono); color: var(--gold-300); }
+.sm-log__cards { display: flex; gap: 6px; overflow-x: auto; flex: 1 1 auto; min-width: 0; align-items: stretch; }
+.sm-log__none { align-self: center; padding: 6px 10px; color: var(--navy-100); font-size: var(--fs-xs); }
+.sm-logcard { flex: 0 0 260px; display: grid; grid-template-columns: 22px 38px minmax(0, 1fr) auto; align-items: center; gap: 8px; text-align: left;
+  padding: 7px 8px; border: 2px solid var(--edge); border-radius: var(--radius-sm); background: var(--paper-000); color: var(--ink-700); cursor: pointer; font: inherit; }
+.sm-logcard:hover, .sm-logcard:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.sm-logcard .sm-icon { justify-self: center; max-height: 34px; width: auto; }
+.sm-logcard__n { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #d8342a; color: #ffffff; font: 700 11px var(--font-mono); }
+.sm-logcard__body { display: grid; min-width: 0; }
+.sm-logcard__body b { font: 700 var(--fs-xs) var(--font-mono); color: var(--ink-900); }
+.sm-logcard__body span, .sm-logcard__body em { font-size: var(--fs-2xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-logcard__body em { color: var(--rust-600); font-style: normal; }
+.sm-logcard__wait { font: 700 var(--fs-xs) var(--font-mono); color: var(--ink-900); }
 
 /* stage 2: the ship lives, gently, unless the reader asked for less motion */
 @media (prefers-reduced-motion: no-preference) {
@@ -256,6 +302,7 @@ body.sm-locked { overflow: hidden; }
   .pose-signal > g:first-of-type { animation: sm-signal 1.4s steps(2) infinite; }
   .pose-rest > g:first-of-type { animation: sm-breathe 3s steps(2) infinite; }
   .sm-glow { animation: sm-flicker 2.6s steps(3) infinite; }
+  .sm-steam { animation: sm-steam 2.4s steps(3) infinite; }
 }
 @keyframes sm-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(1px); } }
 @keyframes sm-bob-rough { 0%, 100% { transform: translateY(-1px); } 50% { transform: translateY(2px); } }
@@ -266,6 +313,7 @@ body.sm-locked { overflow: hidden; }
 @keyframes sm-hammer { 0% { transform: translateY(0); } 50% { transform: translateY(1px); } }
 @keyframes sm-signal { 0% { transform: translateX(0); } 50% { transform: translateX(1px); } }
 @keyframes sm-breathe { 0% { transform: translateY(0); } 50% { transform: translateY(0.5px); } }
+@keyframes sm-steam { 0%, 100% { transform: translateY(0); opacity: 0.85; } 50% { transform: translateY(-1.5px); opacity: 0.4; } }
 @keyframes sm-flicker { 0% { opacity: 0.22; } 33% { opacity: 0.3; } 66% { opacity: 0.18; } }
 @media (prefers-color-scheme: dark) {
   .sm-ship__svg:not(.is-night) { filter: brightness(0.9) saturate(0.95); }
@@ -275,6 +323,8 @@ body.sm-locked { overflow: hidden; }
   .sm-ship { height: 64vh; }
   .sm-ship__tools { right: 8px; top: 8px; gap: 4px; }
   .sm-ship__tools button { min-width: 32px; height: 32px; font-size: 14px; padding: 0 7px; }
+  .sm-log { flex-direction: column; }
+  .sm-log__capt { flex: none; }
 }
 
 /* ---- drawer ---- */
