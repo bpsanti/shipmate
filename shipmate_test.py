@@ -5,6 +5,7 @@ import html
 import http.client
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -872,6 +873,71 @@ class TestShip(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+class TestLanguage(unittest.TestCase):
+    """--lang pt-BR (or SHIPMATE_LANG) shows the interface in Brazilian Portuguese."""
+
+    def tearDown(self):
+        shipmate.LANG = "en"
+
+    def test_every_phrase_the_page_can_show_has_a_translation(self):
+        with open(shipmate.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        phrases = set()
+        for m in re.finditer(r"(?<![\w.])tr\(", src):                  # the literals inside each tr(...) argument
+            depth, i = 1, m.end()
+            while depth:
+                if src[i] == '"':
+                    i = src.index('"', i + 1) if src[i + 1] != '"' else i + 1
+                    while src[i - 1] == "\\":
+                        i = src.index('"', i + 1)
+                depth += {"(": 1, ")": -1}.get(src[i], 0)
+                i += 1
+            arg = re.sub(r'\["[^"]*"\]', "", src[m.end():i - 1])            # keys like h["id"] are not phrases
+            phrases |= set(re.findall(r'"((?:[^"\\]|\\.)*)"', arg))
+        phrases |= {x for _k, _p, name, where in shipmate.STAGES for x in (name, where)}
+        phrases |= set(shipmate.PLACE_TEXT.values()) | set(shipmate.LANE_NAMES) | set(shipmate.SHIP_PHASES)
+        phrases |= set(shipmate.SCOUT_PHASES) | set(shipmate.CREW_TONE) | set(shipmate.CLASSES) | {"unknown", "inferred", "configured"}
+        phrases |= set(m[1] for m in shipmate.RE_PHRASE.findall(shipmate.asset("shipmate.html")))
+        phrases = {p.replace('\\"', '"') for p in phrases if p}
+        self.assertGreater(len(phrases), 150)
+        self.assertEqual(sorted(p for p in phrases if p not in shipmate.PT_BR), [])
+        for en, pt in shipmate.PT_BR.items():                           # a translation keeps the same placeholders
+            self.assertEqual(re.findall(r"%[0-9]*[sd%]", en), re.findall(r"%[0-9]*[sd%]", pt), en)
+            self.assertNotIn("\u2014", pt)
+
+    def test_the_page_in_portuguese(self):
+        snap = shipmate.demo_snapshot(T0)
+        panel = shipmate.DemoPanel(0)
+        english, _ = shipmate.render_page(panel, snap, panel.notice)
+        shipmate.LANG = "pt-BR"
+        snap = shipmate.demo_snapshot(T0)
+        page, _ = shipmate.render_page(panel, snap, panel.notice)
+        self.assertIn('<html lang="pt-BR">', page)
+        self.assertNotRegex(page, r"\{\{[tj]:")
+        for phrase in ("Trabalho por fase", "Adicionar tarefa", "Sessão do firstmate", "esperando você", "Capitão",
+                       "CABINE DO CAPITÃO", "Uma home inventada".lower(), "marujos a bordo", "Carregando"):
+            self.assertIn(phrase, page.replace("Demo: uma home", "demo: uma home"))
+        for phrase in ("Work by phase", "+ Add task", "waiting for you", "hands aboard"):
+            self.assertNotIn(phrase, page)
+            self.assertIn(phrase, english)
+        self.assertEqual(shipmate.fmt_date_iso("2026-11-13"), "sex 13 nov")
+        self.assertIn("estado da tripulação: parado", " ".join(shipmate.captain_reasons({"crew": "parked"})))
+
+    def test_the_language_is_a_setting(self):
+        with open(os.path.join(os.path.dirname(shipmate.__file__), "README.md"), encoding="utf-8") as fh:
+            self.assertIn("--lang", fh.read())
+        with self.assertRaises(SystemExit):
+            shipmate.main(["--demo", "--once", "--lang", "fr"])
+        old = os.environ.get("SHIPMATE_LANG")
+        os.environ["SHIPMATE_LANG"] = "fr"
+        try:
+            self.assertEqual(shipmate.main(["--demo", "--once"]), 2)
+        finally:
+            os.environ.pop("SHIPMATE_LANG")
+            if old is not None:
+                os.environ["SHIPMATE_LANG"] = old
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

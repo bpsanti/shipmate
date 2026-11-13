@@ -493,9 +493,9 @@ def firstmate_session(cfg, index, now):
         return None
     sid = read_lock_session(cfg.home)
     chosen = next((f for f in files if os.path.basename(f[0])[:-6] == sid), None) if sid else None
-    how = "the session lock"
+    how = tr("the session lock")
     if chosen is None:
-        how = "newest session in the home's folder" + (" (the lock names a session not found here)" if sid else "")
+        how = tr("newest session in the home's folder") + (tr(" (the lock names a session not found here)") if sid else "")
         try:
             chosen = max(files, key=lambda f: os.stat(f[0]).st_mtime)
         except OSError:
@@ -801,21 +801,21 @@ def queue_rows(cfg, backlog):
         reasons = []
         if r.get("held") == "yes":
             if r.get("hold_until") and r["hold_until"] > today:
-                txt = "held until " + fmt_date_iso(r["hold_until"])
+                txt = tr("held until %s") % fmt_date_iso(r["hold_until"])
                 reasons.append(("date", txt, txt))
             if r.get("hold_kind") == "captain" or not r.get("hold_until"):
-                reasons.append(("decision", "captain's decision", (r.get("hold_reason") or "captain's decision")[:400]))
+                reasons.append(("decision", tr("captain's decision"), (r.get("hold_reason") or tr("captain's decision"))[:400]))
         deps = [d for d in re.split(r"[\s,]+", r.get("blocked_by") or "") if d and d != "none"]
         if deps:
-            reasons.append(("task", "waits for " + ", ".join(deps), "waits for " + ", ".join(deps)))
+            reasons.append(("task", tr("waits for %s") % ", ".join(deps), tr("waits for %s") % ", ".join(deps)))
         repo = r.get("repo") or ""
         if not reasons and repo in caps:
             h = sorted(holders.get(repo, []))
             if len(h) >= caps[repo]:
-                reasons.append(("slot", "build slot %d/%d" % (len(h), caps[repo]),
-                                "build slots for %s: %d of %d taken (%s)" % (repo, len(h), caps[repo], ", ".join(h))))
+                reasons.append(("slot", tr("build slot %d/%d") % (len(h), caps[repo]),
+                                tr("build slots for %s: %d of %d taken (%s)") % (repo, len(h), caps[repo], ", ".join(h))))
         if not reasons:
-            reasons.append(("ready", "ready to dispatch", "nothing holds it: firstmate can dispatch it"))
+            reasons.append(("ready", tr("ready to dispatch"), tr("nothing holds it: firstmate can dispatch it")))
         since, exact = stamps.get(r["id"]) or parse_hold_set("Captain hold set: " + (r.get("created") or ""))
         out.append({"id": r["id"], "title": r.get("title", ""), "repo": repo, "kind": r.get("kind", ""),
                     "created": r.get("created", ""), "reasons": reasons,
@@ -1128,7 +1128,7 @@ class Panel:
             if request_id in self.requests:
                 return self.requests[request_id]
             if project not in read_projects(self.cfg.home):
-                return {"ok": False, "error": "project is not in data/projects.md"}
+                return {"ok": False, "error": tr("project is not in data/projects.md")}
             cmd = [self.cfg.bin("fm-tasks-axi.sh"), "add", title, "--mint", "--repo", project, "--queue", "--json"]
             if text:
                 cmd += ["--body", text]
@@ -1141,9 +1141,9 @@ class Panel:
                 res = {}
             task = res.get("task") or {}
             if rc != 0 or not res.get("ok") or not task.get("id"):
-                return {"ok": False, "error": "the backlog refused it: " + ((err or out).strip()[:300] or "exit %d" % rc)}
+                return {"ok": False, "error": tr("the backlog refused it: %s") % ((err or out).strip()[:300] or "exit %d" % rc)}
             if res.get("already"):
-                return {"ok": False, "error": "a task with id %s already exists; change the title" % task["id"]}
+                return {"ok": False, "error": tr("a task with id %s already exists; change the title") % task["id"]}
             tid = task["id"]
             note = ("New task queued from shipmate: %s (project %s): %s. Details: bin/fm-tasks-axi.sh show %s --full"
                     % (tid, project, title, tid))
@@ -1159,15 +1159,206 @@ class Panel:
             return result
 
 
+# ---------------------------------------------------------------- language
+#
+# The interface is written in English; with --lang pt-BR (or SHIPMATE_LANG=pt-BR) every phrase the
+# page shows goes through tr() and comes out in Brazilian Portuguese. Text read from the home's
+# records (titles, status lines, hold reasons, notes) is shown as written.
+
+LANGS = ("en", "pt-BR")
+LANG = "en"
+WEEKDAYS = {"en": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], "pt-BR": ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]}
+MONTHS = {"en": ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+          "pt-BR": ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]}
+PT_BR = {
+    # formatting, sidebar, strip
+    "unknown": "desconhecido", "today %s": "hoje %s", "under 1 min": "menos de 1 min",
+    "at this pace runs out %s": "neste ritmo acaba %s", "at this pace lasts until reset": "neste ritmo dura até renovar",
+    "projection unknown": "projeção desconhecida", "Quota unavailable: %s": "Cota indisponível: %s",
+    "No Claude account measured.": "Nenhuma conta Claude medida.", "%s %s%% (resets %s)": "%s %s%% (renova %s)",
+    "%d%% left": "%d%% restante", "%s resets %s": "%s renova %s", "limit": "limite", "new tokens today": "tokens novos hoje",
+    "cache reads today": "leituras de cache hoje", "Firstmate context": "Contexto do firstmate", "%d%% used": "%d%% usado",
+    "%s of %s · %d compactions": "%s de %s · %d compactações", "resets %s": "renova %s", "Today": "Hoje", "%s new": "%s novos",
+    "%s cache reads": "%s leituras de cache", "context %d%%": "contexto %d%%", "%s %d%% left": "%s %d%% restante",
+    "%s new today": "%s novos hoje",
+    # board
+    "exploring": "explorando", "implementing / writing": "implementando / escrevendo", "PR open": "PR aberto",
+    "waiting for CI": "esperando o CI", "ready / delivered": "pronto / entregue", "for %s": "há %s",
+    "phase start unknown": "início da fase desconhecido", "%s new · %s cache": "%s novos · %s cache",
+    "tokens unknown": "tokens desconhecidos", "%s: details": "%s: detalhes", "Queue": "Fila", "phase unknown": "fase desconhecida",
+    "Queue unavailable: %s": "Fila indisponível: %s", "Nothing waiting.": "Nada esperando.", "+ Add task": "+ Adicionar tarefa",
+    "%s: empty": "%s: vazia", "%s: nothing here": "%s: nada aqui", "%d agent · %d in the queue": "%d agente · %d na fila",
+    "%d agents · %d in the queue": "%d agentes · %d na fila",
+    # crew states and phases
+    "working": "trabalhando", "parked": "parado", "blocked": "bloqueado", "failed": "falhou", "done": "concluído",
+    "paused": "pausado", "implementing": "implementando", "ready to merge": "pronto para o merge",
+    "writing the report": "escrevendo o relatório", "report delivered": "relatório entregue",
+    # queue reasons
+    "held until %s": "segura até %s", "captain's decision": "decisão do capitão", "waits for %s": "espera %s",
+    "build slot %d/%d": "vaga de build %d/%d", "build slots for %s: %d of %d taken (%s)": "vagas de build de %s: %d de %d ocupadas (%s)",
+    "ready to dispatch": "pronta para despachar", "nothing holds it: firstmate can dispatch it": "nada a segura: o firstmate pode despachá-la",
+    # drawer
+    "not reached": "não alcançada", "time unknown": "hora desconhecida", "no report": "sem relatório", "no PR": "sem PR",
+    "(checks unknown: %s)": "(checks desconhecidos: %s)", "%d passed": "%d passaram", "%d failed": "%d falharam",
+    "%d running": "%d rodando", "%d skipped": "%d pulados", " draft": " rascunho", "failing: %s": "falhando: %s",
+    "read from the forge %s ago, at most every %d s": "lido da forja há %s, no máximo a cada %d s",
+    "no status lines": "sem linhas de status", "%s of %s (%s window), %d%%": "%s de %s (janela %s), %d%%",
+    "last action %s ago": "última ação há %s", "Phases": "Fases", "current: %s%s · evidence: %s": "atual: %s%s · evidência: %s",
+    "Pull request": "Pull request", "Report": "Relatório", "Captain's intent": "Intenção do capitão",
+    "Latest status lines": "Últimas linhas de status", "Project": "Projeto", "Kind": "Tipo", "Model": "Modelo",
+    "Effort": "Esforço", "Account": "Conta", "Harness": "Harness", "Started": "Início", "Idle": "Ocioso", "Tokens": "Tokens",
+    "Context": "Contexto", "%s new · %s cache reads": "%s novos · %s leituras de cache", " for %s": " há %s",
+    "no Captain's intent section in data/%s/brief.md": "sem seção Captain's intent em data/%s/brief.md",
+    "queued": "na fila", "Why it waits": "Por que espera", "Notes": "Notas", "Since": "Desde", "Priority": "Prioridade",
+    "Depends on": "Depende de", "not set": "não definido", "none": "nenhuma", "no notes on this item": "sem notas neste item",
+    # firstmate session
+    "Firstmate session unknown: no Claude transcript in the project folder of this home.":
+        "Sessão do firstmate desconhecida: nenhuma transcrição Claude na pasta de projeto desta home.",
+    "growth unknown (no call before the last %d h)": "crescimento desconhecido (nenhuma chamada antes das últimas %d h)",
+    "%s%s since the compaction %s": "%s%s desde a compactação %s", "%s%s in the last %d h": "%s%s nas últimas %d h",
+    "%d compaction": "%d compactação", "%d compactions": "%d compactações", ", last %s (%s, %s to %s)": ", última %s (%s, %s para %s)",
+    "trigger unknown": "gatilho desconhecido",
+    "Context is past %d%% of the window: a good moment to clear or compact the firstmate session.":
+        "O contexto passou de %d%% da janela: bom momento para limpar ou compactar a sessão do firstmate.",
+    "warning threshold": "limite de aviso", "%s of %s (%s window) · last call %s": "%s de %s (janela %s) · última chamada %s",
+    "today: %s new · %s cache reads": "hoje: %s novos · %s leituras de cache", "session %s, found by %s": "sessão %s, encontrada por %s",
+    "over %d%%": "acima %d%%", "inferred": "inferida", "configured": "configurada", "the session lock": "a trava da sessão",
+    "newest session in the home's folder": "a sessão mais nova na pasta da home",
+    " (the lock names a session not found here)": " (a trava aponta uma sessão que não está aqui)", "the demo": "a demo", "phases completed": "fases concluídas",
+    # usage
+    "Per day, every session of the accounts read": "Por dia, todas as sessões das contas lidas", "new": "novos",
+    "%s cache": "%s cache", "no use": "sem uso", "workers": "workers", "firstmate": "firstmate", "validation": "validação",
+    "other": "outros", "new: input + cache writes + output": "novos: entrada + escritas de cache + saída", "cache reads": "leituras de cache",
+    "Per delivered task, session sheets of the last %d days": "Por tarefa entregue, fichas de sessão dos últimos %d dias",
+    "No session sheets (data/fichas/fichas.jsonl is absent).": "Sem fichas de sessão (data/fichas/fichas.jsonl não existe).",
+    "No session sheet in the last %d days.": "Nenhuma ficha de sessão nos últimos %d dias.", "task": "tarefa", "kind": "tipo",
+    "model": "modelo", "wall time": "duração", "cache": "cache", "(+%d subagent)": "(+%d subagente)", "(+%d subagents)": "(+%d subagentes)",
+    "(sheet total %s; transcript not found)": "(total da ficha %s; transcrição não encontrada)", " (partial)": " (parcial)",
+    # the add form and its notices
+    "Title": "Título", "Goes to the queue and notifies firstmate.": "Vai para a fila e avisa o firstmate.", "Queue it": "Enfileirar",
+    "no projects": "sem projetos", "Task %s is queued and firstmate was notified.": "A tarefa %s está na fila e o firstmate foi avisado.",
+    "Task %s is queued, but notifying firstmate failed; tell firstmate another way.":
+        "A tarefa %s está na fila, mas avisar o firstmate falhou; avise o firstmate de outro jeito.",
+    "Not queued: %s": "Não enfileirada: %s", "project is not in data/projects.md": "o projeto não está em data/projects.md",
+    "the backlog refused it: %s": "o backlog recusou: %s", "a task with id %s already exists; change the title":
+        "já existe uma tarefa com id %s; mude o título", "this is the demo: nothing was queued": "isto é a demo: nada foi enfileirado",
+    "Demo: a made-up home, not real data.": "Demo: uma home inventada, não são dados reais.",
+    # the ship
+    "in the crow's nest with a spyglass": "na gávea com a luneta", "on deck with a hammer": "no convés com o martelo",
+    "at the bow, signalling with flags": "na proa, sinalizando com bandeiras", "fishing at the rail": "pescando na amurada",
+    "on the gangplank with a pack, waiting to go ashore": "na prancha com a mochila, esperando para desembarcar",
+    "on deck, phase unknown": "no convés, fase desconhecida", "rowing out to sea": "remando mar adentro",
+    "rowing back with the map": "voltando a remo com o mapa", "moored at the pier with the map": "atracado no cais com o mapa",
+    "crew is %s": "estado da tripulação: %s", "%d hand aboard": "%d marujo a bordo", "%d hands aboard": "%d marujos a bordo",
+    "%d red flag": "%d bandeira vermelha", "%d red flags": "%d bandeiras vermelhas", "%d off duty": "%d de folga",
+    "%d boat moored": "%d bote atracado", "%d boats moored": "%d botes atracados", "today": "hoje",
+    "no project": "sem projeto", "; off duty": "; de folga", "; needs the captain: ": "; precisa do capitão: ",
+    "; number %d in line for the captain, waiting %s": "; número %d na fila do capitão, esperando há %s",
+    "%s: queued (%s)%s%s": "%s: na fila (%s)%s%s",
+    "the captain, off duty: nothing waits on a decision": "o capitão, de folga: nada espera uma decisão",
+    "the captain: %d waiting, the longest %s for %s": "o capitão: %d esperando, o mais antigo %s há %s",
+    "%d waiting for you": "%d esperando você", "longest: %s, %s": "mais antigo: %s, %s",
+    "LOOKOUT · exploring": "GÁVEA · explorando", "HELM · firstmate": "LEME · firstmate", "CAPTAIN'S CABIN": "CABINE DO CAPITÃO",
+    "DECK · implementing": "CONVÉS · implementando", "? · phase unknown": "? · fase desconhecida",
+    "RAIL · waiting for CI": "AMURADA · esperando o CI", "BOW · PR open": "PROA · PR aberto",
+    "HOLD · quota barrels, context water": "PORÃO · barris de cota, água de contexto",
+    "GANGPLANK · ready to merge": "PRANCHA · pronto para o merge", "ASTERN · queued, waiting for you": "POPA · na fila, esperando você",
+    "QUEUE": "FILA", "SCOUTS": "BATEDORES", "DELIVERED · %d days": "ENTREGUES · %d dias",
+    "context %d%% of the window%s": "contexto em %d%% da janela%s", ", past the %d%% warning": ", acima do aviso de %d%%",
+    "context unknown": "contexto desconhecido", "firstmate at the helm: %s": "o firstmate no leme: %s",
+    "%s: %s%s": "%s: %s%s", ", runs out before it resets": ", acaba antes de renovar",
+    "the hold: bilge water is firstmate's %s; the white line is the warning threshold":
+        "o porão: a água é o %s do firstmate; a linha branca é o limite de aviso",
+    "%d task delivered in the last %d days%s": "%d tarefa entregue nos últimos %d dias%s",
+    "%d tasks delivered in the last %d days%s": "%d tarefas entregues nos últimos %d dias%s",
+    "The ship: %s": "O navio: %s", "no project aboard": "nenhum projeto a bordo",
+    "scouts": "batedores", "off duty": "de folga", "waiting for you": "esperando você",
+    "in the crow's nest with a spyglass: reading the code and planning before it builds":
+        "na gávea com a luneta: lendo o código e planejando antes de construir",
+    "on deck with a hammer: making the change": "no convés com o martelo: fazendo a mudança",
+    "at the bow with signal flags: the pull request is open": "na proa com as bandeiras de sinal: o pull request está aberto",
+    "fishing at the rail: the checks are running": "pescando na amurada: os checks estão rodando",
+    "on the gangplank with a pack: done, waiting to go ashore": "na prancha com a mochila: pronto, esperando para desembarcar",
+    "under a question mark: no sign of its phase yet": "sob um ponto de interrogação: ainda sem sinal da fase",
+    "in a skiff: rowing out to explore, back with the map, then moored at the pier with the report":
+        "num bote: rema para explorar, volta com o mapa e atraca no cais com o relatório",
+    "sitting with the dice: paused, or quiet for a while": "sentado com os dados: pausado, ou quieto há um tempo",
+    "a red flag: needs your decision; hands wait in your cabin and queued tasks are tied astern, longest wait first, "
+    "and the log below lists them all":
+        "uma bandeira vermelha: precisa da sua decisão; os marujos esperam na sua cabine e as tarefas da fila ficam "
+        "amarradas na popa, quem espera há mais tempo primeiro, e o diário abaixo lista todos",
+    "%s: %s. %s": "%s: %s. %s", "Now: %s.": "Agora: %s.", "Nobody now.": "Ninguém agora.",
+    "%d waits on my word. The longest, %s, has waited %s.": "%d espera a minha palavra. O mais antigo, %s, espera há %s.",
+    "%d wait on my word. The longest, %s, has waited %s.": "%d esperam a minha palavra. O mais antigo, %s, espera há %s.",
+    "queued, %s": "na fila, %s", "All clear. Nothing waits on my word.": "Tudo em ordem. Nada espera a minha palavra.",
+    "Nobody is waiting for you.": "Ninguém está esperando você.", "Captain": "Capitão",
+}
+
+# the page template's own phrases ({{t:...}} and {{j:...}} in shipmate.html)
+PT_BR.update({
+    "View": "Vista", "Board": "Quadro", "Ship": "Navio", "refresh failed": "falha ao atualizar", "updated": "atualizado",
+    "Work by phase": "Trabalho por fase", "The ship": "O navio", "Light a stage": "Acender uma etapa",
+    "Click a stage to light its hands and take the view to them.":
+        "Clique numa etapa para acender os marujos dela e levar a vista até eles.",
+    "Zoom in": "Aproximar", "Zoom out": "Afastar", "Frame the crew": "Enquadrar a tripulação", "crew": "tripulação",
+    "Fit everything": "Mostrar tudo", "fit all": "tudo", "Show the signs on the ship": "Mostrar as placas no navio",
+    "signs": "placas", "Waiting for you": "Esperando você",
+    "Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand, a queued boat or a card in the log for its details.":
+        "Roda ou pinça para o zoom, arraste para mover, clique duplo para aproximar ali. Clique num marujo, num bote da fila "
+        "ou num cartão do diário para ver os detalhes.",
+    "Projects aboard": "Projetos a bordo",
+    "A shirt and bandana take the project's colour, and so do the stripes on the sails.":
+        "A camisa e a bandana têm a cor do projeto, assim como as listras das velas.",
+    "A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued boat waits on the captain's decision.":
+        "Uma bandeira vermelha: o marujo precisa do capitão (a tripulação está parada, bloqueada ou falhou, ou uma linha "
+        "needs-decision ou blocked segue aberta), ou um bote da fila espera a decisão do capitão.",
+    "Whoever needs the captain waits in the captain's cabin, and a queued task tied astern, numbered by how long it has waited; the captain attends them at the desk, or sits with a mug when nobody waits.":
+        "Quem precisa do capitão espera na cabine do capitão, e a tarefa da fila fica amarrada na popa, numerados por quanto "
+        "tempo esperam; o capitão atende à mesa, ou senta com uma caneca quando ninguém espera.",
+    "Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.":
+        "Barris no porão: a cota de cada conta, em âmbar o que resta, em vermelho quando acaba antes de renovar.",
+    "Water in the hold: firstmate's context, the white line its warning threshold.":
+        "Água no porão: o contexto do firstmate, a linha branca é o limite de aviso.",
+    "Scouts row out to the horizon, back with the map, and moor at the pier with it.":
+        "Os batedores remam até o horizonte, voltam com o mapa e atracam no cais com ele.",
+    "Boats at the pier: the queue. Crates: tasks delivered in the last 7 days.":
+        "Botes no cais: a fila. Caixotes: tarefas entregues nos últimos 7 dias.",
+    "The sky follows the local time, the sea the machine's load.": "O céu segue a hora local, o mar a carga da máquina.",
+    "Usage": "Uso", "per day and per delivered task": "por dia e por tarefa entregue",
+    "Firstmate session and accounts": "Sessão do firstmate e contas", "Firstmate session": "Sessão do firstmate",
+    "Accounts and quota": "Contas e cota", "Details": "Detalhes", "Close": "Fechar",
+    "%d lane out of view, scroll the board sideways": "%d raia fora de vista, role o quadro para o lado",
+    "%d lanes out of view, scroll the board sideways": "%d raias fora de vista, role o quadro para o lado",
+    "+%d more below": "+%d abaixo", "Loading…": "Carregando…", "Add a task": "Adicionar tarefa",
+    "This item is no longer on the board.": "Este item não está mais no quadro.",
+})
+RE_PHRASE = re.compile(r"\{\{([tj]):(.+?)\}\}")
+
+
+def translate_template(page):
+    """The template's {{t:phrase}} as HTML text and {{j:phrase}} as a JavaScript string, in the
+    interface language, and {{LANG}} as the page's language."""
+    return RE_PHRASE.sub(lambda m: esc(tr(m.group(2))) if m.group(1) == "t" else json.dumps(tr(m.group(2))),
+                         page.replace("{{LANG}}", LANG))
+
+
+def tr(text):
+    """text in the interface language: English is the key, and a phrase with no translation stays English."""
+    return text if LANG == "en" else PT_BR.get(text, text)
+
+
 # ---------------------------------------------------------------- formatting
 
-WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 esc = html.escape
+
+
+def fmt_day(d):
+    return "%s %02d %s" % (WEEKDAYS[LANG][d.weekday()], d.day, MONTHS[LANG][d.month - 1])
 
 
 def fmt_tokens(n):
     if n is None:
-        return "unknown"
+        return tr("unknown")
     if n >= 1e9:
         return "%.2fB" % (n / 1e9)
     if n >= 1e7:
@@ -1181,27 +1372,26 @@ def fmt_tokens(n):
 
 def fmt_when(ts, now=None):
     if ts is None:
-        return "unknown"
-    t = dt.datetime.fromtimestamp(ts)
-    if t.date() == dt.date.fromtimestamp(now or time.time()):
-        return "today " + t.strftime("%H:%M")
-    return "%s %s" % (WEEKDAYS[t.weekday()], t.strftime("%d %b %H:%M"))
+        return tr("unknown")
+    w = dt.datetime.fromtimestamp(ts)
+    if w.date() == dt.date.fromtimestamp(now or time.time()):
+        return tr("today %s") % w.strftime("%H:%M")
+    return "%s %s" % (fmt_day(w.date()), w.strftime("%H:%M"))
 
 
 def fmt_date_iso(s):
     try:
-        d = dt.date.fromisoformat(s)
-        return "%s %s" % (WEEKDAYS[d.weekday()], d.strftime("%d %b"))
+        return fmt_day(dt.date.fromisoformat(s))
     except (TypeError, ValueError):
         return s or "?"
 
 
 def fmt_dur(sec):
     if sec is None:
-        return "unknown"
+        return tr("unknown")
     sec = max(0, int(sec))
     if sec < 60:
-        return "under 1 min"
+        return tr("under 1 min")
     if sec < 3600:
         return "%d min" % (sec // 60)
     if sec < 86400:
@@ -1232,10 +1422,10 @@ def quota_tone(rem):
 def runway_text(ln, now):
     if ln["runway"] == "projected_exhaustion" and ln["exhausts"]:
         early = not ln["resets"] or ln["exhausts"] < ln["resets"]
-        return "at this pace runs out " + fmt_when(ln["exhausts"], now), ("danger" if early else "muted")
+        return tr("at this pace runs out %s") % fmt_when(ln["exhausts"], now), ("danger" if early else "muted")
     if ln["runway"] == "through_reset":
-        return "at this pace lasts until reset", "muted"
-    return "projection unknown", "muted"
+        return tr("at this pace lasts until reset"), "muted"
+    return tr("projection unknown"), "muted"
 
 
 def lanes_by_urgency(q):
@@ -1248,32 +1438,32 @@ def lanes_by_urgency(q):
 
 def block_accounts(q, now):
     if q.get("error"):
-        return '<div class="sm-empty">Quota unavailable: %s</div>' % esc(q["error"])
+        return '<div class="sm-empty">%s</div>' % esc(tr("Quota unavailable: %s") % q["error"])
     if not q["lanes"]:
-        return '<div class="sm-empty">No Claude account measured.</div>'
+        return '<div class="sm-empty">%s</div>' % esc(tr("No Claude account measured."))
     rows = []
     for ln in lanes_by_urgency(q):
         rem = ln["remaining"]
         tone = quota_tone(rem)
         proj, ptone = runway_text(ln, now)
-        wins = " · ".join("%s %s%% (resets %s)" % (w["label"] or "?", w["remaining"], fmt_when(w["resets"], now))
+        wins = " · ".join(tr("%s %s%% (resets %s)") % (w["label"] or "?", w["remaining"], fmt_when(w["resets"], now))
                           for w in ln["windows"])
         rows.append(
             '<div class="sm-acct" title="%s">'
             '<div class="sm-acct__top"><span class="sm-acct__name">%s</span>%s<span class="sm-acct__pct sm-%s">%s</span></div>'
             '<div class="sm-bar"><div class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></div></div>'
-            '<div class="sm-acct__sub"><span>%s resets %s</span><span class="sm-%s">%s</span></div></div>'
+            '<div class="sm-acct__sub"><span>%s</span><span class="sm-%s">%s</span></div></div>'
             % (esc(wins), esc(ln["label"]), badge(ln["plan"]) if ln["plan"] else "",
-               tone, ("%d%% left" % rem) if rem is not None else "unknown",
+               tone, (tr("%d%% left") % rem) if rem is not None else tr("unknown"),
                tone, max(0, min(100, rem or 0)),
-               esc(ln["limit_label"] or "limit"), esc(fmt_when(ln["resets"], now)), ptone, esc(proj)))
+               esc(tr("%s resets %s") % (ln["limit_label"] or tr("limit"), fmt_when(ln["resets"], now))), ptone, esc(proj)))
     return "".join(rows)
 
 
 def block_today(daily):
     d = daily[0] if daily else {"new": 0, "cache": 0}
-    return ('<div class="sm-tile"><b>%s</b><span>new tokens today</span></div>'
-            '<div class="sm-tile"><b>%s</b><span>cache reads today</span></div>' % (esc(fmt_tokens(d["new"])), esc(fmt_tokens(d["cache"]))))
+    return ('<div class="sm-tile"><b>%s</b><span>%s</span></div><div class="sm-tile"><b>%s</b><span>%s</span></div>'
+            % (esc(fmt_tokens(d["new"])), esc(tr("new tokens today")), esc(fmt_tokens(d["cache"])), esc(tr("cache reads today"))))
 
 
 def gauge(label, pct, value, sub, tone, title=""):
@@ -1288,16 +1478,17 @@ def block_strip(s):
     now, fm, out = s["now"], s.get("firstmate"), []
     if fm:
         pct = fm["percent"] or 0
-        out.append(gauge("Firstmate context", pct, "%d%% used" % round(pct),
-                         "%s of %s · %d compactions" % (fmt_tokens(fm["context"]), fmt_tokens(fm["limit"]), fm["compactions"]),
+        out.append(gauge(tr("Firstmate context"), pct, tr("%d%% used") % round(pct),
+                         tr("%s of %s · %d compactions") % (fmt_tokens(fm["context"]), fmt_tokens(fm["limit"]), fm["compactions"]),
                          "danger" if pct >= fm["warn_at"] else "ok"))
     for ln in lanes_by_urgency(s["quota"]):
         rem = ln["remaining"]
-        out.append(gauge(ln["label"], rem, ("%d%% left" % rem) if rem is not None else "unknown",
-                         runway_text(ln, now)[0], quota_tone(rem), "resets " + fmt_when(ln["resets"], now)))
+        out.append(gauge(ln["label"], rem, (tr("%d%% left") % rem) if rem is not None else tr("unknown"),
+                         runway_text(ln, now)[0], quota_tone(rem), tr("resets %s") % fmt_when(ln["resets"], now)))
     d = s["daily"][0] if s["daily"] else {"new": 0, "cache": 0}
-    out.append('<div class="sm-gauge sm-gauge--today"><div class="sm-gauge__top"><b>Today</b><span>%s new</span></div>'
-               '<div class="sm-gauge__sub">%s cache reads</div></div>' % (esc(fmt_tokens(d["new"])), esc(fmt_tokens(d["cache"]))))
+    out.append('<div class="sm-gauge sm-gauge--today"><div class="sm-gauge__top"><b>%s</b><span>%s</span></div>'
+               '<div class="sm-gauge__sub">%s</div></div>' % (esc(tr("Today")), esc(tr("%s new") % fmt_tokens(d["new"])),
+                                                              esc(tr("%s cache reads") % fmt_tokens(d["cache"]))))
     return "".join(out)
 
 
@@ -1307,13 +1498,13 @@ def block_sumline(s):
     fm = s.get("firstmate")
     if fm and fm["percent"] is not None:
         over = fm["percent"] >= fm["warn_at"]
-        parts.append('<span class="sm-%s">context %d%%</span>' % ("danger" if over else "ok", round(fm["percent"])))
+        parts.append('<span class="sm-%s">%s</span>' % ("danger" if over else "ok", tr("context %d%%") % round(fm["percent"])))
     lanes = lanes_by_urgency(s["quota"])
     if lanes and lanes[0]["remaining"] is not None:
-        parts.append('<span class="sm-%s">%s %d%% left</span>' % (quota_tone(lanes[0]["remaining"]), esc(lanes[0]["label"]),
-                                                                  lanes[0]["remaining"]))
+        parts.append('<span class="sm-%s">%s</span>' % (quota_tone(lanes[0]["remaining"]),
+                                                         esc(tr("%s %d%% left") % (lanes[0]["label"], lanes[0]["remaining"]))))
     d = s["daily"][0] if s["daily"] else {"new": 0}
-    parts.append("<span>%s new today</span>" % esc(fmt_tokens(d["new"])))
+    parts.append("<span>%s</span>" % esc(tr("%s new today") % fmt_tokens(d["new"])))
     return " · ".join(parts) + '<span class="sm-sumline__open" aria-hidden="true">▾</span>'
 
 
@@ -1333,26 +1524,26 @@ def lane_of(a):
 def agent_card(a, now):
     tok = a["tokens"]
     meta = " · ".join(x for x in (a["project"], a["model"], a["account"]) if x)
-    since = ("for " + fmt_dur(now - a["phase_since"])) if a["phase_since"] else "phase start unknown"
-    toks = "%s new · %s cache" % (fmt_tokens(tok["new"]), fmt_tokens(tok["cache"])) if tok else "tokens unknown"
+    since = (tr("for %s") % fmt_dur(now - a["phase_since"])) if a["phase_since"] else tr("phase start unknown")
+    toks = tr("%s new · %s cache") % (fmt_tokens(tok["new"]), fmt_tokens(tok["cache"])) if tok else tr("tokens unknown")
     title = a["title"] or a["id"]
-    return ('<article class="sm-card" data-id="%s" tabindex="0" role="button" aria-label="%s: details">'
+    return ('<article class="sm-card" data-id="%s" tabindex="0" role="button" aria-label="%s">'
             '<div class="sm-card__top"><span class="sm-id">%s</span>%s</div>'
             '<div class="sm-card__title" title="%s">%s</div>'
             '<div class="sm-card__line" title="%s">%s</div>'
             '<div class="sm-card__line">%s%s</div>'
             '<div class="sm-card__line sm-mono">%s</div></article>'
-            % (esc(a["id"]), esc(a["id"]), esc(a["id"]), badge(a["crew"], CREW_TONE.get(a["crew"], "neutral")),
+            % (esc(a["id"]), esc(tr("%s: details") % a["id"]), esc(a["id"]), badge(tr(a["crew"]), CREW_TONE.get(a["crew"], "neutral")),
                esc(title), esc(title), esc(meta), esc(meta), esc(since),
                (" · " + link(a["pr"], pr_text(a["pr"]))) if a["pr"] else "", esc(toks)))
 
 
 def queue_card(q):
     reasons = " ".join(badge(short, REASON_TONE.get(k, "neutral"), full) for k, short, full in q["reasons"])
-    return ('<article class="sm-card sm-card--queue" data-id="%s" tabindex="0" role="button" aria-label="%s: details">'
+    return ('<article class="sm-card sm-card--queue" data-id="%s" tabindex="0" role="button" aria-label="%s">'
             '<div class="sm-card__top"><span class="sm-id">%s</span><span class="sm-faint sm-card__repo">%s</span></div>'
             '<div class="sm-card__title" title="%s">%s</div><div class="sm-reasons">%s</div></article>'
-            % (esc(q["id"]), esc(q["id"]), esc(q["id"]), esc(q["repo"]), esc(q["title"]), esc(q["title"]), reasons))
+            % (esc(q["id"]), esc(tr("%s: details") % q["id"]), esc(q["id"]), esc(q["repo"]), esc(q["title"]), esc(q["title"]), reasons))
 
 
 def block_board(agents, queue, err, now):
@@ -1363,27 +1554,27 @@ def block_board(agents, queue, err, now):
     for a in agents:
         i = lane_of(a)
         (unknown if i is None else lanes[i]).append(agent_card(a, now))
-    spec = [("Queue", [queue_card(q) for q in queue], True)] + [(n, c, False) for n, c in zip(LANE_NAMES, lanes)]
+    spec = [(tr("Queue"), [queue_card(q) for q in queue], True)] + [(tr(n), c, False) for n, c in zip(LANE_NAMES, lanes)]
     if unknown:
-        spec.append(("phase unknown", unknown, False))
+        spec.append((tr("phase unknown"), unknown, False))
     cols, html_lanes = [], []
     for name, cards, is_queue in spec:
         if cards or is_queue:
             cols.append("minmax(%dpx, 1fr)" % LANE_MIN)
             if not cards:
-                cards = ['<div class="sm-empty">%s</div>' % (("Queue unavailable: " + esc(err)) if err else "Nothing waiting.")]
+                cards = ['<div class="sm-empty">%s</div>' % esc((tr("Queue unavailable: %s") % err) if err else tr("Nothing waiting."))]
             html_lanes.append(
                 '<section class="sm-lane%s" aria-label="%s"><div class="sm-lane__head"><span>%s</span><span class="sm-count">%d</span></div>'
                 '%s<div class="sm-lane__body">%s</div><div class="sm-lane__more" hidden></div></section>'
                 % (" sm-lane--queue" if is_queue else "", esc(name), esc(name),
                    len(queue) if is_queue else len(cards),
-                   '<button class="sm-addbtn" type="button" data-action="add">+ Add task</button>' if is_queue else "",
+                   '<button class="sm-addbtn" type="button" data-action="add">%s</button>' % esc(tr("+ Add task")) if is_queue else "",
                    "".join(cards)))
         else:
             cols.append("44px")
-            html_lanes.append('<section class="sm-lane sm-lane--empty" aria-label="%s: empty" title="%s: nothing here">'
+            html_lanes.append('<section class="sm-lane sm-lane--empty" aria-label="%s" title="%s">'
                               '<span class="sm-count">0</span><span class="sm-vert">%s</span></section>'
-                              % (esc(name), esc(name), esc(name)))
+                              % (esc(tr("%s: empty") % name), esc(tr("%s: nothing here") % name), esc(name)))
     return '<div class="sm-board" style="grid-template-columns:%s">%s</div>' % (" ".join(cols), "".join(html_lanes))
 
 
@@ -1402,50 +1593,50 @@ def timeline(phases, times, current, now):
         if t:
             txt = fmt_when(t, now)
         elif current is not None and i > current:
-            txt = "not reached"
+            txt = tr("not reached")
         else:
-            txt = "time unknown"
-        items.append('<li class="sm-tl__%s"><span class="sm-tl__dot"></span><b>%s</b><span>%s</span></li>' % (state, esc(name), esc(txt)))
+            txt = tr("time unknown")
+        items.append('<li class="sm-tl__%s"><span class="sm-tl__dot"></span><b>%s</b><span>%s</span></li>' % (state, esc(tr(name)), esc(txt)))
     return '<ol class="sm-tl">%s</ol>' % "".join(items)
 
 
 def report_links(tid, reports):
     if not reports:
-        return '<span class="sm-faint">no report</span>'
+        return '<span class="sm-faint">%s</span>' % esc(tr("no report"))
     return " · ".join(link("/report?id=%s&f=%s" % (urllib.parse.quote(tid), ext), "report." + ext) for ext in reports)
 
 
 def checks_html(pr, checks):
     if not pr:
-        return '<span class="sm-faint">no PR</span>'
+        return '<span class="sm-faint">%s</span>' % esc(tr("no PR"))
     out = link(pr, pr_text(pr))
     if not checks:
         return out
     if checks.get("error"):
-        return out + ' <span class="sm-faint">(checks unknown: %s)</span>' % esc(checks["error"])
+        return out + ' <span class="sm-faint">%s</span>' % esc(tr("(checks unknown: %s)") % checks["error"])
     c = checks["counts"]
-    parts = ["%d passed" % c["pass"]]
+    parts = [esc(tr("%d passed") % c["pass"])]
     if c["fail"]:
-        parts.append('<span class="sm-danger">%d failed</span>' % c["fail"])
+        parts.append('<span class="sm-danger">%s</span>' % esc(tr("%d failed") % c["fail"]))
     if c["pending"]:
-        parts.append('<span class="sm-warn">%d running</span>' % c["pending"])
+        parts.append('<span class="sm-warn">%s</span>' % esc(tr("%d running") % c["pending"]))
     if c["skipped"]:
-        parts.append("%d skipped" % c["skipped"])
-    state = (checks.get("state") or "?").lower() + (" draft" if checks.get("draft") else "")
+        parts.append(esc(tr("%d skipped") % c["skipped"]))
+    state = (checks.get("state") or "?").lower() + (tr(" draft") if checks.get("draft") else "")
     out += " · %s · %s" % (esc(state), ", ".join(parts))
     if checks["failing"]:
-        out += '<div class="sm-faint">failing: %s</div>' % esc(", ".join(checks["failing"]))
-    return out + '<div class="sm-faint">read from the forge %s ago, at most every %d s</div>' % (
-        esc(fmt_dur(checks.get("age", 0)) if checks.get("age", 0) >= 60 else "%d s" % checks.get("age", 0)), CHECKS_TTL)
+        out += '<div class="sm-faint">%s</div>' % esc(tr("failing: %s") % ", ".join(checks["failing"]))
+    return out + '<div class="sm-faint">%s</div>' % esc(tr("read from the forge %s ago, at most every %d s") % (
+        fmt_dur(checks.get("age", 0)) if checks.get("age", 0) >= 60 else "%d s" % checks.get("age", 0), CHECKS_TTL))
 
 
 def status_lines(status):
     if not status:
-        return '<div class="sm-faint">no status lines</div>'
+        return '<div class="sm-faint">%s</div>' % esc(tr("no status lines"))
     rows = []
     for s in reversed(status):
         rows.append('<li><span class="sm-st sm-st--%s">%s</span><span class="sm-faint">%s</span><span>%s</span></li>'
-                    % (esc(s["state"]), esc(s["state"]), esc(fmt_when(s["at"], time.time()) if s["at"] else "time unknown"),
+                    % (esc(s["state"]), esc(s["state"]), esc(fmt_when(s["at"], time.time()) if s["at"] else tr("time unknown")),
                        esc(s["text"][:600])))
     return '<ol class="sm-status">%s</ol>' % "".join(rows)
 
@@ -1461,32 +1652,34 @@ def render_agent_detail(a, intent, status, checks, reports, now):
         model += " (%s)" % a["model_seen"].replace("claude-", "")
     if a["context"] is not None and a["context_limit"]:
         pct = 100.0 * a["context"] / a["context_limit"]
-        ctx = ('%s of %s (%s window), %d%%<span class="sm-bar sm-bar--thin"><span class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></span></span>'
-               % (esc(fmt_tokens(a["context"])), esc(fmt_tokens(a["context_limit"])), esc(a["context_how"]), round(pct),
+        ctx = ('%s<span class="sm-bar sm-bar--thin"><span class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></span></span>'
+               % (esc(tr("%s of %s (%s window), %d%%") % (fmt_tokens(a["context"]), fmt_tokens(a["context_limit"]), tr(a["context_how"]), round(pct))),
                   "danger" if pct >= 80 else "warn" if pct >= 60 else "ok", min(100, round(pct))))
     else:
-        ctx = "unknown"
-    idle = ("last action %s ago" % fmt_dur(now - a["last_activity"])) if a["last_activity"] else "unknown"
-    phase = a["phases"][a["phase"]] if a["phase"] is not None else "unknown"
+        ctx = esc(tr("unknown"))
+    idle = (tr("last action %s ago") % fmt_dur(now - a["last_activity"])) if a["last_activity"] else tr("unknown")
+    phase = tr(a["phases"][a["phase"]]) if a["phase"] is not None else tr("unknown")
     return (
         '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>'
         '<div class="sm-facts">%s</div>'
-        '<h3>Phases</h3>%s<div class="sm-faint">current: %s%s · evidence: %s</div>'
-        '<h3>Pull request</h3><div>%s</div>'
-        '<h3>Report</h3><div>%s</div>'
-        '<h3>Captain\'s intent</h3>%s'
-        '<h3>Latest status lines</h3>%s'
-        % (esc(a["id"]), badge(a["crew"], CREW_TONE.get(a["crew"], "neutral")), esc(a["title"] or a["id"]),
-           "".join([fact("Project", esc(a["project"] or "?")), fact("Kind", esc(a["kind"])), fact("Model", esc(model)),
-                    fact("Effort", esc(a["effort"] or "?")), fact("Account", esc(a["account"])),
-                    fact("Harness", esc(a["harness"])), fact("Started", esc(fmt_when(a["spawn"], now))),
-                    fact("Idle", esc(idle)),
-                    fact("Tokens", esc("%s new · %s cache reads" % (fmt_tokens(tok["new"]), fmt_tokens(tok["cache"]))) if tok else "unknown"),
-                    fact("Context", ctx)]),
-           timeline(a["phases"], a.get("milestones") or [], a["phase"], now), esc(phase),
-           (" for " + esc(fmt_dur(now - a["phase_since"]))) if a["phase_since"] else "", esc(a["phase_why"]),
-           checks_html(a["pr"], checks), report_links(a["id"], reports),
-           pre(intent, "no Captain's intent section in data/%s/brief.md" % a["id"]), status_lines(status)))
+        '<h3>%s</h3>%s<div class="sm-faint">%s</div>'
+        '<h3>%s</h3><div>%s</div>'
+        '<h3>%s</h3><div>%s</div>'
+        '<h3>%s</h3>%s'
+        '<h3>%s</h3>%s'
+        % (esc(a["id"]), badge(tr(a["crew"]), CREW_TONE.get(a["crew"], "neutral")), esc(a["title"] or a["id"]),
+           "".join([fact(tr("Project"), esc(a["project"] or "?")), fact(tr("Kind"), esc(a["kind"])), fact(tr("Model"), esc(model)),
+                    fact(tr("Effort"), esc(a["effort"] or "?")), fact(tr("Account"), esc(a["account"])),
+                    fact(tr("Harness"), esc(a["harness"])), fact(tr("Started"), esc(fmt_when(a["spawn"], now))),
+                    fact(tr("Idle"), esc(idle)),
+                    fact(tr("Tokens"), esc(tr("%s new · %s cache reads") % (fmt_tokens(tok["new"]), fmt_tokens(tok["cache"])) if tok else tr("unknown"))),
+                    fact(tr("Context"), ctx)]),
+           esc(tr("Phases")), timeline(a["phases"], a.get("milestones") or [], a["phase"], now),
+           esc(tr("current: %s%s · evidence: %s") % (phase, (tr(" for %s") % fmt_dur(now - a["phase_since"])) if a["phase_since"] else "",
+                                                     a["phase_why"])),
+           esc(tr("Pull request")), checks_html(a["pr"], checks), esc(tr("Report")), report_links(a["id"], reports),
+           esc(tr("Captain's intent")), pre(intent, tr("no Captain's intent section in data/%s/brief.md") % a["id"]),
+           esc(tr("Latest status lines")), status_lines(status)))
 
 
 def render_queue_detail(q, full, intent, reports, now):
@@ -1495,100 +1688,102 @@ def render_queue_detail(q, full, intent, reports, now):
                       for k, short, long_ in q["reasons"])
     return (
         '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>'
-        '<div class="sm-facts">%s</div><h3>Why it waits</h3><ul class="sm-reasonlist">%s</ul>'
-        '<h3>Notes</h3>%s%s<h3>Report</h3><div>%s</div>'
-        % (esc(q["id"]), badge("queued", "info"), esc(full.get("title") or q["title"]),
-           "".join([fact("Project", esc(q["repo"] or "?")), fact("Kind", esc(q["kind"] or "not set")),
-                    fact("Since", esc(fmt_date_iso(q["created"]) if q["created"] else "?")),
-                    fact("Priority", esc(full.get("priority") or "-")), fact("Depends on", esc(full.get("deps") or "none"))]),
-           reasons, pre(full.get("body") if full.get("body") not in (None, "-") else None, "no notes on this item"),
-           ("<h3>Captain's intent</h3>" + pre(intent, "")) if intent else "", report_links(q["id"], reports)))
+        '<div class="sm-facts">%s</div><h3>%s</h3><ul class="sm-reasonlist">%s</ul>'
+        '<h3>%s</h3>%s%s<h3>%s</h3><div>%s</div>'
+        % (esc(q["id"]), badge(tr("queued"), "info"), esc(full.get("title") or q["title"]),
+           "".join([fact(tr("Project"), esc(q["repo"] or "?")), fact(tr("Kind"), esc(q["kind"] or tr("not set"))),
+                    fact(tr("Since"), esc(fmt_date_iso(q["created"]) if q["created"] else "?")),
+                    fact(tr("Priority"), esc(full.get("priority") or "-")), fact(tr("Depends on"), esc(full.get("deps") or tr("none")))]),
+           esc(tr("Why it waits")), reasons, esc(tr("Notes")),
+           pre(full.get("body") if full.get("body") not in (None, "-") else None, tr("no notes on this item")),
+           ("<h3>%s</h3>" % esc(tr("Captain's intent")) + pre(intent, "")) if intent else "", esc(tr("Report")), report_links(q["id"], reports)))
 
 
 def block_firstmate(fm, now):
     if fm is None:
-        return ('<div class="sm-empty">Firstmate session unknown: no Claude transcript in the project folder '
-                'of this home.</div>')
+        return '<div class="sm-empty">%s</div>' % esc(tr("Firstmate session unknown: no Claude transcript in the project folder of this home."))
     pct = fm["percent"]
     over = pct is not None and pct >= fm["warn_at"]
     tone = "danger" if over else "ok"
     g = fm["growth"]
     if g is None:
-        growth = "growth unknown (no call before the last %d h)" % GROWTH_HOURS
+        growth = tr("growth unknown (no call before the last %d h)") % GROWTH_HOURS
     elif fm["growth_since_compaction"]:
-        growth = "%s%s since the compaction %s" % ("+" if g >= 0 else "-", fmt_tokens(abs(g)), fmt_when(fm["growth_since"], now))
+        growth = tr("%s%s since the compaction %s") % ("+" if g >= 0 else "-", fmt_tokens(abs(g)), fmt_when(fm["growth_since"], now))
     else:
-        growth = "%s%s in the last %d h" % ("+" if g >= 0 else "-", fmt_tokens(abs(g)), GROWTH_HOURS)
+        growth = tr("%s%s in the last %d h") % ("+" if g >= 0 else "-", fmt_tokens(abs(g)), GROWTH_HOURS)
     lc = fm["last_compaction"]
-    comp = "%d compaction%s" % (fm["compactions"], "" if fm["compactions"] == 1 else "s")
+    comp = tr("%d compaction" if fm["compactions"] == 1 else "%d compactions") % fm["compactions"]
     if lc:
-        comp += ", last %s (%s, %s to %s)" % (fmt_when(lc["at"], now), lc["trigger"] or "trigger unknown",
-                                              fmt_tokens(lc["before"]), fmt_tokens(lc["after"]))
-    warn = ('<div class="sm-warnline">Context is past %d%% of the window: a good moment to clear or compact '
-            'the firstmate session.</div>' % fm["warn_at"]) if over else ""
+        comp += tr(", last %s (%s, %s to %s)") % (fmt_when(lc["at"], now), lc["trigger"] or tr("trigger unknown"),
+                                                 fmt_tokens(lc["before"]), fmt_tokens(lc["after"]))
+    warn = ('<div class="sm-warnline">%s</div>'
+            % esc(tr("Context is past %d%% of the window: a good moment to clear or compact the firstmate session.") % fm["warn_at"])
+            if over else "")
     return (
         '<div class="sm-acct">'
-        '<div class="sm-acct__top"><span class="sm-acct__name">Context</span>%s<span class="sm-acct__pct sm-%s">%s</span></div>'
+        '<div class="sm-acct__top"><span class="sm-acct__name">%s</span>%s<span class="sm-acct__pct sm-%s">%s</span></div>'
         '<div class="sm-bar"><div class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></div>'
-        '<div class="sm-bar__mark" style="left:%d%%" title="warning threshold"></div></div>'
-        '<div class="sm-acct__sub"><span>%s of %s (%s window) · last call %s</span><span>%s</span></div>'
-        '<div class="sm-acct__sub"><span>today: %s new · %s cache reads</span><span>%s</span></div>'
-        '%s<div class="sm-acct__win">session %s, found by %s</div></div>'
-        % (badge("over %d%%" % fm["warn_at"], "danger") if over else "", tone,
-           ("%d%% used" % round(pct)) if pct is not None else "unknown",
-           tone, max(0, min(100, round(pct or 0))), max(0, min(100, fm["warn_at"])),
-           esc(fmt_tokens(fm["context"])), esc(fmt_tokens(fm["limit"])), esc(fm["limit_how"]),
-           esc(fmt_when(fm["last_call"], now)), esc(growth),
-           esc(fmt_tokens(fm["today_new"])), esc(fmt_tokens(fm["today_cache"])), esc(comp),
-           warn, esc(fm["session"][:8]), esc(fm["found_by"])))
+        '<div class="sm-bar__mark" style="left:%d%%" title="%s"></div></div>'
+        '<div class="sm-acct__sub"><span>%s</span><span>%s</span></div>'
+        '<div class="sm-acct__sub"><span>%s</span><span>%s</span></div>'
+        '%s<div class="sm-acct__win">%s</div></div>'
+        % (esc(tr("Context")), badge(tr("over %d%%") % fm["warn_at"], "danger") if over else "", tone,
+           esc(tr("%d%% used") % round(pct)) if pct is not None else esc(tr("unknown")),
+           tone, max(0, min(100, round(pct or 0))), max(0, min(100, fm["warn_at"])), esc(tr("warning threshold")),
+           esc(tr("%s of %s (%s window) · last call %s") % (fmt_tokens(fm["context"]), fmt_tokens(fm["limit"]), tr(fm["limit_how"]),
+                                                           fmt_when(fm["last_call"], now))), esc(growth),
+           esc(tr("today: %s new · %s cache reads") % (fmt_tokens(fm["today_new"]), fmt_tokens(fm["today_cache"]))), esc(comp),
+           warn, esc(tr("session %s, found by %s") % (fm["session"][:8], fm["found_by"]))))
 
 
 def phase_bar(a):
     segs = []
     for i, name in enumerate(a["phases"]):
         cls = "done" if a["phase"] is not None and i < a["phase"] else "now" if a["phase"] == i else ""
-        segs.append('<span class="sm-step %s" title="%s"></span>' % (cls, esc(name)))
-    return '<span class="sm-steps" role="img" aria-label="phases completed">%s</span>' % "".join(segs)
+        segs.append('<span class="sm-step %s" title="%s"></span>' % (cls, esc(tr(name))))
+    return '<span class="sm-steps" role="img" aria-label="%s">%s</span>' % (esc(tr("phases completed")), "".join(segs))
 
 
 def block_usage(daily, deliv):
     top_new = max([d["new"] for d in daily] + [1])
     top_cache = max([d["cache"] for d in daily] + [1])
-    out = ['<div class="sm-sub">Per day, every session of the accounts read</div><div class="sm-days">']
+    out = ['<div class="sm-sub">%s</div><div class="sm-days">' % esc(tr("Per day, every session of the accounts read"))]
     for d in daily:
-        by = " · ".join("%s %s" % (c, fmt_tokens(v[0])) for c, v in d["by"].items() if v[0])
+        by = " · ".join("%s %s" % (tr(c), fmt_tokens(v[0])) for c, v in d["by"].items() if v[0])
         out.append('<div class="sm-day"><span class="sm-day__d">%s</span>'
                    '<span class="sm-day__bars"><span class="sm-bar sm-bar--thin"><span class="sm-bar__fill sm-bar__fill--new" style="width:%.1f%%"></span></span>'
                    '<span class="sm-bar sm-bar--thin"><span class="sm-bar__fill sm-bar__fill--cache" style="width:%.1f%%"></span></span></span>'
-                   '<span class="sm-day__n"><b>%s</b> new<br><span class="sm-faint">%s cache</span></span>'
+                   '<span class="sm-day__n"><b>%s</b> %s<br><span class="sm-faint">%s</span></span>'
                    '<span class="sm-day__by sm-faint">%s</span></div>'
                    % (esc(fmt_date_iso(d["day"])), 100.0 * d["new"] / top_new, 100.0 * d["cache"] / top_cache,
-                      esc(fmt_tokens(d["new"])), esc(fmt_tokens(d["cache"])), esc(by or "no use")))
-    out.append('</div><div class="sm-legend"><span class="sm-sw sm-sw--new"></span>new: input + cache writes + output'
-               '<span class="sm-sw sm-sw--cache"></span>cache reads</div>')
-    out.append('<div class="sm-sub">Per delivered task, session sheets of the last %d days</div>' % DAYS)
+                      esc(fmt_tokens(d["new"])), esc(tr("new")), esc(tr("%s cache") % fmt_tokens(d["cache"])), esc(by or tr("no use"))))
+    out.append('</div><div class="sm-legend"><span class="sm-sw sm-sw--new"></span>%s<span class="sm-sw sm-sw--cache"></span>%s</div>'
+               % (esc(tr("new: input + cache writes + output")), esc(tr("cache reads"))))
+    out.append('<div class="sm-sub">%s</div>' % esc(tr("Per delivered task, session sheets of the last %d days") % DAYS))
     if deliv is None:
-        out.append('<div class="sm-empty">No session sheets (data/fichas/fichas.jsonl is absent).</div>')
+        out.append('<div class="sm-empty">%s</div>' % esc(tr("No session sheets (data/fichas/fichas.jsonl is absent).")))
         return "".join(out)
     if not deliv:
-        out.append('<div class="sm-empty">No session sheet in the last %d days.</div>' % DAYS)
+        out.append('<div class="sm-empty">%s</div>' % esc(tr("No session sheet in the last %d days.") % DAYS))
         return "".join(out)
-    out.append('<div class="sm-table"><table><thead><tr><th>task</th><th>kind</th><th>model</th><th>wall time</th>'
-               '<th class="r">new</th><th class="r">cache</th><th></th></tr></thead><tbody>')
+    out.append('<div class="sm-table"><table><thead><tr>%s<th></th></tr></thead><tbody>'
+               % "".join('<th%s>%s</th>' % (' class="r"' if h in ("new", "cache") else "", esc(tr(h)))
+                         for h in ("task", "kind", "model", "wall time", "new", "cache")))
     for r in deliv:
         sp = r["split"]
         if sp:
-            extra = (' <span class="sm-faint">(+%d subagent%s)</span>' % (sp["subagents"], "s" if sp["subagents"] > 1 else "")
+            extra = (' <span class="sm-faint">%s</span>' % esc(tr("(+%d subagents)" if sp["subagents"] > 1 else "(+%d subagent)") % sp["subagents"])
                      if sp.get("subagents") else "")
         else:
-            extra = ' <span class="sm-faint">(sheet total %s; transcript not found)</span>' % esc(fmt_tokens(r["sheet_total"]))
+            extra = ' <span class="sm-faint">%s</span>' % esc(tr("(sheet total %s; transcript not found)") % fmt_tokens(r["sheet_total"]))
         prl = link(r["pr"], pr_text(r["pr"])) if r["pr"] else (esc("PR #%s" % r["pr_number"]) if r["pr_number"] else "")
         out.append('<tr><td><span class="sm-id">%s</span>%s</td><td>%s</td><td>%s</td><td>%s</td>'
                    '<td class="r">%s%s</td><td class="r">%s</td><td>%s</td></tr>'
-                   % (esc(r["id"] or "?"), " (partial)" if r["partial"] else "", esc(r["kind"] or "?"), esc(r["model"] or "?"),
+                   % (esc(r["id"] or "?"), esc(tr(" (partial)")) if r["partial"] else "", esc(r["kind"] or "?"), esc(r["model"] or "?"),
                       esc(fmt_dur(r["minutes"] * 60) if isinstance(r["minutes"], (int, float)) else "?"),
-                      esc(fmt_tokens(sp["new"]) if sp else "unknown"), extra,
-                      esc(fmt_tokens(sp["cache"]) if sp else "unknown"), prl))
+                      esc(fmt_tokens(sp["new"]) if sp else tr("unknown")), extra,
+                      esc(fmt_tokens(sp["cache"]) if sp else tr("unknown")), prl))
     out.append("</tbody></table></div>")
     return "".join(out)
 
@@ -1602,7 +1797,7 @@ def render_blocks(s):
         "strip": block_strip(s),
         "sumline": block_sumline(s),
         "usage": block_usage(s["daily"], s["delivered"]),
-        "counts": "%d agent%s · %d in the queue" % (len(s["agents"]), "" if len(s["agents"]) == 1 else "s", len(s["queue"])),
+        "counts": tr("%d agent · %d in the queue" if len(s["agents"]) == 1 else "%d agents · %d in the queue") % (len(s["agents"]), len(s["queue"])),
         "time": dt.datetime.fromtimestamp(s["now"]).strftime("%H:%M:%S"),
     }
 
@@ -1618,15 +1813,16 @@ def render_page(panel, snap, notice=""):
     opts = "".join('<option value="%s">%s</option>' % (esc(p), esc(p)) for p in snap["projects"])
     form = ('<form class="sm-form" method="post" action="/task">'
             '<input type="hidden" name="token" value="%s"><input type="hidden" name="request" value="%s">'
-            '<label>Title<input name="title" required maxlength="200" autocomplete="off"></label>'
-            '<label>Project<select name="project" required>%s</select></label>'
-            '<label>Notes<textarea name="text" rows="4" maxlength="5000"></textarea></label>'
-            '<div class="sm-form__foot"><span class="sm-faint">Goes to the queue and notifies firstmate.</span>'
-            '<button class="fm-btn fm-btn--sm fm-btn--primary" type="submit"%s>Queue it</button></div></form>'
-            % (esc(panel.token), esc(secrets.token_urlsafe(12)), opts or '<option value="">no projects</option>',
-               "" if opts else " disabled"))
+            '<label>%s<input name="title" required maxlength="200" autocomplete="off"></label>'
+            '<label>%s<select name="project" required>%s</select></label>'
+            '<label>%s<textarea name="text" rows="4" maxlength="5000"></textarea></label>'
+            '<div class="sm-form__foot"><span class="sm-faint">%s</span>'
+            '<button class="fm-btn fm-btn--sm fm-btn--primary" type="submit"%s>%s</button></div></form>'
+            % (esc(panel.token), esc(secrets.token_urlsafe(12)), esc(tr("Title")), esc(tr("Project")),
+               opts or '<option value="">%s</option>' % esc(tr("no projects")), esc(tr("Notes")),
+               esc(tr("Goes to the queue and notifies firstmate.")), "" if opts else " disabled", esc(tr("Queue it"))))
     ship = block_ship(snap)
-    page = asset("shipmate.html")
+    page = translate_template(asset("shipmate.html"))
     keys = ("board", "today", "firstmate", "accounts", "strip", "sumline", "usage", "counts")
     for k, v in [("{{CSS}}", asset("shipmate.css")), ("{{NONCE}}", nonce), ("{{TIME}}", esc(b["time"])),
                  ("{{FORM}}", form), ("{{NOTICE}}", notice), ("{{REFRESH_MS}}", str(REFRESH_SECONDS * 1000)),
@@ -1641,11 +1837,11 @@ def notice_html(q):
     if "added" in q:
         tid = q["added"][0]
         if q.get("notified", [""])[0] == "yes":
-            return '<div class="sm-notice sm-notice--ok">Task %s is queued and firstmate was notified.</div>' % esc(tid)
-        return ('<div class="sm-notice sm-notice--warn">Task %s is queued, but notifying firstmate failed; '
-                'tell firstmate another way.</div>' % esc(tid))
+            return '<div class="sm-notice sm-notice--ok">%s</div>' % esc(tr("Task %s is queued and firstmate was notified.") % tid)
+        return ('<div class="sm-notice sm-notice--warn">%s</div>'
+                % esc(tr("Task %s is queued, but notifying firstmate failed; tell firstmate another way.") % tid))
     if "error" in q:
-        return '<div class="sm-notice sm-notice--err">Not queued: %s</div>' % esc(q["error"][0][:300])
+        return '<div class="sm-notice sm-notice--err">%s</div>' % esc(tr("Not queued: %s") % q["error"][0][:300])
     return ""
 
 
@@ -1687,7 +1883,7 @@ def captain_reasons(a):
     """Why a hand raises the red flag: its crew state waits on the captain, or a decision is open."""
     why = []
     if a.get("crew") in CAPTAIN_STATES:
-        why.append("crew is " + a["crew"])
+        why.append(tr("crew is %s") % tr(a["crew"]))
     for d in a.get("decisions") or []:
         why.append("%s%s: %s" % (d["state"], (" " + d["key"]) if d.get("key") else "", d["text"][:120]))
     return why
@@ -1700,7 +1896,7 @@ def wait_text(since, now, exact=True):
         return "?"
     if not exact:
         days = (dt.date.fromtimestamp(now) - dt.date.fromtimestamp(since)).days
-        return "today" if days <= 0 else "%dd" % days
+        return tr("today") if days <= 0 else "%dd" % days
     sec = max(0, int(now - since))
     if sec < 60:
         return "<1m"
@@ -1772,7 +1968,7 @@ def ship_scene(s):
         h = {"id": a["id"], "title": a.get("title") or "", "crew": a.get("crew") or "unknown",
              "flag": bool(why), "why": why, "project": a.get("project") or "", "place": place,
              "color": colors.get(a.get("project") or "", "#8a8a8a"), "kind": "scout" if scout else "hand",
-             "phase": phases[ph] if ph is not None and ph < len(phases) else "unknown"}
+             "phase": tr(phases[ph] if ph is not None and ph < len(phases) else "unknown")}
         h["off"] = off_duty(a, place, h["flag"], now)
         # a flagged hand waits since its oldest open decision line; flagged by its crew state
         # alone, since it went quiet
@@ -1820,12 +2016,12 @@ def ship_scene(s):
 
 def ship_counts(sc):
     n = len(sc["hands"]) + len(sc["scouts"])
-    parts = ["%d hand%s aboard" % (n, "" if n == 1 else "s")]
+    parts = [tr("%d hand aboard" if n == 1 else "%d hands aboard") % n]
     if sc["flags"]:
-        parts.append("%d red flag%s" % (sc["flags"], "" if sc["flags"] == 1 else "s"))
+        parts.append(tr("%d red flag" if sc["flags"] == 1 else "%d red flags") % sc["flags"])
     if sc["off"]:
-        parts.append("%d off duty" % sc["off"])
-    parts.append("%d boat%s moored" % (len(sc["queue"]), "" if len(sc["queue"]) == 1 else "s"))
+        parts.append(tr("%d off duty") % sc["off"])
+    parts.append(tr("%d boat moored" if len(sc["queue"]) == 1 else "%d boats moored") % len(sc["queue"]))
     return " · ".join(parts)
 
 
@@ -2195,15 +2391,15 @@ def hand_svg(h, spot, tags, extra=None, shadow_on=True):
     off = {"signal": 8, "pack": 7}.get(base, 4)
     cx = x + (len(rows[0]) - 1 - off if left else off)
     tags.place(h.get("tag") or h["id"], cx, top - (10 if h["flag"] else 1) + (4 if base in ("hammer", "signal") else 0), h["id"])
-    state = "; off duty" if h["off"] else ""
-    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or "no project", PLACE_TEXT[h["place"]], h["phase"], state,
-                                       "; needs the captain: " + "; ".join(h["why"]) if h["flag"] else "")
+    state = tr("; off duty") if h["off"] else ""
+    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or tr("no project"), tr(PLACE_TEXT[h["place"]]), h["phase"], state,
+                                       tr("; needs the captain: ") + "; ".join(h["why"]) if h["flag"] else "")
     if h.get("line"):
-        title += "; number %d in line for the captain, waiting %s" % (h["line"], h["wait"])
+        title += tr("; number %d in line for the captain, waiting %s") % (h["line"], h["wait"])
     stage = "scouts" if h.get("kind") == "scout" else h["place"]
     return ('%s<g class="sm-hand pose-%s%s" data-id="%s" data-stage="%s"%s tabindex="0" role="button" aria-label="%s"><title>%s</title>%s%s</g>'
             % (shadow(cx, feet + 1) if shadow_on else "", base, " has-flag" if h["flag"] else "", esc(h["id"]), stage,
-               ' data-off="1"' if h["off"] else "", esc(title + ": details"), esc(title), p.svg(), flag))
+               ' data-off="1"' if h["off"] else "", esc(tr("%s: details") % title), esc(title), p.svg(), flag))
 
 
 def boat_pix(x, wl, cargo=False, flag=False):
@@ -2321,9 +2517,9 @@ def line_number(n, x, y):
 def captain_title(sc):
     cap = sc["captain"]
     if not cap["busy"]:
-        return "the captain, off duty: nothing waits on a decision"
+        return tr("the captain, off duty: nothing waits on a decision")
     o = cap["oldest"]
-    return "the captain: %d waiting, the longest %s for %s" % (cap["waiting"], o["id"], o["wait"])
+    return tr("the captain: %d waiting, the longest %s for %s") % (cap["waiting"], o["id"], o["wait"])
 
 
 def draw_cabin(sc, lay, tags):
@@ -2370,7 +2566,7 @@ def draw_cabin(sc, lay, tags):
     if busy:
         o = sc["captain"]["oldest"]
         n = sc["captain"]["waiting"]
-        balloon(tags, x + 7, ctop - 1, ["%d waiting for you" % n, "longest: %s, %s" % (o["id"], o["wait"])])
+        balloon(tags, x + 7, ctop - 1, [tr("%d waiting for you") % n, tr("longest: %s, %s") % (o["id"], o["wait"])])
     numbers = []
     for h in sc["line"]:
         if h["kind"] != "queue" and h["id"] in lay["hands"]:
@@ -2383,12 +2579,12 @@ def draw_cabin(sc, lay, tags):
 def queue_boat(q, x, wl, tags=None, tag_top=None):
     """A queued task's boat, red-flagged when it waits on the captain."""
     p = boat_pix(x, wl, cargo=True, flag=q["flag"])
-    tip = "%s: queued (%s)%s%s" % (q["id"], ", ".join(q["why"]), (" · " + q["title"]) if q["title"] else "",
-                                   "; number %d in line for the captain, waiting %s" % (q["line"], q["wait"]) if q["line"] else "")
+    tip = tr("%s: queued (%s)%s%s") % (q["id"], ", ".join(q["why"]), (" · " + q["title"]) if q["title"] else "",
+                                       tr("; number %d in line for the captain, waiting %s") % (q["line"], q["wait"]) if q["line"] else "")
     if tags is not None:
         tags.place(q.get("tag") or q["id"], x + 8, tag_top, q["id"])
     return ('<g class="sm-boat" data-id="%s"%s tabindex="0" role="button" aria-label="%s"><title>%s</title>%s</g>'
-            % (esc(q["id"]), ' data-flag="1"' if q["flag"] else "", esc(q["id"] + ": details"), esc(tip), p.svg()))
+            % (esc(q["id"]), ' data-flag="1"' if q["flag"] else "", esc(tr("%s: details") % q["id"]), esc(tip), p.svg()))
 
 
 def draw_astern(sc, lay, tags):
@@ -2407,27 +2603,27 @@ def paint_signs(sc, lay, tags):
     """The legend painted on the ship: what each place means, where it is."""
     x0 = lay["x0"]
     nx, nw = lay["nest"]
-    sign(tags, "LOOKOUT · exploring", nx + nw // 2, 51)
-    sign(tags, "HELM · firstmate", x0 + 37, 174)
+    sign(tags, tr("LOOKOUT · exploring"), nx + nw // 2, 51)
+    sign(tags, tr("HELM · firstmate"), x0 + 37, 174)
     cx0 = lay["cabin"][0]
-    sign(tags, "CAPTAIN'S CABIN", cx0 + 18, NEAR + 2, " sm-sign--red")       # under the desk, clear of the line
-    sign(tags, "DECK · implementing", lay["deck_x"] + 40, NEAR + 2)
+    sign(tags, tr("CAPTAIN'S CABIN"), cx0 + 18, NEAR + 2, " sm-sign--red")       # under the desk, clear of the line
+    sign(tags, tr("DECK · implementing"), lay["deck_x"] + 40, NEAR + 2)
     if any(h["place"] == "hatch" and not h["line"] for h in sc["hands"]):
-        sign(tags, "? · phase unknown", lay["hatch_x"] + 12, NEAR + 2)
-    sign(tags, "RAIL · waiting for CI", lay["rail_x"] + 30, NEAR + 2)
-    sign(tags, "BOW · PR open", lay["fc_x"] + lay["fc_len"] // 2, NEAR + 2)
+        sign(tags, tr("? · phase unknown"), lay["hatch_x"] + 12, NEAR + 2)
+    sign(tags, tr("RAIL · waiting for CI"), lay["rail_x"] + 30, NEAR + 2)
+    sign(tags, tr("BOW · PR open"), lay["fc_x"] + lay["fc_len"] // 2, NEAR + 2)
     hx0, hx1 = lay["hold"]
-    sign(tags, "HOLD · quota barrels, context water", (hx0 + hx1) // 2, NEAR + 16)
-    sign(tags, "GANGPLANK · ready to merge", x0 + 48, PIER + 4)
+    sign(tags, tr("HOLD · quota barrels, context water"), (hx0 + hx1) // 2, NEAR + 16)
+    sign(tags, tr("GANGPLANK · ready to merge"), x0 + 48, PIER + 4)
     if lay["astern"]:
         xs = list(lay["astern"].values())
-        sign(tags, "ASTERN · queued, waiting for you", (min(xs) + max(xs) + 16) // 2, WL + 11, " sm-sign--red")
+        sign(tags, tr("ASTERN · queued, waiting for you"), (min(xs) + max(xs) + 16) // 2, WL + 11, " sm-sign--red")
     pier = len(sc["queue"]) - len(lay["astern"])
     if pier:
-        sign(tags, "QUEUE", lay["queue_x"] + 13 * min(pier, MAX_QUEUE_BOATS), PIER + 10)
+        sign(tags, tr("QUEUE"), lay["queue_x"] + 13 * min(pier, MAX_QUEUE_BOATS), PIER + 10)
     if lay["scouts"]:
-        sign(tags, "SCOUTS", min(v[0] for v in lay["scouts"].values()) + 20, HOR - 4)
-    sign(tags, "DELIVERED · %d days" % DAYS, lay["crates_x"] + 14, PIER + 10)
+        sign(tags, tr("SCOUTS"), min(v[0] for v in lay["scouts"].values()) + 20, HOR - 4)
+    sign(tags, tr("DELIVERED · %d days") % DAYS, lay["crates_x"] + 14, PIER + 10)
 
 
 def render_ship(sc):
@@ -2545,10 +2741,10 @@ def render_ship(sc):
     fm.shaded(x0 + 30, 152 - 14, POSES["helm"], {"h": "#2a1d14", "s": "#d9a173"})
     fm.shaded(x0 + 39, 152 - 10, WHEEL, {})
     f = sc["firstmate"]
-    ctx = ("context %d%% of the window%s" % (round(f["context"]), ", past the %d%% warning" % f["warn_at"] if f["over"] else "")
-           if f["context"] is not None else "context unknown")
-    people.append((152, shadow(x0 + 37, 153, 16) + '<g class="sm-fm"><title>firstmate at the helm: %s</title>%s</g>'
-                   % (esc(ctx), fm.svg())))
+    ctx = (tr("context %d%% of the window%s") % (round(f["context"]), tr(", past the %d%% warning") % f["warn_at"] if f["over"] else "")
+           if f["context"] is not None else tr("context unknown"))
+    people.append((152, shadow(x0 + 37, 153, 16) + '<g class="sm-fm"><title>%s</title>%s</g>'
+                   % (esc(tr("firstmate at the helm: %s") % ctx), fm.svg())))
     for place in ("deck", "hatch", "bow"):
         for h in hands_at(place):
             people.append((spots[h["id"]][1], hand_svg(h, spots[h["id"]], tags)))
@@ -2599,15 +2795,15 @@ def render_ship(sc):
                 bp.rect(bx + 1, orlop - 13 + row, 8, 1, "#d8342a")
         bp.rect(bx + 3, orlop - 3 - level, 4, level, col)
         bp.rect(bx + 3, orlop - 3 - level, 1, level, lit(col))
-        tip = "%s: %s%s" % (b["label"], ("%d%% left" % b["remaining"]) if b["remaining"] is not None else "unknown",
-                            ", runs out before it resets" if b["early"] else "")
+        tip = "%s: %s%s" % (b["label"], (tr("%d%% left") % b["remaining"]) if b["remaining"] is not None else tr("unknown"),
+                            tr(", runs out before it resets") if b["early"] else "")
         barrels.append('<g class="sm-barrel%s"><title>%s</title>%s</g>' % (" is-empty" if b["empty"] else "", esc(tip), bp.svg()))
     hold.rect(hx1 - 70, orlop - 6, 46, 2, "#8a5530")
     hold.rect(hx1 - 66, orlop - 4, 2, 4, "#5a3418")
     hold.rect(hx1 - 30, orlop - 4, 2, 4, "#5a3418")
     hold.shaded(hx1 - 62, orlop - 12, MAP, {})
-    ship.append('<g><title>the hold: bilge water is firstmate\'s %s; the white line is the warning threshold</title>%s</g>'
-                % (esc(ctx), hold.svg()))
+    ship.append('<g><title>%s</title>%s</g>'
+                % (esc(tr("the hold: bilge water is firstmate's %s; the white line is the warning threshold") % ctx), hold.svg()))
     ship += barrels
     ship.append('<text class="sm-ship__name" x="%d" y="%d">firstmate</text>' % (x0 + L - 60, WL - 12))
     for h in hands_at("rail"):
@@ -2650,9 +2846,10 @@ def render_ship(sc):
     ashore.append(pier.svg())
     for i in range(min(len(sc["crates"]), MAX_CRATES)):
         stuff.shaded(lay["crates_x"] + 9 * (i // 3), PIER + 2 - 8 * (i % 3 + 1), CRATE, CRATE_INK)
-    ashore.append('<g><title>%d task%s delivered in the last %d days%s</title>%s</g>'
-                  % (len(sc["crates"]), "" if len(sc["crates"]) == 1 else "s", DAYS,
-                     ": " + ", ".join(c["id"] for c in sc["crates"][:20]) if sc["crates"] else "", stuff.svg()))
+    ashore.append('<g><title>%s</title>%s</g>'
+                  % (esc(tr("%d task delivered in the last %d days%s" if len(sc["crates"]) == 1 else "%d tasks delivered in the last %d days%s")
+                         % (len(sc["crates"]), DAYS, ": " + ", ".join(c["id"] for c in sc["crates"][:20]) if sc["crates"] else "")),
+                     stuff.svg()))
     if len(sc["crates"]) > MAX_CRATES:
         ashore.append('<text class="sm-ship__more" x="%d" y="%d">+%d</text>'
                       % (lay["crates_x"] + 9 * (MAX_CRATES // 3) + 2, PIER - 4, len(sc["crates"]) - MAX_CRATES))
@@ -2685,7 +2882,7 @@ def render_ship(sc):
     lights.append('<circle class="sm-glow" cx="%d" cy="215" r="%d" fill="#fff0b0" opacity="%s"/>'
                   % (W - 15, 30 if night else 20, "0.3" if night else "0.18"))
     shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' opacity="0.38"') if night else ""
-    args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc("The ship: " + ship_counts(sc)), W, SHIP_H)
+    args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc(tr("The ship: %s") % ship_counts(sc)), W, SHIP_H)
             + tuple(lay["crew"])
             + ("#0c2440" if night else "#2c6f9f", "#0d1631" if night else "#6fb3e0", "".join(far), "".join(mid),
                "".join(ship), "".join(ashore), shade, "".join(near), "".join(lights), tags.svg()))
@@ -2754,8 +2951,9 @@ def stage_chips(sc):
         who = stage_members(sc, key)
         if not who and key in ("hatch", "scouts"):
             continue
+        name, where = tr(name), tr(where)
         desc = "%s: %s. %s" % (name[0].upper() + name[1:], where,
-                               ("Now: " + ", ".join(x["id"] for x in who) + ".") if who else "Nobody now.")
+                               (tr("Now: %s.") % ", ".join(x["id"] for x in who)) if who else tr("Nobody now."))
         out.append('<button type="button" class="sm-chip%s" data-stage="%s" data-desc="%s" aria-pressed="false"%s>%s<span>%s</span><b>%d</b></button>'
                    % (" sm-chip--red" if key == "flag" else "", key, esc(desc), "" if who else " disabled",
                       flag_icon(1) if pose is None else pose_icon(pose, 1), esc(name), len(who)))
@@ -2767,30 +2965,30 @@ def captain_log(sc):
     cap = sc["captain"]
     if cap["busy"]:
         o = cap["oldest"]
-        say = "%d wait%s on my word. The longest, %s, has waited %s." % (cap["waiting"], "s" if cap["waiting"] == 1 else "",
-                                                                     o["id"], o["wait"])
+        say = tr("%d waits on my word. The longest, %s, has waited %s." if cap["waiting"] == 1 else
+                 "%d wait on my word. The longest, %s, has waited %s.") % (cap["waiting"], o["id"], o["wait"])
         cards = []
         for x in sc["line"]:
             if x["kind"] == "queue":
-                icon, what, why = boat_icon(), "queued, %s" % (x["repo"] or "no project"), x["hold"] or ", ".join(x["why"])
+                icon, what, why = boat_icon(), tr("queued, %s") % (x["repo"] or tr("no project")), x["hold"] or ", ".join(x["why"])
             else:
                 pose = "scroll" if x["kind"] == "scout" else PLACE_POSE.get(x["place"], "stand")
-                said = [w for w in x["why"] if not w.startswith("crew is ")]
-                icon, what, why = pose_icon(pose, 2, x["color"]), "%s, %s" % (x["phase"], x["project"] or "no project"), (said or x["why"])[0]
+                said = x["why"][1:] if x["crew"] in CAPTAIN_STATES else x["why"]      # the open line says more than the crew state
+                icon, what, why = pose_icon(pose, 2, x["color"]), "%s, %s" % (x["phase"], x["project"] or tr("no project")), (said or x["why"])[0]
             cards.append('<button type="button" class="sm-logcard" data-id="%s" title="%s"><span class="sm-logcard__n">%d</span>%s'
                          '<span class="sm-logcard__body"><b>%s</b><span>%s</span><em>%s</em></span><span class="sm-logcard__wait">%s</span></button>'
                          % (esc(x["id"]), esc("%s: %s" % (x["id"], why)), x["line"], icon, esc(x["id"]), esc(what), esc(why), esc(x["wait"])))
         body = "".join(cards)
     else:
-        say, body = "All clear. Nothing waits on my word.", '<span class="sm-log__none">Nobody is waiting for you.</span>'
-    return ('<div class="sm-log__capt">%s<p><b>Captain</b><span>%s</span></p></div><div class="sm-log__cards">%s</div>'
-            % (sprite_icon((CAPTAIN_BUSY if cap["busy"] else CAPTAIN_OFF)[:10], CAPTAIN_INK, 4), esc(say), body))
+        say, body = tr("All clear. Nothing waits on my word."), '<span class="sm-log__none">%s</span>' % esc(tr("Nobody is waiting for you."))
+    return ('<div class="sm-log__capt">%s<p><b>%s</b><span>%s</span></p></div><div class="sm-log__cards">%s</div>'
+            % (sprite_icon((CAPTAIN_BUSY if cap["busy"] else CAPTAIN_OFF)[:10], CAPTAIN_INK, 4), esc(tr("Captain")), esc(say), body))
 
 
 def block_ship(s):
     sc = ship_scene(s)
     chips = "".join('<li><span class="sm-sw" style="background:%s"></span>%s</li>' % (c, esc(p))
-                    for p, c in sc["colors"].items()) or '<li class="sm-faint">no project aboard</li>'
+                    for p, c in sc["colors"].items()) or '<li class="sm-faint">%s</li>' % esc(tr("no project aboard"))
     return {"ship": render_ship(sc), "counts": ship_counts(sc), "projects": chips, "stages": stage_chips(sc), "log": captain_log(sc)}
 
 
@@ -2840,20 +3038,22 @@ def demo_snapshot(now=None):
     day = dt.date.fromtimestamp(now)
     queue = [
         {"id": "DEMO-Q-PUSH", "title": "Push notifications", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("slot", "build slot 2/2", "build slots for harbor-api: 2 of 2 taken")], "hold_reason": ""},
+         "reasons": [("slot", tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % ("harbor-api", 2, 2, "DEMO-AUTH, DEMO-RATE"))],
+         "hold_reason": ""},
         {"id": "DEMO-Q-BILL", "title": "New billing plan", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("decision", "captain's decision", "which plan ships first")], "hold_reason": "which plan ships first"},
+         "reasons": [("decision", tr("captain's decision"), "which plan ships first")], "hold_reason": "which plan ships first"},
         {"id": "DEMO-Q-MAPS", "title": "Offline maps", "repo": "lighthouse-web", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("date", "held until " + fmt_date_iso((day + dt.timedelta(days=3)).isoformat()), "held")],
+         "reasons": [("date", tr("held until %s") % fmt_date_iso((day + dt.timedelta(days=3)).isoformat()), "held")],
          "hold_reason": ""},
         {"id": "DEMO-Q-AUDIT", "title": "Audit log", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("task", "waits for DEMO-AUTH", "waits for DEMO-AUTH")], "hold_reason": ""},
+         "reasons": [("task", tr("waits for %s") % "DEMO-AUTH", tr("waits for %s") % "DEMO-AUTH")], "hold_reason": ""},
         {"id": "DEMO-Q-THEME", "title": "Theme picker", "repo": "lighthouse-web", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("ready", "ready to dispatch", "nothing holds it")], "hold_reason": ""},
+         "reasons": [("ready", tr("ready to dispatch"), tr("nothing holds it: firstmate can dispatch it"))], "hold_reason": ""},
         {"id": "DEMO-Q-TILES", "title": "Faster chart tiles", "repo": "tide-charts", "kind": "scout", "created": day.isoformat(),
-         "reasons": [("decision", "captain's decision", "worth a scout?")], "hold_reason": "worth a scout?"},
+         "reasons": [("decision", tr("captain's decision"), "worth a scout?")], "hold_reason": "worth a scout?"},
         {"id": "DEMO-Q-DOCS", "title": "API reference pages", "repo": "harbor-api", "kind": "ship", "created": day.isoformat(),
-         "reasons": [("slot", "build slot 2/2", "build slots for harbor-api: 2 of 2 taken")], "hold_reason": ""},
+         "reasons": [("slot", tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % ("harbor-api", 2, 2, "DEMO-AUTH, DEMO-RATE"))],
+         "hold_reason": ""},
     ]
 
     def lane(label, rem, reset_h, runway, exhaust_h=None):
@@ -2882,7 +3082,7 @@ def demo_snapshot(now=None):
                                "pr": None, "pr_number": 100 + i if kind == "ship" else None, "partial": False})
     return {
         "now": now,
-        "firstmate": {"session": "demo0000-session", "found_by": "the demo", "model": "model-a", "context": 144000,
+        "firstmate": {"session": "demo0000-session", "found_by": tr("the demo"), "model": "model-a", "context": 144000,
                       "last_call": now - 60, "limit": 200000, "limit_how": "inferred", "percent": 72.0,
                       "warn_at": DEFAULT_CONTEXT_WARN, "growth": 38000, "growth_since": now - GROWTH_HOURS * h,
                       "growth_since_compaction": False, "today_new": 1200000, "today_cache": 30000000,
@@ -2900,7 +3100,9 @@ def demo_snapshot(now=None):
 
 class DemoPanel:
     """`--demo`: serves demo_snapshot() in place of a home; the add form queues nothing."""
-    notice = '<div class="sm-notice sm-notice--warn">Demo: a made-up home, not real data.</div>'
+    @property
+    def notice(self):
+        return '<div class="sm-notice sm-notice--warn">%s</div>' % esc(tr("Demo: a made-up home, not real data."))
 
     def __init__(self, port=DEFAULT_PORT):
         self.cfg = argparse.Namespace(port=port, home=os.devnull)   # no report file can exist under it
@@ -2924,7 +3126,7 @@ class DemoPanel:
         return render_queue_detail(q, {}, None, [], now) if q is not None else None
 
     def add_task(self, title, project, text, request_id):
-        return {"ok": False, "error": "this is the demo: nothing was queued"}
+        return {"ok": False, "error": tr("this is the demo: nothing was queued")}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -3043,7 +3245,14 @@ def main(argv=None):
                     help="warn when the firstmate context passes this percent of the window (default 60)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--demo", action="store_true", help="serve a made-up home instead of a real one")
+    ap.add_argument("--lang", choices=LANGS, default=os.environ.get("SHIPMATE_LANG") or "en",
+                    help="the page's language: en (default) or pt-BR")
     a = ap.parse_args(argv)
+    if a.lang not in LANGS:
+        print("shipmate: SHIPMATE_LANG must be one of %s" % ", ".join(LANGS), file=sys.stderr)
+        return 2
+    global LANG
+    LANG = a.lang
     if a.demo:
         panel = DemoPanel(a.port)
         if a.once:

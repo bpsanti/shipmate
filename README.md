@@ -35,10 +35,14 @@ It listens on `127.0.0.1` only.
 | `--context-warn P` | `SHIPMATE_CONTEXT_WARN` | `60` | warn when firstmate's context passes P percent of the window |
 | `--once` | | | print the JSON snapshot and exit |
 | `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed) |
+| `--lang en\|pt-BR` | `SHIPMATE_LANG` | `en` | the page's language: English, or Brazilian Portuguese with `pt-BR` |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
 | | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only by the detail drawer to read a PR's checks |
 
 Transcripts are always read from `~/.claude` and from every directory the home lists in `config/claude-accounts`.
+
+The language covers everything the page writes itself: labels, the board's lanes and reasons, the drawer, the sidebar, dates, and the ship view's signs, stages and log.
+Text read from the home's records (task titles, status lines, hold reasons, notes) is shown as it was written.
 
 `GET /state.json` returns the same snapshot the page is built from.
 `GET /ship` returns the ship view drawn from that snapshot.
