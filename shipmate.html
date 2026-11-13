@@ -60,14 +60,14 @@
         <div id="b-ship">{{SHIP}}</div>
       </div>
       <div class="sm-log" id="b-shiplog" aria-label="{{t:Waiting for you}}">{{SHIPLOG}}</div>
-      <p class="sm-faint sm-ship__hint">{{t:Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand, a queued boat or a card in the log for its details.}}</p>
+      <p class="sm-faint sm-ship__hint">{{t:Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand or a card in the log for its details, or the crowd at the cabin door to find it in the log.}}</p>
       <div class="sm-key">
         <section><h3 class="fm-sign fm-sign--eyebrow">{{t:Projects aboard}}</h3><ul class="sm-key__projects" id="b-shipprojects">{{SHIPPROJECTS}}</ul>
           <h3 class="fm-sign fm-sign--eyebrow">{{t:Accounts aboard}}</h3><ul class="sm-key__projects" id="b-shipaccounts">{{SHIPACCOUNTS}}</ul>
           <p class="sm-faint">{{t:A shirt takes the project's colour, and so do the stripes on the sails; a neckerchief takes the account's.}}
           {{t:The hat says how the hand is: a bandana at work, a straw hat off duty or queued ashore, bare-headed before the captain, a grey wool cap when its phase is unknown.}}
-          {{t:A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued boat waits on the captain's decision.}}
-          {{t:Whoever needs the captain waits in the captain's cabin, and a queued task tied astern, numbered by how long it has waited; the captain attends them at the desk, or sits with a mug when nobody waits.}}
+          {{t:A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued task waits on the captain's decision.}}
+          {{t:Whoever needs the captain waits in the captain's cabin, numbered by how long it has waited: a hand aboard, or a queued task with its sea bag. Three fit in the cabin; the rest crowd the door with their count, and the log below lists everyone. The captain attends them at the desk, or sits with a mug when nobody waits.}}
           {{t:Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.}}
           {{t:Water in the hold: firstmate's context, the white line its warning threshold.}}
           {{t:Scouts row out to the horizon, back with the map, and moor at the pier with it.}}
@@ -120,7 +120,7 @@
   var dtitle = document.getElementById("sm-drawer-title");
   var openId = null;
   var lastFocus = null;
-  var OPENS = ".sm-card[data-id], .sm-hand[data-id], .sm-boat[data-id], .sm-logcard[data-id]";
+  var OPENS = ".sm-card[data-id], .sm-hand[data-id], .sm-logcard[data-id]";
   var view = "board";
   try { if (localStorage.getItem("shipmate.view") === "ship") view = "ship"; } catch (e) {}
 
@@ -263,7 +263,7 @@
     var lit = null, note = document.getElementById("sm-stage"), HINT = note.textContent;
     function svg() { return document.querySelector("#b-ship svg"); }
     function members(s, key) {
-      if (key === "flag") return [].slice.call(s.querySelectorAll(".sm-hand.has-flag, .sm-boat[data-flag]"));
+      if (key === "flag") return [].slice.call(s.querySelectorAll(".sm-hand.has-flag, .sm-crowd"));
       if (key === "off") return [].slice.call(s.querySelectorAll(".sm-hand[data-off]"));
       return [].slice.call(s.querySelectorAll('.sm-hand[data-stage="' + key + '"]'));
     }
@@ -316,11 +316,12 @@
     try { localStorage.setItem("shipmate.signs", on ? "on" : "off"); } catch (e) {}
   });
 
-  // a card in the log lights its hand or boat in the scene while pointed at
+  // a card in the log lights its hand in the scene while pointed at, or the crowd at the cabin door it is in
   function logLight(e, on) {
     var c = e.target.closest && e.target.closest(".sm-logcard[data-id]"), s = document.querySelector("#b-ship svg");
     if (!c || !s) return;
-    var g = s.querySelector('[data-id="' + c.getAttribute("data-id").replace(/"/g, "") + '"]');
+    var id = c.getAttribute("data-id"), g = s.querySelector('[data-id="' + CSS.escape(id) + '"]');
+    if (!g) g = [].filter.call(s.querySelectorAll(".sm-crowd"), function (x) { return x.getAttribute("data-crowd").split(" ").indexOf(id) >= 0; })[0];
     if (g) g.classList.toggle("is-hl", on);
   }
   var logEl = document.getElementById("b-shiplog");
@@ -493,6 +494,18 @@
     show();
     load();
   }
+  // the crowd at the cabin door: its cards in the captain's log, the first in view and focused,
+  // all of them marked a moment, so one more click (or Enter) opens any of them
+  function toLog(ids) {
+    var cards = (ids || "").split(" ").map(function (id) {
+      return document.querySelector('.sm-logcard[data-id="' + CSS.escape(id) + '"]');
+    }).filter(Boolean);
+    if (!cards.length) return;
+    cards[0].scrollIntoView({ block: "nearest", inline: "start", behavior: "smooth" });
+    cards[0].focus({ preventScroll: true });
+    cards.forEach(function (c) { c.classList.add("is-called"); });
+    setTimeout(function () { cards.forEach(function (c) { c.classList.remove("is-called"); }); }, 2400);
+  }
   function openAdd() {
     openId = null;
     dtitle.textContent = {{j:Add a task}};
@@ -511,6 +524,7 @@
       else if (a === "close") close();
       else if (a === "sum") document.getElementById("sm-side").classList.toggle("is-open");
       else if (a === "view") setView(act.getAttribute("data-view"), true);
+      else if (a === "crowd") toLog(act.getAttribute("data-crowd"));
       return;
     }
     if (t.closest("a")) return;
@@ -519,6 +533,8 @@
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && !drawer.hidden) { close(); return; }
+    var crowd = e.target.closest && e.target.closest(".sm-crowd");
+    if (crowd && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toLog(crowd.getAttribute("data-crowd")); return; }
     var card = e.target.closest && e.target.closest(OPENS);
     if (card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(card.getAttribute("data-id")); }
   });

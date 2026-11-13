@@ -158,29 +158,32 @@ Each element stands for one thing:
 | A hand's neckerchief | its Claude account's colour, in the order of `config/claude-accounts` (an account a worker reports that the list lacks comes after); "Accounts aboard" below the scene names them. A queued hand has no account yet, so its neckerchief is a dark shade of its shirt |
 | A hand's hat | its state: a bandana at work, a straw hat when not working (off duty, or queued on the pier), bare-headed when it waits on the captain, a grey wool cap when its phase is unknown |
 | A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
-| The captain's cabin, in the stern castle | the captain's line: a flagged hand leaves its place and waits here, facing the desk, numbered by how long it has waited, the longest nearest the desk; a scout waits here with its map |
+| The captain's cabin, in the stern castle | the captain's line: a flagged hand leaves its place and waits here, facing the desk, numbered by how long it has waited, the longest nearest the desk; a scout waits here with its map, and a queued task held for the captain's decision stands here with its sea bag at its feet (it is not aboard yet) |
+| A crowd in the cabin door, with `+N` over it | the rest of the captain's line, when the cabin is full; clicking it (or Enter on it) brings their cards in the log into view, marks them and focuses the first, and one more click opens any of them |
 | The captain | at the desk with a paper and a balloon saying how many wait and who has waited longest; sitting with a mug when nobody waits |
-| Boats tied astern | queued tasks held for the captain's decision, numbered in the same line; past six, the rest wait on the pier with their red flag and their number |
 | A skiff on the horizon, rowing back with the map, moored at the pier | a scout exploring, writing the report, report delivered |
 | Barrels in the hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
 | Water in the hold | firstmate's context; the white line is the warning threshold |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
-| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, astern, and on the pier the slot each tavern waits for, ready, waiting for a task, asleep); the "signs" button puts them away, and the browser remembers it |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task, asleep); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
 | Day or night | the local hour: night from 18:00 to 06:00 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
 
 The scene is larger than its frame and grows with the crew so no hand stands on another.
+The cabin is the exception: it has one size, so the ship never grows with the captain's line.
+Three wait inside, 20 art pixels apart between the desk and the door; a fourth would need a longer stern castle, since a hand with a fishing rod or signal flags is up to 26 pixels wide.
+When wide props leave no room for the third, two wait inside, and the line keeps its order: everyone after the first who does not fit is in the crowd at the door.
 It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the buttons zoom in and out, frame the crew again, or fit everything.
 Names show from a readable zoom up, never overlap, and come back on hover or focus when zoomed out.
-Clicking a hand, on board or on the pier, or a queued boat opens the same drawer as its card.
+Clicking a hand, on board, in the cabin or on the pier, opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
-The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand or boat, and clicking it opens its drawer.
+The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand (or the crowd at the cabin door it is in), and clicking it opens its drawer.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only when the browser does not ask for reduced motion.
 
 ### The queue on the pier
 
-Every queued task that is not tied astern is a hand on the pier, and what it does there is decided by the first reason the queue gives for it, nothing else:
+Every queued task that is not held for the captain's decision is a hand on the pier (those wait in the captain's cabin), and what it does there is decided by the first reason the queue gives for it, nothing else:
 
 | On the pier | Reason in the queue |
 | --- | --- |
@@ -190,7 +193,6 @@ Every queued task that is not tied astern is a hand on the pier, and what it doe
 | Standing under a hand aboard, talking up to it, with a balloon and a dotted line to that hand | it waits for that task (`blocked-by`), and that task is aboard; it stands as close below it as the others allow |
 | Standing apart, its tag naming what it waits for | it waits for a task that is not aboard (still queued, or gone) |
 | Asleep on the bench under the forecastle, with its date | held until a date that has not come |
-| A red flag and its number in the captain's line | held for the captain's decision, when the six places astern are taken |
 
 Each tavern has its sign with the slot it waits for (`SLOT <project> · 2/2 taken · 13 waiting`, or the home's lanes), and the other groups have theirs (ready, waiting for a task, asleep).
 The tavern takes four tables and one bench of eight; the rest are counted (`+N`, with their ids on hover), and so are lines past eight.

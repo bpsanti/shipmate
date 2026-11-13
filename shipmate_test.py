@@ -1011,30 +1011,85 @@ class TestShip(unittest.TestCase):
         self.assertIn('data-id="ASK"', shipmate.captain_log(busy))
         self.assertIn("1 waits on my word", shipmate.captain_log(busy))
 
-    def test_the_line_stands_in_the_cabin_and_boats_tie_up_astern(self):
-        flagged = [self.hand("F%d" % i, i % 5, crew="parked", last=T0 - 100 * i) for i in range(5)]
-        queue = [{"id": "Q%d" % i, "reasons": [("decision", "c", "c")], "waiting_since": T0 - i} for i in range(9)]
+    def test_the_line_waits_in_the_cabin_and_the_rest_crowd_the_door(self):
+        flagged = [self.hand("F%d" % i, 1, crew="parked", last=T0 - 100 * i) for i in range(5)]
+        queue = [{"id": "Q%d" % i, "repo": "demo-app", "reasons": [("decision", "c", "c")], "waiting_since": T0 - i} for i in range(9)]
         queue.append({"id": "FREE", "reasons": [("ready", "r", "r")]})
         sc = shipmate.ship_scene(self.snap(flagged + [self.hand("OK", 1)], queue=queue))
+        order = [x["id"] for x in sc["line"]]
+        self.assertEqual(sorted(order), sorted([h["id"] for h in flagged] + ["Q%d" % i for i in range(9)]))
         lay = shipmate.ship_layout(sc)
         empty = shipmate.ship_layout(shipmate.ship_scene(self.snap([self.hand("OK", 1)])))
         one = shipmate.ship_layout(shipmate.ship_scene(self.snap([self.hand("A", 1, crew="parked")])))
-        self.assertEqual(one["castle"], empty["castle"])                 # the cabin does not jump at the first request
-        self.assertGreater(lay["castle"], empty["castle"])               # and grows with the line
-        cabin = [lay["hands"]["F%d" % i] for i in (4, 3, 2, 1, 0)]       # longest wait nearest the desk
-        self.assertEqual([c[0] for c in cabin], sorted(c[0] for c in cabin))
-        self.assertTrue(all(c[2].endswith("-l") and lay["cabin"][0] <= c[0] < lay["cabin"][1] for c in cabin))
+        self.assertEqual({lay["castle"], one["castle"]}, {empty["castle"]})     # the cabin never grows, so neither does the ship
+        self.assertEqual(lay["seated"], order[:shipmate.CABIN_SEATS])           # the longest waits inside, in line order
+        self.assertEqual([x["id"] for x in lay["crowd"]], order[shipmate.CABIN_SEATS:])   # the rest crowd the door
+        cx0, cx1 = lay["cabin"]
+        xs = [lay["hands"][i][0] for i in lay["seated"]]
+        self.assertEqual(xs, sorted(xs))                                        # the first in line nearest the desk
+        for i in lay["seated"]:
+            x, _feet, pose, _u = lay["hands"][i]
+            self.assertTrue(pose.endswith("-l") and cx0 <= x and x + len(shipmate.POSES[pose][0]) <= cx1 - shipmate.CABIN_DOOR, i)
+        for x in lay["crowd"]:                                                  # nobody in the crowd stands anywhere else
+            self.assertNotIn(x["id"], lay["hands"])
+            self.assertNotIn(x["id"], lay["pier"])
         self.assertEqual(lay["hands"]["OK"][2], "hammer")
-        self.assertEqual(list(lay["astern"]), ["Q8", "Q7", "Q6", "Q5", "Q4", "Q3"][:shipmate.MAX_ASTERN])
-        svg = shipmate.render_ship(sc)
-        for x in flagged + queue:                                        # everyone is drawn once, the rest wait on the pier
-            self.assertEqual(svg.count('data-id="%s"' % x["id"]), 1, x["id"])
-        self.assertEqual(svg.count('class="sm-num"'), 5 + 9)             # every place in line is numbered, astern or ashore
-        self.assertEqual(svg.count('data-flag="1"'), shipmate.MAX_ASTERN)
-        for qid in ("Q2", "Q1", "Q0"):                                   # no room astern: a red flag on the pier
-            self.assertIn('has-flag" data-id="%s" data-stage="flag"' % qid, svg)
-            self.assertIn(qid, lay["pier"])
+        self.assertEqual([q["id"] for q in sc["pier"]], ["FREE"])                # no decision waits on the pier
         self.assertIn(lay["pier"]["FREE"][0], range(lay["x0"] + 92, lay["width"]))
+        svg = shipmate.render_ship(sc)
+        for i in lay["seated"]:
+            self.assertEqual(svg.count('data-id="%s"' % i), 1, i)
+        for x in lay["crowd"]:
+            self.assertNotIn('data-id="%s"' % x["id"], svg)
+        crowd = re.search(r'<g class="sm-crowd" data-action="crowd" data-crowd="([^"]*)"', svg)
+        self.assertEqual(crowd.group(1).split(" "), order[3:])
+        self.assertIn(">+11</text>", svg)
+        self.assertIn("numbers 4 to 14", svg)
+        self.assertEqual(svg.count('class="sm-num"'), 3 + 1)                    # the three inside, and the crowd's count
+        self.assertNotIn("sm-boat", svg)
+        self.assertNotIn("ASTERN", svg)
+
+    def test_a_queued_decision_in_the_cabin_opens_its_own_card(self):
+        queue = [{"id": "QA", "title": "t QA", "repo": "demo-app", "reasons": [("decision", "c", "which one")], "waiting_since": T0 - 9}]
+        sc = shipmate.ship_scene(self.snap([self.hand("F", 1, crew="parked", last=T0 - 1)], queue=queue))
+        q = sc["queue"][0]
+        self.assertEqual((q["place"], q["stage"], q["line"]), ("cabin", "flag", 1))
+        lay = shipmate.ship_layout(sc)
+        self.assertEqual((lay["seated"], lay["crowd"]), (["QA", "F"], []))
+        self.assertEqual(lay["hands"]["QA"][2], "stand-l")
+        svg = shipmate.render_ship(sc)
+        # the one clickable group for QA is a hand the page opens by its id, flagged, with its number and its bag
+        group = re.search(r'<g class="sm-hand pose-stand has-flag" data-id="QA" data-stage="flag"[^>]*>(.*?)</g>', svg)
+        self.assertIsNotNone(group)
+        self.assertIn("cabin with a sea bag: queued, waits for your decision", group.group(0))
+        self.assertIn("#c9b48a", group.group(1))
+        self.assertIn(".sm-hand[data-id]", shipmate.asset("shipmate.html").split("var OPENS = ")[1].split(";")[0])
+        self.assertIn('data-id="QA"', shipmate.captain_log(sc))
+        self.assertEqual(svg.count('class="sm-num"'), 2)
+
+    def test_the_crowd_leads_to_every_grouped_card_in_the_log(self):
+        snap = shipmate.demo_snapshot(T0)
+        sc = shipmate.ship_scene(snap)
+        lay = shipmate.ship_layout(sc)
+        self.assertEqual(len(sc["line"]), 4)
+        self.assertEqual([x["id"] for x in lay["crowd"]], [sc["line"][3]["id"]])
+        svg, log = shipmate.render_ship(sc), shipmate.captain_log(sc)
+        ids = re.search(r'data-crowd="([^"]*)"', svg).group(1).split(" ")
+        for i in ids:                                                       # one click finds it in the log, one more opens it
+            self.assertIn('class="sm-logcard" data-id="%s"' % i, log)
+        page = shipmate.asset("shipmate.html")
+        self.assertIn('else if (a === "crowd") toLog(act.getAttribute("data-crowd"));', page)
+        self.assertIn(".sm-logcard[data-id=", page.split("function toLog")[1].split("function openAdd")[0])
+        self.assertIn(".sm-crowd", page.split("function members")[1].split("}")[0])  # the red-flag chip lights it too
+
+    def test_wide_props_seat_fewer_and_the_line_keeps_its_order(self):
+        fishers = [self.hand("R%d" % i, 3, crew="parked", last=T0 - 100 + i) for i in range(3)]
+        narrow = self.hand("N", 1, crew="parked", last=T0 - 10)
+        sc = shipmate.ship_scene(self.snap(fishers + [narrow]))
+        lay = shipmate.ship_layout(sc)
+        self.assertEqual(lay["seated"], ["R0", "R1"])                        # three rods do not fit before the door
+        self.assertEqual([x["id"] for x in lay["crowd"]], ["R2", "N"])         # and the narrow one does not jump the line
+        self.assertEqual(lay["castle"], shipmate.ship_layout(shipmate.ship_scene(self.snap([])))["castle"])
 
     def test_wait_text(self):
         self.assertEqual([shipmate.wait_text(T0 - d, T0) for d in (5, 600, 3 * 3600 + 300, 2 * 86400 + 4 * 3600)],
@@ -1156,7 +1211,7 @@ class TestShip(unittest.TestCase):
         self.assertEqual(hat({"id": "a", "place": "pier-cards", "kind": "queue"}), "straw")
         self.assertEqual(hat({"id": "a", "place": "hatch"}), "wool")
         self.assertEqual(hat({"id": "a", "place": "deck", "off": True, "flag": True}), "bare")
-        self.assertEqual(hat({"id": "a", "place": "pier-ask", "kind": "queue", "flag": True}), "bare")
+        self.assertEqual(hat({"id": "a", "place": "cabin", "kind": "queue", "flag": True}), "bare")
         for pose in ("stand", "hammer", "signal", "doze", "cards-l"):
             base = pose.split("-")[0]
             ox, oy = shipmate.POSE_HEAD[base]
@@ -1189,7 +1244,7 @@ class TestShip(unittest.TestCase):
             for b in boxes[i + 1:]:
                 self.assertTrue(a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3], (a, b))
 
-    def test_drawing_has_a_hand_per_agent_and_a_boat_per_queue_item(self):
+    def test_drawing_has_a_hand_per_agent_and_per_queue_item(self):
         snap = shipmate.demo_snapshot(T0)
         svg = shipmate.block_ship(snap)["ship"]
         self.assertTrue(svg.startswith("<svg") and svg.endswith("</svg>"))
@@ -1197,11 +1252,11 @@ class TestShip(unittest.TestCase):
             self.assertEqual(svg.count('data-id="%s" data-stage=' % a["id"]), 1, a["id"])
             self.assertEqual(svg.count('<g class="sm-tag" data-for="%s"' % a["id"]), 1, a["id"])
         sc = shipmate.ship_scene(snap)
-        for q in snap["queue"]:                                           # a boat astern or a hand on the pier, once
-            drawn = svg.count('class="sm-boat" data-id="%s"' % q["id"]) + svg.count('data-id="%s" data-stage=' % q["id"])
-            self.assertEqual(drawn, 1, q["id"])
-        self.assertEqual(set(sc["astern"]), {"DEMO-Q-BILL", "DEMO-Q-TILES"})
-        self.assertEqual(svg.count('class="sm-redflag"'), sum(1 for a in snap["agents"] if shipmate.captain_reasons(a)))
+        crowd = {x["id"] for x in shipmate.ship_layout(sc)["crowd"]}
+        for q in snap["queue"]:                                           # a hand in the cabin or on the pier, once, or in the crowd
+            self.assertEqual(svg.count('data-id="%s" data-stage=' % q["id"]), 0 if q["id"] in crowd else 1, q["id"])
+        self.assertEqual(crowd, {"DEMO-Q-TILES"})
+        self.assertEqual(svg.count('class="sm-redflag"'), len(sc["line"]) - len(crowd))
         for layer in ("sm-far", "sm-mid", "sm-bob", "sm-near", "sm-tags"):
             self.assertIn('class="%s"' % layer, svg)
         self.assertNotIn("http", svg)
@@ -1219,7 +1274,7 @@ class TestShip(unittest.TestCase):
         self.assertGreaterEqual(sc["off"], 1)
         self.assertGreaterEqual(sc["flags"], 3)
         self.assertEqual(len(sc["colors"]), 3)
-        self.assertEqual({q["act"] for q in sc["pier"]}, set(shipmate.PIER_ACTS) - {"ask"})   # its decisions fit astern
+        self.assertEqual({q["act"] for q in sc["pier"]}, set(shipmate.PIER_ACTS))   # its decisions wait in the cabin
 
     def queue_item(self, tid, reason, created="2030-01-01", deps=(), slot=None, until=""):
         short = until or reason
@@ -1234,7 +1289,6 @@ class TestShip(unittest.TestCase):
         self.assertEqual(act({"reason": "slot", "created": "2000-01-01"}, set(), today), ("drink", None))
         self.assertEqual(act({"reason": "ready"}, set(), today), ("board", None))
         self.assertEqual(act({"reason": "date"}, set(), today), ("doze", None))
-        self.assertEqual(act({"reason": "decision"}, set(), today), ("ask", None))
         self.assertEqual(act({"reason": "task", "deps": ["GONE", "LIVE"]}, {"LIVE"}, today), ("talk", "LIVE"))
         self.assertEqual(act({"reason": "task", "deps": ["GONE"]}, {"LIVE"}, today), ("wait", None))
         old = dt.date.fromtimestamp(T0 - 3 * 86400).isoformat()
@@ -1245,7 +1299,8 @@ class TestShip(unittest.TestCase):
                  self.queue_item("ASK", "decision")]
         sc = shipmate.ship_scene(self.snap([self.hand("LIVE", 1)], queue=queue))
         pier = {q["id"]: q for q in sc["pier"]}
-        self.assertEqual(sc["astern"], ["ASK"])                          # the captain's decision ties up astern, not on the pier
+        self.assertNotIn("ASK", pier)                                     # the captain's decision waits in the cabin, not on the pier
+        self.assertEqual([(x["id"], x["place"]) for x in sc["line"]], [("ASK", "cabin")])
         self.assertEqual({k: (q["act"], q["stage"]) for k, q in pier.items()},
                          {"CARD": ("cards", "slot"), "MUG": ("drink", "slot"), "GO": ("board", "board"), "TALK": ("talk", "task"),
                           "ALONE": ("wait", "task"), "NAP": ("doze", "date")})
@@ -1323,7 +1378,8 @@ class TestShip(unittest.TestCase):
             shipmate.render_ship(sc)
         finally:
             shipmate.hand_sprite = real
-        drawn = [a["id"] for a in snap["agents"]] + [q["id"] for q in sc["pier"]]
+        crowd = {x["id"] for x in shipmate.ship_layout(sc)["crowd"]}       # faces in the door, not hands
+        drawn = [x["id"] for x in sc["hands"] + sc["scouts"] + sc["queue"] if x["id"] not in crowd]
         self.assertEqual(sorted(set(calls)), sorted(drawn))
 
     def test_motion_respects_reduced_motion(self):
