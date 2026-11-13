@@ -200,13 +200,26 @@ class TestReaders(Base):
         rows, _ = shipmate.read_backlog(self.cfg)
         q = {r["id"]: [x[0] for x in r["reasons"]] for r in shipmate.queue_rows(self.cfg, rows)}
         self.assertEqual(q["TASK-B"], ["slot"])                 # demo-app admits 1 and TASK-A holds it
-        self.assertEqual(q["TASK-C"], ["date", "decision"])
+        self.assertEqual(q["TASK-C"], ["date"])                 # captain hold with a future date is scheduled, not a live decision
         self.assertEqual(q["TASK-D"], ["task"])
         self.assertNotIn("TASK-A", q)
         # once TASK-A records its PR handoff the place frees
         self.meta("TASK-A", "pr=https://forge.example/o/r/pull/1\n")
         q = {r["id"]: [x[0] for x in r["reasons"]] for r in shipmate.queue_rows(self.cfg, rows)}
         self.assertEqual(q["TASK-B"], ["ready"])
+
+    def test_captain_hold_enters_the_captain_queue_only_when_its_date_arrives(self):
+        today = shipmate.dt.date.today()
+        def row(tid, until):
+            return {"id": tid, "state": "queued", "held": "yes", "hold_kind": "captain", "hold_reason": "call it",
+                    "hold_until": until, "repo": "other"}
+        rows = [row("F", (today + shipmate.dt.timedelta(days=3)).isoformat()), row("T", today.isoformat()),
+                row("P", (today - shipmate.dt.timedelta(days=3)).isoformat()), row("N", "")]
+        q = {r["id"]: r for r in shipmate.queue_rows(self.cfg, rows)}
+        self.assertEqual([x[0] for x in q["F"]["reasons"]], ["date"])
+        self.assertTrue(q["F"]["reasons"][0][1].startswith("held until"))
+        for tid in ("T", "P", "N"):
+            self.assertEqual([x[0] for x in q[tid]["reasons"]], ["decision"])
 
 
     def test_how_long_a_queued_task_has_waited_for_the_captain(self):
@@ -217,6 +230,8 @@ class TestReaders(Base):
         for body in ("", None, "notes first\nCaptain hold set: 2026-01-05T10:20:30Z", "Captain hold set: 2026-13-45T99:00:00Z"):
             self.assertEqual(shipmate.parse_hold_set(body), (None, False), body)
         rows, _ = shipmate.read_backlog(self.cfg)
+        # TASK-C's date has arrived, so its hold is a live decision (a future date would be scheduled, not waiting)
+        rows = [dict(r, hold_until=dt.date.today().isoformat()) if r["id"] == "TASK-C" else r for r in rows]
         # without a stamp, a held task waits since the day it was created; nothing else waits
         q = {r["id"]: (r["waiting_since"], r["waiting_exact"]) for r in shipmate.queue_rows(self.cfg, rows)}
         self.assertEqual(q["TASK-C"], (time.mktime(dt.date(2026, 1, 3).timetuple()), False))

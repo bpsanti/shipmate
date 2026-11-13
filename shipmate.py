@@ -801,9 +801,10 @@ def queue_rows(cfg, backlog):
         reasons = []
         if r.get("held") == "yes":
             if r.get("hold_until") and r["hold_until"] > today:
+                # a dated hold is scheduled, not a live decision, until its date arrives
                 txt = tr("held until %s") % fmt_date_iso(r["hold_until"])
                 reasons.append(("date", txt, txt))
-            if r.get("hold_kind") == "captain" or not r.get("hold_until"):
+            elif r.get("hold_kind") == "captain" or not r.get("hold_until"):
                 reasons.append(("decision", tr("captain's decision"), (r.get("hold_reason") or tr("captain's decision"))[:400]))
         deps = [d for d in re.split(r"[\s,]+", r.get("blocked_by") or "") if d and d != "none"]
         if deps:
