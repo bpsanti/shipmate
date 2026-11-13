@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>shipmate</title>
+<link rel="icon" href="data:,">
+<style nonce="{{NONCE}}">
+{{CSS}}
+</style>
+</head>
+<body>
+<div class="sm-app">
+  <main class="sm-main">
+    <header class="sm-head">
+      <span class="bb-brand">
+        <span class="bb-brand__disc">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16"/><path d="m19 13 2-1a9 9 0 0 1-18 0l2 1"/><path d="M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+        </span>
+        <span class="bb-brand__wm">shipmate</span>
+      </span>
+      <span class="bb-meta-mono"><span id="sm-stale" class="sm-stale" hidden>refresh failed · </span>updated <span id="sm-time">{{TIME}}</span></span>
+    </header>
+    {{NOTICE}}
+    <!-- screens narrower than the sidebar breakpoint show the sidebar's numbers as this strip -->
+    <div class="sm-strip" id="b-strip">{{STRIP}}</div>
+
+    <div class="bb-section__head">
+      <h2 class="fm-sign fm-sign--eyebrow">Work by phase</h2>
+      <span class="sm-faint sm-counts" id="b-counts">{{COUNTS}}</span>
+    </div>
+    <div class="sm-boardwrap">
+      <div id="b-board">{{BOARD}}</div>
+      <div class="sm-boardmore" id="sm-more" hidden></div>
+    </div>
+
+    <details class="sm-usage">
+      <summary><span class="fm-sign fm-sign--eyebrow">Usage</span><span class="sm-faint">per day and per delivered task</span></summary>
+      <div class="fm-card sm-pad" id="b-usage">{{USAGE}}</div>
+    </details>
+  </main>
+
+  <aside class="sm-side" id="sm-side" aria-label="Firstmate session and accounts">
+    <button class="sm-sumline" type="button" data-action="sum" id="b-sumline">{{SUMLINE}}</button>
+    <div class="sm-side__body">
+      <div class="sm-today" id="b-today">{{TODAY}}</div>
+      <section class="bb-section" aria-labelledby="h-firstmate">
+        <div class="bb-section__head"><h2 class="fm-sign fm-sign--eyebrow" id="h-firstmate">Firstmate session</h2></div>
+        <div class="fm-card sm-pad" id="b-firstmate">{{FIRSTMATE}}</div>
+      </section>
+      <section class="bb-section" aria-labelledby="h-accounts">
+        <div class="bb-section__head"><h2 class="fm-sign fm-sign--eyebrow" id="h-accounts">Accounts and quota</h2></div>
+        <div class="fm-card sm-pad" id="b-accounts">{{ACCOUNTS}}</div>
+      </section>
+    </div>
+  </aside>
+</div>
+
+<div class="sm-backdrop" id="sm-backdrop" data-action="close" hidden></div>
+<aside class="sm-drawer" id="sm-drawer" role="dialog" aria-modal="true" aria-label="Details" hidden>
+  <div class="sm-drawer__bar">
+    <span class="fm-sign fm-sign--eyebrow" id="sm-drawer-title">Details</span>
+    <button class="sm-close" type="button" data-action="close" aria-label="Close">✕</button>
+  </div>
+  <div class="sm-drawer__body" id="sm-detail"></div>
+  <div class="sm-drawer__body" id="sm-add" hidden>{{FORM}}</div>
+</aside>
+
+<script nonce="{{NONCE}}">
+(function () {
+  var every = {{REFRESH_MS}};
+  var ids = ["board", "today", "firstmate", "accounts", "strip", "sumline", "usage", "counts"];
+  var drawer = document.getElementById("sm-drawer");
+  var backdrop = document.getElementById("sm-backdrop");
+  var detail = document.getElementById("sm-detail");
+  var add = document.getElementById("sm-add");
+  var dtitle = document.getElementById("sm-drawer-title");
+  var openId = null;
+  var lastFocus = null;
+
+  // tell when lanes or cards are out of sight, since a sideways scroll is easy to miss
+  function overflow() {
+    var board = document.querySelector(".sm-board");
+    var more = document.getElementById("sm-more");
+    if (!board) return;
+    var r = board.getBoundingClientRect();
+    var hidden = [].filter.call(board.children, function (l) {
+      var x = l.getBoundingClientRect();
+      return x.right > r.right + 2 || x.left < r.left - 2;
+    }).length;
+    more.hidden = !hidden;
+    more.textContent = hidden + " lane" + (hidden > 1 ? "s" : "") + " out of view, scroll the board sideways";
+    document.querySelector(".sm-boardwrap").classList.toggle("has-more", hidden > 0);
+    [].forEach.call(document.querySelectorAll(".sm-lane__body"), function (body) {
+      var tag = body.parentNode.querySelector(".sm-lane__more");
+      if (!tag) return;
+      var br = body.getBoundingClientRect();
+      var below = [].filter.call(body.children, function (c) { return c.getBoundingClientRect().top >= br.bottom - 8; }).length;
+      tag.hidden = !below;
+      tag.textContent = "+" + below + " more below";
+    });
+  }
+
+  function show() {
+    lastFocus = document.activeElement;
+    drawer.hidden = false;
+    backdrop.hidden = false;
+    document.body.classList.add("sm-locked");
+    drawer.querySelector(".sm-close").focus();
+  }
+  function close() {
+    drawer.hidden = true;
+    backdrop.hidden = true;
+    openId = null;
+    document.body.classList.remove("sm-locked");
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  function load() {
+    if (!openId) return;
+    var id = openId;
+    fetch("/detail?id=" + encodeURIComponent(id), { cache: "no-store" }).then(function (r) {
+      if (r.status === 404) return '<div class="sm-empty">This item is no longer on the board.</div>';
+      if (!r.ok) throw new Error(String(r.status));
+      return r.text();
+    }).then(function (h) { if (openId === id) detail.innerHTML = h; }).catch(function () {});
+  }
+  function openDetail(id) {
+    openId = id;
+    dtitle.textContent = "Details";
+    add.hidden = true;
+    detail.hidden = false;
+    detail.innerHTML = '<div class="sm-empty">Loading…</div>';
+    show();
+    load();
+  }
+  function openAdd() {
+    openId = null;
+    dtitle.textContent = "Add a task";
+    detail.hidden = true;
+    add.hidden = false;
+    show();
+    add.querySelector("input[name=title]").focus();
+  }
+
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    var act = t.closest("[data-action]");
+    if (act) {
+      var a = act.getAttribute("data-action");
+      if (a === "add") openAdd();
+      else if (a === "close") close();
+      else if (a === "sum") document.getElementById("sm-side").classList.toggle("is-open");
+      return;
+    }
+    if (t.closest("a")) return;
+    var card = t.closest(".sm-card[data-id]");
+    if (card) openDetail(card.getAttribute("data-id"));
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !drawer.hidden) { close(); return; }
+    var card = e.target.closest && e.target.closest(".sm-card[data-id]");
+    if (card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(card.getAttribute("data-id")); }
+  });
+  document.addEventListener("scroll", overflow, true);
+  window.addEventListener("resize", overflow);
+
+  function tick() {
+    if (document.hidden) return;
+    fetch("/blocks", { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }).then(function (b) {
+      ids.forEach(function (k) { document.getElementById("b-" + k).innerHTML = b[k]; });
+      document.getElementById("sm-time").textContent = b.time;
+      document.getElementById("sm-stale").hidden = true;
+      overflow();
+      load();
+    }).catch(function () {
+      document.getElementById("sm-stale").hidden = false;
+    });
+  }
+  setInterval(tick, every);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
+  if (location.search) history.replaceState(null, "", "/");
+  overflow();
+})();
+</script>
+</body>
+</html>

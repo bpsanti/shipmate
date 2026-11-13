@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+print.png
+print-*.png
+opcoes/
