@@ -598,5 +598,130 @@ class TestAssets(unittest.TestCase):
         self.assertIn("prefers-color-scheme: dark", shipmate.asset("shipmate.css"))
 
 
+class TestBay(unittest.TestCase):
+    """The ship view: where each hand stands, the red flags, the counts and the drawing."""
+
+    def hand(self, tid, phase, kind="ship", project="demo-app", crew="working", decisions=()):
+        phases = shipmate.SCOUT_PHASES if kind == "scout" else shipmate.SHIP_PHASES
+        return {"id": tid, "title": "t " + tid, "kind": kind, "project": project, "phases": phases, "phase": phase,
+                "crew": crew, "decisions": list(decisions)}
+
+    def snap(self, agents, queue=(), lanes=(), fm=None, machine=None, delivered=()):
+        return {"now": T0, "agents": agents, "queue": list(queue), "quota": {"lanes": list(lanes)},
+                "firstmate": fm, "machine": machine, "delivered": list(delivered)}
+
+    def test_status_fields_in_separate_brackets_and_open_decisions(self):
+        path = os.path.join(tempfile.mkdtemp(prefix="shipmate-test-"), "x.status")
+        write(path, "working [at=1]: go\nneeds-decision [key=a] [at=2]: pick a\nblocked [at=3]: stuck\n"
+                    "needs-decision [at=4 key=b]: pick b\nresolved [key=a] [at=5]: a done\nworking [at=6]: on\n")
+        st = shipmate.read_status(path)
+        self.assertEqual([(x["state"], x["at"], x["key"]) for x in st],
+                         [("working", 1, None), ("needs-decision", 2, "a"), ("blocked", 3, None),
+                          ("needs-decision", 4, "b"), ("resolved", 5, "a"), ("working", 6, None)])
+        # a resolved line closes only its own key, and a later working line closes nothing
+        self.assertEqual([(d["state"], d["key"]) for d in shipmate.open_decisions(st)],
+                         [("blocked", None), ("needs-decision", "b")])
+        st.append({"state": "resolved", "at": 7, "key": None, "text": "unstuck"})
+        self.assertEqual([d["key"] for d in shipmate.open_decisions(st)], ["b"])
+
+    def test_phase_to_place_on_board_and_scout_boats(self):
+        agents = [self.hand("S%d" % i, i) for i in range(5)] + [self.hand("SX", None)]
+        agents += [self.hand("C%d" % i, i, kind="scout") for i in range(3)] + [self.hand("CX", None, kind="scout")]
+        sc = shipmate.bay_scene(self.snap(agents))
+        places = {h["id"]: h["place"] for s in sc["ships"] for h in s["hands"]}
+        self.assertEqual(places, {"S0": "nest", "S1": "deck", "S2": "bow", "S3": "rail", "S4": "plank", "SX": "hatch"})
+        self.assertEqual({h["id"]: h["place"] for h in sc["scouts"]},
+                         {"C0": "out", "C1": "back", "C2": "dock", "CX": "out"})
+        self.assertEqual(sc["hands"], 10)
+
+    def test_one_ship_per_project_and_counts(self):
+        agents = [self.hand("A1", 1, project="beta"), self.hand("A2", 0, project="alpha"), self.hand("A3", 3, project="beta")]
+        sc = shipmate.bay_scene(self.snap(agents, queue=[{"id": "Q1", "reasons": [("slot", "build slot 1/1", "")]}]))
+        self.assertEqual([(s["project"], [h["id"] for h in s["hands"]]) for s in sc["ships"]],
+                         [("alpha", ["A2"]), ("beta", ["A1", "A3"])])
+        self.assertEqual(shipmate.bay_counts(sc), "2 ships · 3 hands · 1 boat moored")
+
+    def test_red_flags_for_the_captain(self):
+        agents = [self.hand("OK", 1), self.hand("PARK", 1, crew="parked"), self.hand("FAIL", 2, crew="failed"),
+                  self.hand("ASK", 1, decisions=[{"state": "needs-decision", "key": "k", "at": 1, "text": "a or b"}]),
+                  self.hand("DONE", 4, crew="done")]
+        queue = [{"id": "Q1", "reasons": [("decision", "captain's decision", "x")]},
+                 {"id": "Q2", "reasons": [("date", "held until Mon", "x")]}]
+        sc = shipmate.bay_scene(self.snap(agents, queue=queue))
+        flags = {h["id"]: h["flag"] for s in sc["ships"] for h in s["hands"]}
+        self.assertEqual(flags, {"OK": False, "PARK": True, "FAIL": True, "ASK": True, "DONE": False})
+        self.assertIn("needs-decision k: a or b", next(h for h in sc["ships"][0]["hands"] if h["id"] == "ASK")["why"])
+        self.assertEqual([q["flag"] for q in sc["queue"]], [True, False])
+        self.assertEqual(sc["flags"], 4)
+        self.assertIn("4 red flags", shipmate.bay_counts(sc))
+
+    def test_barrels_ballast_and_sea(self):
+        lanes = [{"label": "b", "remaining": 50, "runway": "through_reset", "resets": T0 + 9, "exhausts": None},
+                 {"label": "a", "remaining": 40, "runway": "projected_exhaustion", "resets": T0 + 9, "exhausts": T0 + 5},
+                 {"label": "c", "remaining": 10, "runway": "through_reset", "resets": T0 + 9, "exhausts": None}]
+        sc = shipmate.bay_scene(self.snap([], lanes=lanes, fm={"percent": 61.0, "warn_at": 60, "context": 1, "limit": 2},
+                                          machine={"load": 3.0, "cpus": 4}))
+        self.assertEqual([(b["label"], b["empty"], b["early"]) for b in sc["barrels"]],
+                         [("c", True, False), ("a", True, True), ("b", False, False)])
+        self.assertTrue(sc["flagship"]["over"])
+        self.assertEqual(sc["sea"], "choppy")
+        self.assertFalse(shipmate.bay_scene(self.snap([], fm={"percent": 59.0, "warn_at": 60}))["flagship"]["over"])
+        self.assertEqual(shipmate.sea_state(None), "calm")
+        self.assertEqual(shipmate.sea_state({"load": 9.0, "cpus": 8}), "rough")
+
+    def test_drawing_has_a_clickable_hand_per_agent_and_a_boat_per_queue_item(self):
+        snap = shipmate.demo_snapshot(T0)
+        svg = shipmate.block_bay(snap)["bay"]
+        self.assertTrue(svg.startswith("<svg") and svg.endswith("</svg>"))
+        for a in snap["agents"]:
+            self.assertEqual(svg.count('class="sm-hand%s" data-id="%s"' % (" has-flag" if shipmate.captain_reasons(a) else "", a["id"])), 1, a["id"])
+        for q in snap["queue"][:shipmate.MAX_QUEUE_BOATS]:
+            self.assertIn('data-id="%s"' % q["id"], svg)
+        self.assertIn(">+1</text>", svg)                       # the seventh queue boat is counted, not drawn
+        self.assertNotIn("http", svg)
+        self.assertNotIn("<image", svg)
+        self.assertEqual(svg, shipmate.block_bay(snap)["bay"])  # the same snapshot draws the same picture
+
+    def test_the_demo_covers_every_place(self):
+        sc = shipmate.bay_scene(shipmate.demo_snapshot(T0))
+        places = {h["place"] for s in sc["ships"] for h in s["hands"]} | {h["place"] for h in sc["scouts"]}
+        self.assertEqual(places, set(shipmate.PLACES) | {"hatch"} | set(shipmate.SCOUT_PLACES))
+        self.assertTrue(sc["flagship"]["over"])
+        self.assertTrue(any(b["empty"] for b in sc["barrels"]))
+        self.assertGreater(len(sc["queue"]), shipmate.MAX_QUEUE_BOATS)
+        self.assertGreaterEqual(sc["flags"], 3)
+
+    def test_demo_server_serves_the_page_bay_and_details(self):
+        panel = shipmate.DemoPanel(0)
+        srv = shipmate.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a: None)
+        panel.cfg.port = srv.server_address[1]
+        srv.RequestHandlerClass = shipmate.make_handler(panel)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def get(path):
+                c = http.client.HTTPConnection("127.0.0.1", panel.cfg.port, timeout=30)
+                c.request("GET", path, headers={"Host": "127.0.0.1:%d" % panel.cfg.port})
+                r = c.getresponse()
+                body = r.read().decode()
+                c.close()
+                return r.status, body
+            st, page = get("/")
+            self.assertEqual(st, 200)
+            for h in ("Demo: a made-up home", 'data-view="bay"', 'id="sm-view-bay"', "The bay", "What the picture shows",
+                      'class="sm-hand', "Work by phase"):
+                self.assertIn(h, page)
+            self.assertNotIn("http://", page.replace("http://127.0.0.1", ""))
+            st, bay = get("/bay")
+            self.assertEqual(set(json.loads(bay)), {"bay", "counts"})
+            st, det = get("/detail?id=DEMO-RATE")
+            self.assertEqual(st, 200)
+            self.assertIn("per user or per key?", det)
+            self.assertEqual(get("/detail?id=DEMO-Q-BILL")[0], 200)
+            self.assertEqual(get("/report?id=DEMO-RATE&f=md")[0], 404)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

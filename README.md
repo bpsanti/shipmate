@@ -8,6 +8,7 @@ It shows one page, read live from the home's own records every time the page loa
 - **A fixed sidebar** on the right keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
 - **A detail drawer** opens from any card: read-only facts about that piece of work, gathered from the home's records.
 - **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
+- **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as a harbour in pixel art: each project a ship, each agent a hand whose place on board is its phase. The page remembers the choice in the browser.
 
 Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
 
@@ -33,12 +34,14 @@ It listens on `127.0.0.1` only.
 | `--context-limit N` | `SHIPMATE_CONTEXT_LIMIT` | inferred | firstmate's context window in tokens |
 | `--context-warn P` | `SHIPMATE_CONTEXT_WARN` | `60` | warn when firstmate's context passes P percent of the window |
 | `--once` | | | print the JSON snapshot and exit |
+| `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed) |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
 | | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only by the detail drawer to read a PR's checks |
 
 Transcripts are always read from `~/.claude` and from every directory the home lists in `config/claude-accounts`.
 
 `GET /state.json` returns the same snapshot the page is built from.
+`GET /bay` returns the ship view drawn from that snapshot.
 `GET /detail?id=<task>` returns one card's drawer and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
 
 ### Keep it running (optional)
@@ -79,6 +82,7 @@ On Linux a `systemd --user` service with the same command does the same job.
 | Agent rows | `state/<id>.meta` (project, model, effort, account, worktree, spawn time), `state/<id>.status`, `bin/fm-crew-state.sh <id>` (cached 20 s), task titles from `bin/fm-tasks-axi.sh list`. |
 | Agent tokens | The worker's Claude Code transcripts in the worktree's project folder, plus their subagent transcripts. Only messages after the task's spawn count, because a pooled worktree's folder also holds earlier tasks' sessions. Each message counts once (one message is written as several lines). |
 | Queue | `bin/fm-tasks-axi.sh list` (held, hold date, blocked-by) and `config/project-capacity` with the live task records that hold a place. |
+| Machine load | `os.getloadavg()` and the CPU count, read with every snapshot; only the ship view's sea uses it. |
 | Per day | Every transcript under the Claude directories, by local day, each message once. `workers` are sessions launched from a Firstmate brief, `firstmate` is the home's own folder, `validation` is no-mistakes, `other` is the rest. |
 | Per delivered task | The home's session sheets (`data/fichas/fichas.jsonl`), with the new/cache split recomputed from each sheet's session transcript and its subagents. |
 
@@ -124,6 +128,32 @@ Everything in it is read-only and comes from records, never from transcript text
 | Report link | `data/<task>/report.md` or `report.html` when present |
 
 A queue card's drawer shows the item from `bin/fm-tasks-axi.sh show <task> --full`: why it waits, its dependencies and its notes.
+
+## The ship view
+
+The ship view reads nothing new: it is drawn from the snapshot the board uses.
+Each element stands for one thing:
+
+| In the picture | What it is |
+| --- | --- |
+| A ship | a project with live work; its name is on the hull |
+| The flagship, on the left | firstmate's own ship, with firstmate at the helm |
+| A hand in the crow's nest with a spyglass | an agent exploring |
+| A hand on deck hauling rope or hammering | an agent implementing |
+| A hand at the bow with signal flags | an agent with a PR open |
+| A hand fishing at the rail | an agent waiting for CI |
+| A hand on the gangplank with a sea bag | an agent ready to merge |
+| A hand on deck under a question mark | an agent whose phase is unknown |
+| A red flag over a hand | it needs the captain: the crew state is parked, blocked or failed, or a `needs-decision` or `blocked` status line has no `resolved` line with its key yet |
+| A skiff on the horizon, rowing back with the map, moored at the pier | a scout exploring, writing the report, report delivered |
+| Barrels in the flagship's hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
+| The flagship's draught | firstmate's context: the fuller, the lower she sits; past the warning threshold her white load line goes under water |
+| Boats moored under the flagship | the queue; a red flag marks one held for the captain's decision |
+| Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
+| Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
+
+Hovering an element names it; clicking a hand or a queue boat opens the same drawer as its card.
+The drawing scales with the frame between 2 and 4 screen pixels per art pixel and scrolls inside its frame when it is wider than that.
 
 ## Adding a task
 

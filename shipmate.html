@@ -20,20 +20,47 @@
         </span>
         <span class="bb-brand__wm">shipmate</span>
       </span>
+      <span class="sm-views" role="group" aria-label="View">
+        <button class="sm-viewbtn" type="button" data-action="view" data-view="board" aria-pressed="true">Board</button>
+        <button class="sm-viewbtn" type="button" data-action="view" data-view="bay" aria-pressed="false">Ship</button>
+      </span>
       <span class="bb-meta-mono"><span id="sm-stale" class="sm-stale" hidden>refresh failed · </span>updated <span id="sm-time">{{TIME}}</span></span>
     </header>
     {{NOTICE}}
     <!-- screens narrower than the sidebar breakpoint show the sidebar's numbers as this strip -->
     <div class="sm-strip" id="b-strip">{{STRIP}}</div>
 
-    <div class="bb-section__head">
-      <h2 class="fm-sign fm-sign--eyebrow">Work by phase</h2>
-      <span class="sm-faint sm-counts" id="b-counts">{{COUNTS}}</span>
-    </div>
-    <div class="sm-boardwrap">
-      <div id="b-board">{{BOARD}}</div>
-      <div class="sm-boardmore" id="sm-more" hidden></div>
-    </div>
+    <section class="sm-view" id="sm-view-board">
+      <div class="bb-section__head">
+        <h2 class="fm-sign fm-sign--eyebrow">Work by phase</h2>
+        <span class="sm-faint sm-counts" id="b-counts">{{COUNTS}}</span>
+      </div>
+      <div class="sm-boardwrap">
+        <div id="b-board">{{BOARD}}</div>
+        <div class="sm-boardmore" id="sm-more" hidden></div>
+      </div>
+    </section>
+
+    <section class="sm-view" id="sm-view-bay" hidden>
+      <div class="bb-section__head">
+        <h2 class="fm-sign fm-sign--eyebrow">The bay</h2>
+        <span class="sm-faint sm-counts" id="b-baycounts">{{BAYCOUNTS}}</span>
+      </div>
+      <div class="sm-bay" id="sm-bay"><div id="b-bay">{{BAY}}</div></div>
+      <details class="sm-key">
+        <summary><span class="fm-sign fm-sign--eyebrow">What the picture shows</span></summary>
+        <ul>
+          <li>Each ship is a project with live work. The flagship on the left is firstmate's, and firstmate is at its helm.</li>
+          <li>Each hand is one agent, and where it stands is its phase: in the crow's nest with a spyglass, exploring; on deck hauling rope or hammering, implementing; at the bow with signal flags, PR open; fishing at the rail, waiting for CI; on the gangplank with a sea bag, ready to merge. A question mark means the phase is unknown.</li>
+          <li>A red flag means the hand needs the captain: its crew is parked, blocked or failed, or a needs-decision or blocked line is still open. Its name stays shown.</li>
+          <li>A scout rows a skiff out to the horizon, rows back holding the map (the report is being written), and moors at the pier when the report is delivered.</li>
+          <li>The barrels in the flagship's hold are the Claude accounts' quota: the amber level is what is left, and a red barrel runs out before it resets or has less than 15% left.</li>
+          <li>The flagship's draught is firstmate's context: the fuller it is, the lower she sits, and past the warning threshold her white load line goes under water.</li>
+          <li>The boats moored under the flagship are the queue; a red flag marks one held for the captain's decision. Crates on the pier are tasks delivered in the last 7 days.</li>
+          <li>The sea is calm, choppy or rough with the machine's load. Hover a hand, boat, barrel or crate for its name; click a hand or a boat for the same details as its card.</li>
+        </ul>
+      </details>
+    </section>
 
     <details class="sm-usage">
       <summary><span class="fm-sign fm-sign--eyebrow">Usage</span><span class="sm-faint">per day and per delivered task</span></summary>
@@ -78,6 +105,42 @@
   var dtitle = document.getElementById("sm-drawer-title");
   var openId = null;
   var lastFocus = null;
+  var OPENS = ".sm-card[data-id], .sm-hand[data-id], .sm-boat[data-id]";
+  var view = "board";
+  try { if (localStorage.getItem("shipmate.view") === "bay") view = "bay"; } catch (e) {}
+
+  // the bay is pixel art: scale it to the frame's width, between 2 and 4 screen pixels per art
+  // pixel, and let it scroll inside its frame when even 2 is too wide
+  function fit() {
+    var frame = document.getElementById("sm-bay");
+    var svg = frame.querySelector("svg");
+    if (!svg || view !== "bay") return;
+    var w = svg.viewBox.baseVal.width || 1;
+    frame.style.setProperty("--s", String(Math.max(2, Math.min(4, (frame.clientWidth - 4) / w))));
+  }
+  function loadBay() {
+    fetch("/bay", { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }).then(function (b) {
+      document.getElementById("b-bay").innerHTML = b.bay;
+      document.getElementById("b-baycounts").textContent = b.counts;
+      fit();
+    }).catch(function () {});
+  }
+  function setView(v, fresh) {
+    view = v;
+    document.getElementById("sm-view-board").hidden = v !== "board";
+    document.getElementById("sm-view-bay").hidden = v !== "bay";
+    [].forEach.call(document.querySelectorAll("[data-view]"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-view") === v));
+    });
+    if (fresh) {
+      try { localStorage.setItem("shipmate.view", v); } catch (e) {}
+      if (v === "bay") loadBay();
+    }
+    if (v === "bay") fit(); else overflow();
+  }
 
   // tell when lanes or cards are out of sight, since a sideways scroll is easy to miss
   function overflow() {
@@ -151,19 +214,20 @@
       if (a === "add") openAdd();
       else if (a === "close") close();
       else if (a === "sum") document.getElementById("sm-side").classList.toggle("is-open");
+      else if (a === "view") setView(act.getAttribute("data-view"), true);
       return;
     }
     if (t.closest("a")) return;
-    var card = t.closest(".sm-card[data-id]");
+    var card = t.closest(OPENS);
     if (card) openDetail(card.getAttribute("data-id"));
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && !drawer.hidden) { close(); return; }
-    var card = e.target.closest && e.target.closest(".sm-card[data-id]");
+    var card = e.target.closest && e.target.closest(OPENS);
     if (card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(card.getAttribute("data-id")); }
   });
   document.addEventListener("scroll", overflow, true);
-  window.addEventListener("resize", overflow);
+  window.addEventListener("resize", function () { overflow(); fit(); });
 
   function tick() {
     if (document.hidden) return;
@@ -175,6 +239,7 @@
       document.getElementById("sm-time").textContent = b.time;
       document.getElementById("sm-stale").hidden = true;
       overflow();
+      if (view === "bay") loadBay();
       load();
     }).catch(function () {
       document.getElementById("sm-stale").hidden = false;
@@ -183,7 +248,7 @@
   setInterval(tick, every);
   document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
   if (location.search) history.replaceState(null, "", "/");
-  overflow();
+  setView(view, false);
 })();
 </script>
 </body>
