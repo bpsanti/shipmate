@@ -192,7 +192,7 @@ Every queued task that is not held for the captain's decision is a hand on the p
 
 | On the pier | Reason in the queue |
 | --- | --- |
-| Playing cards at a table by the tavern, under the stern (three to a table: one each side, one standing behind) | waits for a build slot (`config/project-capacity`) or a home lane (`bin/fm-capacity.sh`), and was created today |
+| Playing cards at a table at the tavern, on the pier to the right of the other groups (three to a table: one each side, one standing behind) | waits for a build slot (`config/project-capacity`) or a home lane (`bin/fm-capacity.sh`), and was created today |
 | Drinking from a mug on the tavern bench, by the keg | the same wait, created on an earlier day: it has waited longer |
 | Standing at the foot of the gangplank with a sea bag | nothing holds it: firstmate can dispatch it |
 | Standing under a hand aboard, talking up to it, with a balloon and a dotted line to that hand | it waits for that task (`blocked-by`), and that task is aboard; it stands as close below it as the others allow |
@@ -201,6 +201,7 @@ Every queued task that is not held for the captain's decision is a hand on the p
 
 Each tavern has its sign with the slot it waits for (`SLOT <project> · 2/2 taken · 13 waiting`, or the home's lanes), and the other groups have theirs (ready, waiting for a task, asleep).
 The tavern takes four tables and one bench of eight; the rest are counted (`+N`, with their ids on hover), and so are lines past eight.
+The tavern stands last on the pier and grows to the right, so a short queue adds only a short stretch and nothing is reserved west of the ship.
 The tavern's names show only on hover or focus, so a full table stays readable; the others keep their names on.
 The ship moves over to make room for the tavern, and the moored scouts and crates move toward the bow past the queue.
 The four stage chips for the pier (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
