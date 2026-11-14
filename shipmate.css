@@ -317,6 +317,9 @@ body.sm-locked { overflow: hidden; }
   .sm-glow { animation: sm-flicker 2.6s steps(3) infinite; }
   .sm-steam { animation: sm-steam 2.4s steps(3) infinite; }
 }
+/* a hidden tab pauses the scene where it is, so it resumes from the same frame */
+.is-away *, .is-away *::before, .is-away *::after { animation-play-state: paused !important; }
+
 @keyframes sm-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(1px); } }
 @keyframes sm-bob-rough { 0%, 100% { transform: translateY(-1px); } 50% { transform: translateY(2px); } }
 @keyframes sm-glint { 0% { opacity: 1; } 50% { opacity: 0.55; } }

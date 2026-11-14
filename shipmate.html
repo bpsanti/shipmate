@@ -542,7 +542,6 @@
   window.addEventListener("resize", function () { overflow(); ship.apply(); });
 
   function tick() {
-    if (document.hidden) return;
     fetch("/blocks", { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error(String(r.status));
       return r.json();
@@ -557,8 +556,21 @@
       document.getElementById("sm-stale").hidden = false;
     });
   }
-  setInterval(tick, every);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
+  // A tab nobody looks at keeps its scene still (the is-away class pauses every animation where it
+  // stands, so it picks up from the same frame) and asks for fresh data far less often.
+  var awayEvery = every * 10;
+  var timer = null;
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(function () { tick(); schedule(); }, document.hidden ? awayEvery : every);
+  }
+  function presence(shown) {
+    document.documentElement.classList.toggle("is-away", document.hidden);
+    if (shown && !document.hidden) tick();
+    schedule();
+  }
+  document.addEventListener("visibilitychange", function () { presence(true); });
+  presence(false);
   if (location.search) history.replaceState(null, "", "/");
   setView(view, false);
 })();

@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1500,6 +1501,111 @@ class TestLanguage(unittest.TestCase):
             os.environ.pop("SHIPMATE_LANG")
             if old is not None:
                 os.environ["SHIPMATE_LANG"] = old
+
+
+class TestFleetCache(Base):
+    """One reading of the fleet answers every request for a few seconds, never a reply just sent."""
+
+    def setUp(self):
+        super().setUp()
+        self.meta("TASK-A")
+        self.reads = 0
+        real = shipmate.read_backlog
+        def counting(cfg):
+            self.reads += 1
+            return real(cfg)
+        self.patch = mock.patch.object(shipmate, "read_backlog", counting)
+        self.patch.start()
+        self.clock = [1000.0]
+        self.mono = mock.patch.object(shipmate.time, "monotonic", lambda: self.clock[0])
+        self.mono.start()
+
+    def tearDown(self):
+        self.mono.stop()
+        self.patch.stop()
+        super().tearDown()
+
+    def test_requests_inside_the_window_share_one_reading(self):
+        panel = shipmate.Panel(self.cfg)
+        first = panel.snapshot()
+        self.clock[0] += self.cfg.cache_seconds - 0.5
+        self.assertIs(panel.snapshot(), first)
+        self.assertEqual(self.reads, 1)
+        self.clock[0] += 1.0
+        self.assertIsNot(panel.snapshot(), first)
+        self.assertEqual(self.reads, 2)
+
+    def test_zero_seconds_turns_the_cache_off(self):
+        self.cfg.cache_seconds = 0
+        panel = shipmate.Panel(self.cfg)
+        panel.snapshot()
+        panel.snapshot()
+        self.assertEqual(self.reads, 2)
+
+    def test_dropping_forces_a_fresh_reading(self):
+        panel = shipmate.Panel(self.cfg)
+        panel.snapshot()
+        panel.drop()
+        panel.snapshot()
+        self.assertEqual(self.reads, 2)
+
+    def test_a_reading_begun_before_a_drop_is_not_reused_after_it(self):
+        panel = shipmate.Panel(self.cfg)
+        real = panel.read_fleet
+        def slow():
+            snap = real()
+            panel.drop()            # the captain's reply lands while this reading is still under way
+            return snap
+        panel.read_fleet = slow
+        panel.snapshot()
+        panel.read_fleet = real
+        panel.snapshot()
+        self.assertEqual(self.reads, 2)
+
+    def test_sending_a_task_drops_the_reading(self):
+        panel = shipmate.Panel(self.cfg)
+        panel.snapshot()
+        res = panel.add_task("A new thing", "demo-app", "", "req-cache")
+        self.assertTrue(res["ok"], res)
+        panel.snapshot()
+        self.assertEqual(self.reads, 2)
+
+    def test_the_option_sets_the_window(self):
+        old = dict(os.environ)
+        seen = {}
+        try:
+            os.environ["SHIPMATE_CACHE_SECONDS"] = "12"
+            with mock.patch.object(shipmate, "serve", lambda panel, what: seen.update(ttl=panel.cfg.cache_seconds) or 0):
+                shipmate.main(["--home", self.home, "--fm-root", self.root, "--port", "0"])
+                self.assertEqual(seen["ttl"], 12.0)
+                shipmate.main(["--home", self.home, "--fm-root", self.root, "--port", "0", "--cache-seconds", "0"])
+                self.assertEqual(seen["ttl"], 0.0)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+
+class TestAwayTab(unittest.TestCase):
+    """The page pauses its scene and slows its refresh when the tab is hidden (checked on the page's source)."""
+
+    def setUp(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "shipmate.html"), encoding="utf-8") as fh:
+            self.html = fh.read()
+        with open(os.path.join(here, "shipmate.css"), encoding="utf-8") as fh:
+            self.css = fh.read()
+
+    def test_a_hidden_tab_pauses_every_animation_and_resumes_in_place(self):
+        self.assertRegex(self.css, r"\.is-away \*[^{]*\{[^}]*animation-play-state:\s*paused")
+        self.assertNotIn("animation-delay", self.css.split(".is-away")[1].split("}")[0])   # paused, not restarted
+        self.assertIn('classList.toggle("is-away", document.hidden)', self.html)
+        self.assertIn('"visibilitychange"', self.html)
+
+    def test_a_hidden_tab_refreshes_far_less_often(self):
+        self.assertIn("document.hidden ? awayEvery : every", self.html)
+        m = re.search(r"var awayEvery = every \* (\d+);", self.html)
+        self.assertTrue(m and int(m.group(1)) >= 4)
+        self.assertNotIn("setInterval(tick", self.html)
 
 
 if __name__ == "__main__":

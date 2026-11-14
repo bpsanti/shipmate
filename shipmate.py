@@ -60,6 +60,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8737
 REFRESH_SECONDS = 30
+DEFAULT_CACHE_SECONDS = 5      # how long one reading of the fleet answers every request
 QUOTA_TTL = 60
 CREW_TTL = 20
 SPAWN_SLACK = 120          # seconds: a session's first line lands a little after the task record is written
@@ -79,7 +80,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 class Config:
     def __init__(self, home, fm_root=None, claude_dirs=(), port=DEFAULT_PORT, quota_cmd="quota-axi",
-                 context_limit=None, context_warn=DEFAULT_CONTEXT_WARN, gh_cmd="gh"):
+                 context_limit=None, context_warn=DEFAULT_CONTEXT_WARN, gh_cmd="gh",
+                 cache_seconds=DEFAULT_CACHE_SECONDS):
         self.home = os.path.abspath(home)
         self.fm_root = os.path.abspath(fm_root or self.home)
         self.port = port
@@ -87,6 +89,7 @@ class Config:
         self.context_limit = context_limit      # tokens, or None to infer
         self.context_warn = context_warn        # percent
         self.gh_cmd = gh_cmd                    # only the detail view's PR checks use it
+        self.cache_seconds = cache_seconds      # seconds one snapshot is reused; 0 reads the fleet on every request
         self.accounts = read_accounts(os.path.join(self.home, "config"))
         dirs = [os.path.expanduser("~/.claude")] + [d for _, d in self.accounts]
         dirs += [os.path.abspath(os.path.expanduser(d)) for d in claude_dirs if d]
@@ -1337,9 +1340,31 @@ class Panel:
         self.inbox = ReceiptsCache()
         self.lanes = LanesCache()
         self.last = None                         # latest snapshot, reused by the detail view while fresh
+        self.built_at = 0.0                      # monotonic time of the reading in self.last
+        self.built_gen = -1                      # the generation that reading started under
+        self.gen = 0                             # bumped by drop(); a reading from an older one is never reused
+
+    def drop(self):
+        """Forgets the cached reading: the next request reads the fleet again, even when a reading
+        already under way began before the change that called this."""
+        self.gen += 1
 
     def snapshot(self):
-        with self.lock, concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        """The fleet as one snapshot. Requests within cache_seconds of a reading share it, so reloads
+        and the page's own refresh do not re-read the backlog, the records and the inbox each time;
+        a reply the captain just sent drops it (see drop), so it is never answered with stale data."""
+        with self.lock:
+            ttl = self.cfg.cache_seconds
+            if (ttl > 0 and self.last is not None and self.built_gen == self.gen
+                    and time.monotonic() - self.built_at < ttl):
+                return self.last
+            gen = self.gen
+            snap = self.read_fleet()
+            self.built_at, self.built_gen = time.monotonic(), gen
+            return snap
+
+    def read_fleet(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             now = time.time()
             quota = ex.submit(self.quota.get, self.cfg)   # the slowest read runs beside the others
             backlog, berr = read_backlog(self.cfg)
@@ -1399,6 +1424,7 @@ class Panel:
         rc, out, err = run([self.cfg.bin("fm-inbox.sh"), "note", "--request-id", answer_request_id(form_id, tid),
                             "--json", "--", prep["body"]], env=self.cfg.env(), timeout=60)
         self.inbox.drop()
+        self.drop()
         try:
             res = json.loads(out)
         except ValueError:
@@ -1415,6 +1441,7 @@ class Panel:
             return {"ok": False, "error": tr("no answer from shipmate has that note id")}
         rc, out, err = run([self.cfg.bin("fm-inbox.sh"), "announce", "--json", note_id], env=self.cfg.env(), timeout=60)
         self.inbox.drop()
+        self.drop()
         if rc != 0:
             return {"ok": False, "error": tr("firstmate was not woken: %s") % ((err or out).strip()[:300] or "exit %d" % rc)}
         return {"ok": True, "message": tr("Firstmate was woken.")}
@@ -1452,6 +1479,7 @@ class Panel:
             result = {"ok": True, "id": tid, "notified": nrc == 0 and announced,
                       "notify_error": None if nrc == 0 and announced else ((nerr or nout).strip()[:300] or "exit %d" % nrc)}
             self.requests[request_id] = result
+            self.drop()
             return result
 
 
@@ -4243,6 +4271,9 @@ def main(argv=None):
                     help="firstmate's context window in tokens (default: inferred)")
     ap.add_argument("--context-warn", type=int, default=int(os.environ.get("SHIPMATE_CONTEXT_WARN") or DEFAULT_CONTEXT_WARN),
                     help="warn when the firstmate context passes this percent of the window (default 60)")
+    ap.add_argument("--cache-seconds", type=float,
+                    default=float(os.environ.get("SHIPMATE_CACHE_SECONDS") or DEFAULT_CACHE_SECONDS),
+                    help="seconds one reading of the fleet answers every request (default 5; 0 turns the cache off)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--demo", action="store_true", help="serve a made-up home instead of a real one")
     ap.add_argument("--lang", choices=LANGS, default=os.environ.get("SHIPMATE_LANG") or "en",
@@ -4264,7 +4295,7 @@ def main(argv=None):
         return 2
     extra = a.claude_dir + [d for d in (os.environ.get("SHIPMATE_CLAUDE_DIRS") or "").split(os.pathsep) if d]
     cfg = Config(a.home, a.fm_root, extra, a.port, os.environ.get("SHIPMATE_QUOTA_CMD") or "quota-axi",
-                 a.context_limit, a.context_warn, os.environ.get("SHIPMATE_GH_CMD") or "gh")
+                 a.context_limit, a.context_warn, os.environ.get("SHIPMATE_GH_CMD") or "gh", max(0.0, a.cache_seconds))
     if not os.path.exists(cfg.bin("fm-tasks-axi.sh")):
         print("shipmate: %s has no bin/fm-tasks-axi.sh; name the code root with --fm-root or FM_ROOT" % cfg.fm_root,
               file=sys.stderr)

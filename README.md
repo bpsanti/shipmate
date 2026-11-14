@@ -34,11 +34,16 @@ It listens on `127.0.0.1` only.
 | `--port N` | `SHIPMATE_PORT` | `8737` | TCP port |
 | `--context-limit N` | `SHIPMATE_CONTEXT_LIMIT` | inferred | firstmate's context window in tokens |
 | `--context-warn P` | `SHIPMATE_CONTEXT_WARN` | `60` | warn when firstmate's context passes P percent of the window |
+| `--cache-seconds N` | `SHIPMATE_CACHE_SECONDS` | `5` | seconds one reading of the fleet (backlog, records, inbox receipts) answers every request; `0` reads again on each request |
 | `--once` | | | print the JSON snapshot and exit |
 | `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed) |
 | `--lang en\|pt-BR` | `SHIPMATE_LANG` | `en` | the page's language: English, or Brazilian Portuguese with `pt-BR` |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
 | | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only by the detail drawer to read a PR's checks |
+
+Reloading the page, the page's own refresh and the ship view share one reading of the fleet for `--cache-seconds` seconds instead of reading it again each time.
+Sending an answer or a new task drops that reading, so what comes back right after is never stale.
+While a tab is hidden the page pauses every animation where it stands (it resumes from the same frame) and asks for fresh data ten times less often, then refreshes as soon as the tab is shown again.
 
 Transcripts are always read from `~/.claude` and from every directory the home lists in `config/claude-accounts`.
 
