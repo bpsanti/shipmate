@@ -860,7 +860,7 @@ def queue_rows(cfg, backlog, lanes=None):
                 txt = tr("held until %s") % fmt_date_iso(r["hold_until"])
                 reasons.append(("date", txt, txt))
             elif r.get("hold_kind") == "captain" or not r.get("hold_until"):
-                reasons.append(("decision", tr("captain's decision"), (r.get("hold_reason") or tr("captain's decision"))[:400]))
+                reasons.append(("decision", tr("captain's decision"), (r.get("hold_reason") or tr("captain's decision"))[:DECISION_TEXT]))
         deps = [d for d in re.split(r"[\s,]+", r.get("blocked_by") or "") if d and d != "none"]
         if deps:
             reasons.append(("task", tr("waits for %s") % ", ".join(deps), tr("waits for %s") % ", ".join(deps)))
@@ -881,7 +881,7 @@ def queue_rows(cfg, backlog, lanes=None):
         since, exact = stamps.get(r["id"]) or parse_hold_set("Captain hold set: " + (r.get("created") or ""))
         out.append({"id": r["id"], "title": r.get("title", ""), "repo": repo, "kind": r.get("kind", ""),
                     "created": r.get("created", ""), "reasons": reasons,
-                    "hold_reason": (r.get("hold_reason") or "")[:240], "deps": deps, "slot": slot,
+                    "hold_reason": (r.get("hold_reason") or "")[:DECISION_TEXT], "deps": deps, "slot": slot,
                     "hold_until": r["hold_until"] if any(x[0] == "date" for x in reasons) else "",
                     # how long it has waited for the captain, when it does: since the hold was set,
                     # or since the day it was created when the hold carries no stamp
@@ -1052,10 +1052,10 @@ RE_OPTION = re.compile(r"(?:^|(?<=[\s;,:.?!]))\(?([A-Za-z]|[1-9])\)\s+")
 ANSWER_STATES = ("sent", "unwoken", "received", "replied")
 
 
-def decision_options(text):
-    """The ready options a decision line lists as `A) .. B) ..` (also `(a) ..` or `1) ..`): the first
-    run of two or more consecutive labels from A, a or 1, each with its text, the last one ending with
-    its sentence. A line without such a run has no options and is answered in words."""
+def option_run(text):
+    """The first run of two or more consecutive labels from A, a or 1 in `text`, as (lead, rows, tail):
+    the words before the first label, each label with its text (trailing `;`, `,` and `or` dropped), and
+    what follows the last item's sentence. The run is ([], ...) when the text lists nothing."""
     text = text or ""
     marks = list(RE_OPTION.finditer(text))
     for i, m in enumerate(marks):
@@ -1067,16 +1067,61 @@ def decision_options(text):
                 run.append(n)
         if len(run) < 2:
             continue
-        out = []
+        rows, tail = [], ""
         for j, o in enumerate(run):
             part = text[o.end():run[j + 1].start() if j + 1 < len(run) else len(text)]
             if j + 1 == len(run):
-                part = re.split(r"(?<=[.!?])\s", part, 1)[0]
+                bits = re.split(r"(?<=[.!?])\s", part, 1)
+                part, tail = bits[0], (bits[1].strip() if len(bits) > 1 else "")
             part = re.sub(r"(?:[\s;,]|\b(?:or|ou)\b)+$", "", part).rstrip(".").strip()
             if part:
-                out.append({"label": o.group(1).upper(), "text": part})
-        return out if len(out) >= 2 else []
-    return []
+                rows.append({"label": o.group(1).upper(), "text": part})
+        return (text[:m.start()].strip(), rows, tail) if len(rows) >= 2 else ("", [], "")
+    return "", [], ""
+
+
+def decision_options(text):
+    """The ready options a decision line lists as `A) .. B) ..` (also `(a) ..` or `1) ..`): the first
+    run of two or more consecutive labels from A, a or 1, each with its text, the last one ending with
+    its sentence. A line without such a run has no options and is answered in words."""
+    return option_run(text)[1]
+
+
+def split_reason(text):
+    """A decision's words cut for reading: {"lead", "items": [{label, text}], "tail"}. A text that lists
+    `(1) .. (2) ..` (or `A) .. B) ..`) gives the words before the list, one item per label and what comes
+    after; any other text is all lead."""
+    lead, rows, tail = option_run(text)
+    if not rows:
+        return {"lead": (text or "").strip(), "items": [], "tail": ""}
+    return {"lead": lead, "items": rows, "tail": tail}
+
+
+# A path or an id inside a decision (`data/X-1/report.html`, `ME-INVENTARIO-DECISOES`) is set in mono and
+# allowed to break anywhere, so one long token never pushes the drawer wider than the screen.
+RE_CODE = re.compile(r"(?<![\w/.-])/?(?:[A-Za-z_.~][\w.-]*/)+[\w.-]*[\w-]|(?<![\w.-])[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+(?![\w-])|(?<![\w/.-])[\w-]+\.(?:html|md|json|py|sh|css|jsonl|txt)\b")
+
+
+def rich(text):
+    """`text` escaped for HTML, with every path and id wrapped in <code class="sm-code">."""
+    out, at = [], 0
+    for m in RE_CODE.finditer(text or ""):
+        out.append(esc(text[at:m.start()]))
+        out.append('<code class="sm-code">%s</code>' % esc(m.group(0)))
+        at = m.end()
+    out.append(esc((text or "")[at:]))
+    return "".join(out)
+
+
+def reason_html(text):
+    """A decision's words as the drawer shows them: the lead in a paragraph, a numbered list for the
+    items it lists, what follows in a paragraph."""
+    r = split_reason(text)
+    return "".join(
+        ['<p class="sm-reason__lead">%s</p>' % rich(r["lead"])] if r["lead"] else []) + (
+        '<ol class="sm-items">%s</ol>' % "".join(
+            '<li><b>%s)</b> <span>%s</span></li>' % (esc(i["label"]), rich(i["text"])) for i in r["items"]) if r["items"] else "") + (
+        '<p class="sm-reason__tail">%s</p>' % rich(r["tail"]) if r["tail"] else "")
 
 
 def agent_waiting_since(a):
@@ -2154,7 +2199,7 @@ def answer_form(tid, ask, now):
     if ask["options"]:
         opts = '<div class="sm-opts" role="radiogroup" aria-label="%s">%s</div>' % (esc(tr("Ready options")), "".join(
             '<label class="sm-opt" title="%s"><input type="radio" name="option" value="%s"><b>%s)</b> <span>%s</span></label>'
-            % (esc(o["text"]), esc(o["label"]), esc(o["label"]), esc(o["text"])) for o in ask["options"]))
+            % (esc(o["text"]), esc(o["label"]), esc(o["label"]), rich(o["text"])) for o in ask["options"]))
     return ('<form class="sm-answer__form" method="post" action="/answer" data-answer data-ref="%s">'
             '<input type="hidden" name="request" value="%s"><input type="hidden" name="task" value="%s">'
             '<input type="hidden" name="ref" value="%s">'
@@ -2164,7 +2209,7 @@ def answer_form(tid, ask, now):
             '<button class="fm-btn fm-btn--sm fm-btn--primary" type="submit">%s</button></div>'
             '<p class="sm-answer__msg" role="status" aria-live="polite"></p></form>'
             % (esc(ask["ref"]), esc(secrets.token_urlsafe(8)[:10]), esc(tid), esc(ask["ref"]), esc(ask_head(ask, now)),
-               '<span>%s</span>' % esc(ask["text"]) if ask["text"] else "", opts, MAX_ANSWER, esc(tr("Your answer")),
+               '<div class="sm-reason">%s</div>' % reason_html(ask["text"]) if ask["text"] else "", opts, MAX_ANSWER, esc(tr("Your answer")),
                esc(tr("Add your own words (optional when you pick an option)") if ask["options"] else tr("Write your answer")),
                esc(tr("Goes to firstmate as a note that names %s and this decision.") % tid), esc(tr("Send to firstmate"))))
 
@@ -2242,7 +2287,7 @@ def render_agent_detail(a, intent, status, checks, reports, now, answer=""):
 
 def render_queue_detail(q, full, intent, reports, now, answer=""):
     reasons = "".join('<li>%s%s</li>' % (badge(short, REASON_TONE.get(k, "neutral")),
-                                         (" <span>%s</span>" % esc(long_)) if long_ != short else "")
+                                         (' <div class="sm-reason">%s</div>' % reason_html(long_)) if long_ != short else "")
                       for k, short, long_ in q["reasons"])
     return (
         '<div class="sm-dhead"><span class="sm-id">%s</span>%s</div><h2 class="sm-dtitle">%s</h2>%s'
@@ -4737,7 +4782,11 @@ def demo_snapshot(now=None, moved=False):
     # every way to wait: for a build slot (cards today, the tavern since an earlier day), with nothing
     # holding it, for a hand aboard or for a queued task, for a date, and for the captain
     queue = ([] if moved else [queued("DEMO-Q-PUSH", "Push notifications", "harbor-api", "slot")]) + [
-        queued("DEMO-Q-BILL", "New billing plan", "harbor-api", "decision", hold="which plan ships first"),
+        queued("DEMO-Q-BILL", "New billing plan", "harbor-api", "decision", hold="Billing plans (data/DEMO-PLANS-105/report.html): (1) which plan ships first: the flat monthly plan "
+                    "(recommended), the per-seat plan or the usage plan; (2) where to start: two fronts, price the plans per region now "
+                    "and one trail per tax rule (recommended), only prices or only tax; (3) the 8 product choices of the 'decide' tiers "
+                    "(a recommendation on each); (4) retired plans; (5) widen the trial rule. "
+                    "See also billing/plans/inventory-with-a-very-long-unbroken-name-of-one-plan.report.json."),
         queued("DEMO-Q-MAPS", "Offline maps", "lighthouse-web", "date"),
         queued("DEMO-Q-AUDIT", "Audit log", "harbor-api", "ready") if moved else
         queued("DEMO-Q-AUDIT", "Audit log", "harbor-api", "task", deps=["DEMO-AUTH"]),

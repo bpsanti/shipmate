@@ -729,6 +729,44 @@ class TestAnswers(unittest.TestCase):
         for none in ("per user or per key?", "only a) one", "see f(x) and g(y)", "B) starts late C) and goes on", ""):
             self.assertEqual(opts(none), [], none)
 
+    def test_a_reason_is_cut_into_lead_items_and_tail(self):
+        r = shipmate.split_reason("Inventory (data/X-1/report.html): (1) what to do; (2) where to start, two fronts (recommended), or one; (3) dead states. See the report.")
+        self.assertEqual(r["lead"], "Inventory (data/X-1/report.html):")
+        self.assertEqual([(i["label"], i["text"]) for i in r["items"]],
+                         [("1", "what to do"), ("2", "where to start, two fronts (recommended), or one"), ("3", "dead states")])
+        self.assertEqual(r["tail"], "See the report.")
+        plain = shipmate.split_reason("per user or per key?")
+        self.assertEqual(plain, {"lead": "per user or per key?", "items": [], "tail": ""})
+        self.assertEqual(shipmate.split_reason("see f(x) and g(y)")["items"], [])
+        self.assertEqual(shipmate.split_reason("")["lead"], "")
+        # the options and the list read the same items
+        t = "Pick: (a) keep it; (b) drop it"
+        self.assertEqual([i["text"] for i in shipmate.split_reason(t)["items"]], [o["text"] for o in shipmate.decision_options(t)])
+
+    def test_paths_and_ids_are_set_in_breaking_mono_and_the_rest_is_escaped(self):
+        out = shipmate.rich("see data/ME-INVENTARIO-105/report.html and ME-INVENTARIO-DECISOES, then <b>report.md</b> & more.")
+        self.assertIn('<code class="sm-code">data/ME-INVENTARIO-105/report.html</code>', out)
+        self.assertIn('<code class="sm-code">ME-INVENTARIO-DECISOES</code>', out)
+        self.assertIn('<code class="sm-code">report.md</code>', out)
+        self.assertIn("&lt;b&gt;", out)
+        self.assertIn("&amp; more.", out)
+        self.assertNotIn("<b>", out)
+        self.assertEqual(shipmate.rich("plain words, 5 calls (and 1/2 of it)"), "plain words, 5 calls (and 1/2 of it)")
+
+    def test_a_long_decision_drawer_lists_the_items_and_keeps_all_the_words(self):
+        text = ("Inventory (data/ME-INVENTARIO-105/report.html): (1) what the rule does with the 50 that are not lifecycle, " + "x" * 300 +
+                "; (2) where to start; (3) dead states.")
+        ask = [{"ref": "hold", "kind": "hold", "state": "captain hold", "key": None, "at": None, "text": text, "options": shipmate.decision_options(text)}]
+        out = shipmate.answer_section("TASK-A", ask, [], "tok", T0)
+        self.assertEqual(out.count('<ol class="sm-items">'), 1)
+        self.assertIn("<li><b>3)</b> <span>dead states</span></li>", out)
+        self.assertIn("x" * 300, out)
+        self.assertEqual(out.count('class="sm-opt"'), 3)
+        self.assertNotIn("white-space: nowrap", open(os.path.join(os.path.dirname(os.path.abspath(shipmate.__file__)), "shipmate.css")).read().split(".sm-opt span")[1].split("}")[0])
+
+    def test_a_queued_hold_keeps_its_whole_text_in_the_snapshot(self):
+        self.assertGreater(shipmate.DECISION_TEXT, 650)
+
     def test_what_waits_on_the_captain(self):
         a = self.agent(decisions=[("needs-decision", "pick", T0 - 50, "A) x B) y"), ("blocked", None, T0 - 20, "stuck")])
         asks = shipmate.captain_asks(self.snap([a]), "TASK-A")

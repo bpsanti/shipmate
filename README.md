@@ -288,6 +288,10 @@ The captain and firstmate at the helm are drawn on the same scale.
 
 The drawer of an item that waits on the captain opens with "Your answer": a hand or scout with an open `needs-decision` or `blocked` line (one form per open line), one flagged by its crew state alone, or a queued task held for the captain's decision.
 Each form quotes the decision, offers its ready options when the line lists them as `A) .. B) ..` (also `(a) ..` or `1) ..`), and takes words of the captain's own; an option, words, or both.
+The decision is set for reading: a line that lists `(1) .. (2) ..` (or `A) .. B) ..`) shows its opening words, then one numbered item per label, then whatever follows, and every option wraps over as many lines as it needs instead of running off one long line.
+Paths and ids in it (`data/X/report.html`, `ME-INVENTARIO-DECISOES`) are set in mono and break anywhere.
+Nothing in the drawer is wider than the drawer, at any width: long words and unbroken paths wrap, and the Send button stays in view.
+The whole text of a decision is kept, up to 1000 characters; a queued task's captain hold used to be cut at 240.
 "Send to firstmate" runs, with `FM_HOME` set:
 
 ```bash
