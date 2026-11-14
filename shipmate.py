@@ -558,7 +558,7 @@ def firstmate_session(cfg, index, now):
 # ---------------------------------------------------------------- live agents
 
 
-SHIP_PHASES = ["exploring", "implementing", "PR open", "waiting for CI", "ready to merge"]
+SHIP_PHASES = ["exploring", "implementing", "PR open", "waiting for CI", "waiting for merge"]
 SCOUT_PHASES = ["exploring", "writing the report", "report delivered"]
 CREW_TONE = {"working": "online", "paused": "info", "blocked": "danger", "failed": "danger", "done": "online"}
 
@@ -1336,33 +1336,44 @@ def parse_show(text):
 
 
 def summarize_checks(doc):
+    """A PR's state and its checks counted by outcome, with when the earliest of them started and
+    when the last finished one finished (`gh` gives a check run startedAt and completedAt, a commit
+    status only startedAt, which is when it was set), so the wait that follows can be timed."""
     counts = {"pass": 0, "fail": 0, "pending": 0, "skipped": 0}
-    failing = []
+    failing, started, ended = [], [], []
+    def when(v):                                    # a check not started yet says 0001-01-01
+        t = parse_ts(v)
+        return t if t and t > 0 else None
     for c in doc.get("statusCheckRollup") or []:
+        start = when(c.get("startedAt"))
         if c.get("__typename") == "StatusContext":
             st = (c.get("state") or "").upper()
             bucket = "pass" if st == "SUCCESS" else "pending" if st in ("PENDING", "EXPECTED") else "fail"
             name = c.get("context") or "?"
+            end = start if bucket != "pending" else None
         else:
             name = c.get("name") or "?"
             if (c.get("status") or "").upper() != "COMPLETED":
-                bucket = "pending"
+                bucket, end = "pending", None
             else:
                 con = (c.get("conclusion") or "").upper()
                 bucket = ("pass" if con in ("SUCCESS", "NEUTRAL") else "skipped" if con == "SKIPPED" else "fail")
+                end = when(c.get("completedAt"))
         counts[bucket] += 1
         if bucket == "fail":
             failing.append(name)
+        started += [start] if start else []
+        ended += [end] if end else []
     return {"state": doc.get("state"), "draft": doc.get("isDraft"), "counts": counts, "failing": failing[:12],
-            "error": None}
+            "started": min(started) if started else None, "ended": max(ended) if ended else None, "error": None}
 
 
 RE_GITHUB_PR = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+$")
 
 
 def checks_verdict(summary):
-    """One word for a PR's checks, for the hand fishing at the rail: pass when every check that ran
-    passed, fail when one failed, pending while one runs; None when there are none or no answer."""
+    """One word for a PR's checks: pass when every check that ran passed, fail when one failed,
+    pending while one runs; None when there are none or no answer."""
     if not summary or summary.get("error"):
         return None
     counts = summary.get("counts") or {}
@@ -1373,9 +1384,40 @@ def checks_verdict(summary):
     return "pass" if counts.get("pass") else None
 
 
+def phase_by_checks(a, summary):
+    """A ship task with its PR open takes its phase from the PR's checks once they are read, since
+    the worker often says done as it opens the PR, before CI has said anything: a check running is
+    waiting for CI, even after done; a check failed is implementing again; every check passed is
+    waiting for the merge once the worker said done, and the PR open while it is still at work.
+    Without a check, an answer or a GitHub PR, the phase from the milestones stands. The start of a
+    phase taken from the checks is when they started, when one failed, or when the last finished
+    or the worker said done, whichever came later."""
+    verdict = checks_verdict(summary)
+    a["checks"] = verdict
+    if a.get("kind") != "ship" or a.get("phase") not in (2, 3, 4) or verdict is None:
+        return a
+    done = a.get("crew") == "done"
+    times = list(a.get("milestones") or [None] * len(SHIP_PHASES))
+    started, ended = summary.get("started"), summary.get("ended")
+    if verdict == "pending":
+        phase, since, why = 3, started, "a check on the PR is running"
+    elif verdict == "fail":
+        phase, since, why = 1, ended, "a check on the PR failed"
+    elif done:
+        phase, since, why = 4, max([t for t in (ended, times[4]) if t] or [None]), "every check on the PR passed and the worker reported done"
+    else:
+        phase, since, why = 2, times[2], "every check on the PR passed; the worker is still at work"
+    if since is None:
+        since = a.get("phase_since") if a.get("phase") == phase else times[phase]
+    if phase >= 3 and since is not None:
+        times[phase] = since
+    a.update(phase=phase, phase_since=since, phase_why=why, milestones=times)
+    return a
+
+
 class ChecksCache:
     """PR state and checks, read from the forge at most every CHECKS_TTL s per PR: when a detail is
-    opened (get), and for the hands waiting for CI (watch), which never waits for the forge."""
+    opened (get), and for every ship task with its PR open (watch), which never waits for the forge."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -1479,9 +1521,9 @@ class Panel:
                 "closed": closed_rows(backlog, now),
                 "machine": machine_load(),
             }
-            for a in snap["agents"]:                       # the hands fishing at the rail: their PR's checks
-                waits_ci = a["kind"] == "ship" and a["phase"] == SHIP_PHASES.index("waiting for CI") and a["pr"]
-                a["checks"] = checks_verdict(self.checks.watch(self.cfg, a["pr"])) if waits_ci else None
+            for a in snap["agents"]:                       # with the PR open, the phase follows its checks
+                with_pr = a["kind"] == "ship" and a["phase"] in (2, 3, 4) and a["pr"]
+                phase_by_checks(a, self.checks.watch(self.cfg, a["pr"]) if with_pr else None)
             snap["answers"], snap["answers_error"] = self.inbox.get(self.cfg)
             snap["quota"] = quota.result()
             self.last = snap
@@ -1608,7 +1650,7 @@ PT_BR = {
     "%s new today": "%s novos hoje",
     # board
     "exploring": "explorando", "implementing / writing": "implementando / escrevendo", "PR open": "PR aberto",
-    "waiting for CI": "esperando o CI", "ready / delivered": "pronto / entregue", "for %s": "há %s",
+    "waiting for CI": "esperando o CI", "waiting for merge / delivered": "esperando o merge / entregue", "for %s": "há %s",
     "phase start unknown": "início da fase desconhecido", "%s new · %s cache": "%s novos · %s cache",
     "tokens unknown": "tokens desconhecidos", "%s: details": "%s: detalhes", "Queue": "Fila", "phase unknown": "fase desconhecida",
     "Queue unavailable: %s": "Fila indisponível: %s", "Nothing waiting.": "Nada esperando.", "+ Add task": "+ Adicionar tarefa",
@@ -1616,7 +1658,7 @@ PT_BR = {
     "%d agents · %d in the queue": "%d agentes · %d na fila",
     # crew states and phases
     "working": "trabalhando", "parked": "parado", "blocked": "bloqueado", "failed": "falhou", "done": "concluído",
-    "paused": "pausado", "implementing": "implementando", "ready to merge": "pronto para o merge",
+    "paused": "pausado", "implementing": "implementando", "waiting for merge": "esperando o merge",
     "writing the report": "escrevendo o relatório", "report delivered": "relatório entregue",
     # queue reasons
     "held until %s": "segura até %s", "captain's decision": "decisão do capitão", "waits for %s": "espera %s",
@@ -1674,8 +1716,9 @@ PT_BR = {
     "in the crow's nest with a spyglass": "na gávea com a luneta", "on deck with a hammer": "no convés com o martelo",
     "on deck with a mop": "no convés com o esfregão", "on deck with a broom": "no convés com a vassoura",
     "on deck with a hammer, a mop or a broom": "no convés com o martelo, o esfregão ou a vassoura",
-    "at the bow, signalling with flags": "na proa, sinalizando com bandeiras", "fishing at the rail": "pescando na amurada",
-    "on the gangplank with a pack, waiting to go ashore": "na prancha com a mochila, esperando para desembarcar",
+    "at the bow, signalling with flags": "na proa, sinalizando com bandeiras",
+    "at the bow with a spyglass on the lighthouse: the checks are running": "na proa, de luneta no farol: os checks estão rodando",
+    "fishing at the rail: waiting for the merge": "pescando na amurada: esperando o merge",
     "on deck, phase unknown": "no convés, fase desconhecida", "rowing out to sea": "remando mar adentro",
     "rowing back with the map": "voltando a remo com o mapa", "moored at the pier with the map": "atracado no cais com o mapa",
     "crew is %s": "estado da tripulação: %s", "%d hand aboard": "%d marujo a bordo", "%d hands aboard": "%d marujos a bordo",
@@ -1690,9 +1733,9 @@ PT_BR = {
     "%d waiting for you": "%d esperando você", "longest: %s, %s": "mais antigo: %s, %s",
     "LOOKOUT · exploring": "GÁVEA · explorando", "HELM · firstmate": "LEME · firstmate", "CAPTAIN'S CABIN": "CABINE DO CAPITÃO",
     "DECK · implementing": "CONVÉS · implementando", "? · phase unknown": "? · fase desconhecida",
-    "RAIL · waiting for CI": "AMURADA · esperando o CI", "BOW · PR open": "PROA · PR aberto",
+    "RAIL · waiting for merge": "AMURADA · esperando o merge", "BOW · PR open and CI": "PROA · PR aberto e CI",
     "HOLD · quota barrels, context water": "PORÃO · barris de cota, água de contexto",
-    "GANGPLANK · ready to merge": "PRANCHA · pronto para o merge",
+    "GANGPLANK · ashore and aboard": "PRANCHA · desembarque e embarque", "LIGHTHOUSE · CI": "FAROL · CI",
     "SCOUTS": "BATEDORES", "DELIVERED · %d days": "ENTREGUES · %d dias",
     "SLOT %s · %d/%d taken · %d waiting": "VAGA %s · %d/%d ocupadas · %d esperando",
     "HOME LANES · %d/%d in use · %d waiting": "VAGAS DA CASA · %d/%d em uso · %d esperando",
@@ -1725,8 +1768,14 @@ PT_BR = {
         "na gávea com a luneta: lendo o código e planejando antes de construir",
     "on deck with a hammer, a mop or a broom: making the change": "no convés com o martelo, o esfregão ou a vassoura: fazendo a mudança",
     "at the bow with signal flags: the pull request is open": "na proa com as bandeiras de sinal: o pull request está aberto",
-    "fishing at the rail: the checks are running": "pescando na amurada: os checks estão rodando",
-    "on the gangplank with a pack: done, waiting to go ashore": "na prancha com a mochila: pronto, esperando para desembarcar",
+    "at the bow with a spyglass on the lighthouse: the checks are running, and the light blinks yellow; it flashes green "
+    "or red when they come back":
+        "na proa, de luneta no farol: os checks estão rodando, e a luz pisca amarelo; ela acende verde ou vermelho quando "
+        "eles voltam",
+    "fishing at the rail: every check passed, the merge is next; one more fish in the bucket for each hour it waits, up "
+    "to four":
+        "pescando na amurada: todos os checks passaram, o próximo passo é o merge; mais um peixe no balde a cada hora de "
+        "espera, até quatro",
     "under a question mark: no sign of its phase yet": "sob um ponto de interrogação: ainda sem sinal da fase",
     "in a skiff: rowing out to explore, back with the map, then moored at the pier with the report":
         "num bote: rema para explorar, volta com o mapa e atraca no cais com o relatório",
@@ -1750,7 +1799,10 @@ PT_BR = {
     "%d wait on my word. The longest, %s, has waited %s.": "%d esperam a minha palavra. O mais antigo, %s, espera há %s.",
     "queued, %s": "na fila, %s", "All clear. Nothing waits on my word.": "Tudo em ordem. Nada espera a minha palavra.",
     "Nobody is waiting for you.": "Ninguém está esperando você.", "Captain": "Capitão",
-    "%s: every check on the PR passed": "%s: todos os checks da PR passaram",
+    "%s: one fish, waiting for the merge for %s": "%s: um peixe, esperando o merge há %s",
+    "%s: %d fish, waiting for the merge for %s": "%s: %d peixes, esperando o merge há %s",
+    "the lighthouse: the checks are running for %s": "o farol: os checks estão rodando para %s",
+    "the lighthouse: nobody is waiting for CI": "o farol: ninguém esperando o CI",
     "the bilge pump: it works when firstmate's context is compacted": "a bomba do porão: trabalha quando o contexto do firstmate é compactado",
     "every check passed": "todos os checks passaram", "a check failed": "um check falhou", "checks running": "checks rodando",
 }
@@ -1785,8 +1837,14 @@ PT_BR.update({
         "Barris no porão: a cota de cada conta, em âmbar o que resta, em vermelho quando acaba antes de renovar.",
     "Water in the hold: firstmate's context, the white line its warning threshold; the pump works when the context is compacted.":
         "Água no porão: o contexto do firstmate, a linha branca é o limite de aviso; a bomba trabalha quando o contexto é compactado.",
-    "A bucket with a fish beside a hand at the rail: every check on its PR passed.":
-        "Um balde com peixe ao lado de um marujo na amurada: todos os checks da PR dele passaram.",
+    "The lighthouse ahead of the bow shows CI: it blinks yellow while a hand at the bow watches it through a spyglass, waiting for its checks, flashes green or red for a few seconds when they come back, and is dark when nobody waits. Red sends the hand back to the deck, green to the rail.":
+        "O farol na frente da proa mostra o CI: pisca amarelo enquanto um marujo na proa o olha pela luneta, esperando os "
+        "checks dele, acende verde ou vermelho por alguns segundos quando eles voltam, e fica apagado quando ninguém espera. "
+        "Vermelho manda o marujo de volta ao convés, verde para a amurada.",
+    "At the rail a hand fishes while it waits for the merge: a fish in its bucket when it gets there and one more each hour, up to four; point at the bucket for the exact wait. Merged, it goes down the gangplank with its crate to the pile, and a queued task boards up the same gangplank.":
+        "Na amurada o marujo pesca enquanto espera o merge: um peixe no balde ao chegar e mais um a cada hora, até quatro; "
+        "passe o mouse no balde para ver a espera exata. Com o merge feito, ele desce a prancha com o caixote até a pilha, e "
+        "uma tarefa da fila embarca subindo pela mesma prancha.",
     "When a hand changes place between two refreshes, it walks there; the motion button sets how much moves.":
         "Quando um marujo muda de lugar entre duas atualizações, ele anda até lá; o botão de movimento diz quanto se mexe.",
     "How much the ship moves: all, changes only, or nothing": "Quanto o navio se mexe: tudo, só as mudanças ou nada",
@@ -2040,7 +2098,7 @@ def block_sumline(s):
     return " · ".join(parts) + '<span class="sm-sumline__open" aria-hidden="true">▾</span>'
 
 
-LANE_NAMES = ["exploring", "implementing / writing", "PR open", "waiting for CI", "ready / delivered"]
+LANE_NAMES = ["exploring", "implementing / writing", "PR open", "waiting for CI", "waiting for merge / delivered"]
 LANE_MIN = 165       # six full lanes still fit beside the sidebar at 1400 px
 CREW_TONE = {"working": "online", "paused": "info", "blocked": "danger", "failed": "danger", "done": "online"}
 REASON_TONE = {"slot": "warn", "lane": "warn", "date": "info", "task": "info", "decision": "danger", "ready": "online"}
@@ -2460,25 +2518,30 @@ def notice_html(q):
 # ---------------------------------------------------------------- the ship (ship view)
 #
 # The same snapshot as the board, drawn as one ship seen from the side and cut away. Each live
-# agent is a hand whose place on board is its phase; firstmate is at the helm; the quota is the
+# agent is a hand whose place on board is its phase; firstmate is at the helm; a lighthouse at the
+# pier's edge shows the checks of whoever waits for CI; the quota is the
 # barrels in the hold and firstmate's context the bilge water; whoever waits on the captain is in
 # the captain's cabin, the rest of the queue is hands on the pier, and delivered work crates on it. ship_scene() derives what to show from the snapshot alone,
 # ship_layout() places it, render_ship() draws it as pixel art in SVG.
 
-PLACES = ["nest", "deck", "bow", "rail", "plank"]          # a ship agent's place, by ship phase index
+# A ship agent's place, by ship phase index. Waiting for CI is at the bow too, beside the hands that
+# signal a PR open, but with a spyglass on the lighthouse ("watch"); waiting for the merge is fishing
+# at the rail. Nobody waits on the gangplank: it is the way ashore with the crate once merged, and
+# the way aboard for a queued task that boards.
+PLACES = ["nest", "deck", "bow", "watch", "rail"]
 SCOUT_PLACES = ["out", "back", "dock"]                     # a scout's boat, by scout phase index
 PLACE_TEXT = {
     "nest": "in the crow's nest with a spyglass",
     "deck": "on deck with a hammer, a mop or a broom",
     "bow": "at the bow, signalling with flags",
-    "rail": "fishing at the rail",
-    "plank": "on the gangplank with a pack, waiting to go ashore",
+    "watch": "at the bow with a spyglass on the lighthouse: the checks are running",
+    "rail": "fishing at the rail: waiting for the merge",
     "hatch": "on deck, phase unknown",
     "out": "rowing out to sea",
     "back": "rowing back with the map",
     "dock": "moored at the pier with the map",
 }
-PLACE_POSE = {"nest": "spy", "deck": "hammer", "bow": "signal", "rail": "fish", "plank": "pack", "hatch": "stand"}
+PLACE_POSE = {"nest": "spy", "deck": "hammer", "bow": "signal", "watch": "spy", "rail": "fish", "hatch": "stand"}
 # On deck the tools take turns among the hands at work, by when each reached the deck: the first
 # hammers, the second mops, the third sweeps, and so on. The tool says nothing about the work; it
 # only tells the hands apart, and stays with a hand while it is on deck.
@@ -2510,6 +2573,8 @@ TWILIGHT = 30 * 60                                 # either side of those hours 
 TWILIGHT_STEPS = 6                                 # ... in this many steps, one every ten minutes
 MAX_CRATES = 12
 NEST_SEATS = 6
+FISH_EVERY = 3600       # seconds of waiting for the merge for each fish in the bucket after the first
+FISH_MAX = 4            # the bucket is full; the exact wait is in its title
 # strong project colours, none of them the red that marks a red flag
 PROJECT_COLORS = ["#16a4a4", "#9150dc", "#f2a114", "#2f78d8", "#3fa34d", "#e0569b", "#a0713a", "#5a6f88"]
 # light and dark neckerchiefs that stand out on any of those shirts, again none of them red
@@ -2667,8 +2732,11 @@ def ship_scene(s):
              "account": a.get("account") or "", "neck": necks.get(a.get("account") or ""),
              "phase": tr(phases[ph] if ph is not None and ph < len(phases) else "unknown")}
         h["off"] = off_duty(a, place, h["flag"], now)
-        h["checks"] = a.get("checks") if place == "rail" else None
+        h["checks"] = a.get("checks") if not scout else None
         h["arrived"], h["last"] = a.get("phase_since"), a.get("last_activity")
+        if place == "rail":                            # a fish when it got there, and one more each hour after
+            waited = now - h["arrived"] if h["arrived"] else 0
+            h["fish"], h["waited"] = min(FISH_MAX, 1 + int(max(0, waited) // FISH_EVERY)), wait_text(h["arrived"], now)
         h["since"] = agent_waiting_since(a) if h["flag"] else None
         h["exact"] = True
         (scouts if scout else hands).append(h)
@@ -2772,8 +2840,8 @@ def ship_print(sc):
     waits there) and its colours, so it can be drawn again once it has left; each scout by its
     place; each queued task by where it waits (the cabin or the pier) and, when it waits for a build
     slot, the tasks that hold that slot, and who sits in the tavern; the tasks delivered (the crates
-    on the pier); the rail's checks, firstmate's context and last compaction, and whether the lamps
-    are lit."""
+    on the pier); each hand's checks and the fish in each bucket at the rail, firstmate's context and
+    last compaction, and whether the lamps are lit."""
     fm = sc["firstmate"]
     return {"at": int(sc["now"]), "hands": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["hands"]},
             "scouts": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["scouts"]},
@@ -2784,6 +2852,7 @@ def ship_print(sc):
             "tavern": sorted(q["id"] for q in sc["pier"] if q["act"] in ("cards", "drink")),
             "crates": [c["id"] for c in sc["crates"]],
             "checks": {h["id"]: h["checks"] for h in sc["hands"] if h.get("checks")},
+            "fish": {h["id"]: str(h["fish"]) for h in sc["hands"] if h.get("fish") and not h["line"]},
             "context": fm["context"], "compaction": fm["compaction"], "night": sc["night"]}
 
 
@@ -2879,17 +2948,31 @@ def arrive_events(prev, cur):
 
 def move_events(prev, cur):
     """A hand whose place changed: a new phase, a red flag that takes it to the cabin, or the
-    decision answered that brings it back."""
+    decision answered that brings it back. One that leaves the watch on the lighthouse looks at it a
+    moment longer first (`look`), as the light gives the answer; one that comes to the rail from
+    anywhere but the cabin catches its first fish on arriving (`catch`)."""
     was = _strings(prev, "hands", dict)
-    return [{"kind": "move", "id": i, "from": was[i], "to": p} for i, p in sorted(cur["hands"].items())
+    return [{"kind": "move", "id": i, "from": was[i], "to": p, "look": was[i] == "watch", "catch": p == "rail" and was[i] != "cabin"}
+            for i, p in sorted(cur["hands"].items())
             if i in was and was[i] != p and was[i] in WALK_PLACES and p in WALK_PLACES]
 
 
-def checks_events(prev, cur):
-    """A hand at the rail whose PR's checks have just all passed (a fish) or failed (a boot)."""
-    was_at, was = _strings(prev, "hands", dict), _strings(prev, "checks", dict)
-    return [{"kind": "checks", "id": i, "result": r} for i, r in sorted(cur["checks"].items())
-            if r in ("pass", "fail") and was.get(i) != r and cur["hands"].get(i) == "rail" and was_at.get(i) == "rail"]
+def beacon_events(prev, cur):
+    """A hand that watched the lighthouse and no longer does, still aboard, now that its PR's checks
+    answered: the light flashes green when they all passed, red when one failed."""
+    was = _strings(prev, "hands", dict)
+    return [{"kind": "beacon", "id": i, "result": cur["checks"].get(i)} for i, p in sorted(was.items())
+            if p == "watch" and cur["hands"].get(i) not in (None, "watch") and cur["checks"].get(i) in ("pass", "fail")]
+
+
+def fish_events(prev, cur):
+    """A hand at the rail that has waited one more hour for the merge: it catches one more fish."""
+    was_at, was = _strings(prev, "hands", dict), _strings(prev, "fish", dict)
+    out = []
+    for i, n in sorted(cur["fish"].items()):
+        if was_at.get(i) == "rail" and cur["hands"].get(i) == "rail" and was.get(i, "").isdigit() and int(n) > int(was[i]):
+            out.append({"kind": "fish", "id": i, "n": int(n)})
+    return out
 
 
 def pump_events(prev, cur):
@@ -2910,10 +2993,11 @@ def lights_events(prev, cur):
 
 # each detector with the group it counts in; past a group's limit the rest of a refresh's changes
 # just show in their new places, so a busy refresh never fills the ship with walkers
+# (one lighthouse flashes one answer at a time)
 EVENT_DETECTORS = ((handover_events, "leave"), (leave_events, "leave"), (board_events, "walk"), (move_events, "walk"),
-                   (arrive_events, "arrive"),
-                   (checks_events, "checks"), (pump_events, "pump"), (lights_events, "lights"))
-EVENT_LIMITS = {"leave": 2, "walk": 4, "arrive": 2, "checks": 3, "pump": 1, "lights": 1}
+                   (arrive_events, "arrive"), (beacon_events, "beacon"),
+                   (fish_events, "fish"), (pump_events, "pump"), (lights_events, "lights"))
+EVENT_LIMITS = {"leave": 2, "walk": 4, "arrive": 2, "beacon": 1, "fish": 3, "pump": 1, "lights": 1}
 
 
 def ship_events(prev, cur):
@@ -2963,10 +3047,19 @@ def leave_sprites(ev):
     return dict(ev, frames=f)
 
 
+def catch_frames(hand):
+    """The rod held and bent by a bite, and the fish that comes up."""
+    p = Pix()
+    p.shaded(0, 0, FISH, FISH_INK)
+    return {"fish": hand_frame(hand, "fish", line_to=WL + 10 - (NEAR + 2)),
+            "reel": hand_frame(hand, "reel", line_to=WL + 10 - (NEAR + 2)), "catch": p.svg()}
+
+
 def event_sprites(ev, sc):
     """The frames the page needs to play one event, drawn here like every other sprite: the hand
-    that walks (ashore in its straw hat first when it boards), the flag it waves on its way to the
-    cabin, the bent rod and the catch, the pump's jet."""
+    that walks (ashore in its straw hat first when it boards), the spyglass it holds on the
+    lighthouse before it goes, the flag it waves on its way to the cabin, the bent rod and the
+    catch, the pump's jet."""
     if ev["kind"] == "leave":
         return leave_sprites(ev)
     if ev["kind"] == "handover":
@@ -2983,6 +3076,10 @@ def event_sprites(ev, sc):
             f.update({"ashore-" + k: hand_frame(ashore, k) for k in ("walk", "walk-l", "stand", "stand-l")})
         if hand["flag"] and ev.get("to") == "cabin":
             f["alarm"] = hand_frame(hand, "wave", flag=True)
+        if ev.get("look"):
+            f["look"] = hand_frame(dict(hand, flag=False, off=False), "spy")
+        if ev.get("catch") and hand["place"] == "rail":
+            f.update(catch_frames(hand))
         if ev.get("from") == "cabin" and not hand["flag"]:
             p = Pix()
             p.rect(-1, -1, 9, 9, "#1d140c")
@@ -2990,15 +3087,8 @@ def event_sprites(ev, sc):
             for x, y in ((1, 3), (2, 4), (3, 5), (4, 4), (5, 3), (5, 2), (6, 1)):
                 p.dot(x, y, "#ffffff")
             f["answered"] = p.svg()
-    elif ev["kind"] == "checks" and hand:
-        f["fish"] = hand_frame(hand, "fish", line_to=WL + 10 - (NEAR + 2))
-        f["reel"] = hand_frame(hand, "reel", line_to=WL + 10 - (NEAR + 2))
-        p = Pix()
-        if ev["result"] == "pass":
-            p.shaded(0, 0, FISH, FISH_INK)
-        else:
-            p.shaded(0, 0, BOOT, {})
-        f["catch"] = p.svg()
+    elif ev["kind"] == "fish" and hand:
+        f.update(catch_frames(hand))
     elif ev["kind"] == "pump":
         p = Pix()
         for x in range(0, 22, 2):
@@ -3021,13 +3111,15 @@ CABIN_SEATS = 3       # in line inside the cabin, at most; fewer when wide props
 BAG_W = 4             # a queued task's sea bag, at its feet behind it
 CABIN_TOP, CABIN_FLOOR = 156, 194
 # Between hands at each place, so that no hand stands on another: a hand is 13 art pixels wide
-# standing, and its props (flags, a rod, a pack, a hand of cards) make some poses wider.
+# standing, and its props (flags, a rod, a hand of cards) make some poses wider.
 DECK_STEP = 72        # between pairs on deck; the second of a pair stands half a step on, further back
 HATCH_STEP = 39
-RAIL_STEP = 39
+RAIL_STEP = 48        # a hand fishing and its bucket of up to four fish
 BOW_STEP = 69
+WATCH_STEP = 36       # between hands at the bow with a spyglass on the lighthouse
+LIGHT_GAP = 26        # from the bow to the lighthouse's tower, on the pier's edge ahead of the ship
+LIGHT_W = 30          # the lighthouse's stone head on the pier
 NEST_STEP = 33        # between lookouts in the crow's nest, and those that stand below it
-PLANK_STEP = 33       # between hands at the foot of the gangplank
 SCOUT_STEP = 45       # between scouts' skiffs
 NEST_UPTO, SKIFF_UPTO = 14, 15                    # rows of a hand shown above the nest's rim or a skiff's side
 TABLE_SEATS = 3       # a card table: one each side and one standing behind
@@ -3083,6 +3175,13 @@ def tavern_units(sc):
     return out
 
 
+def light_span(lay):
+    """The stretch of pier the lighthouse and its sign take, ahead of the bow."""
+    w = max(LIGHT_W, sign_w(tr("LIGHTHOUSE · CI")))
+    mid = lay["light_x"] + LIGHT_W // 2 - 5
+    return mid - w // 2 - 4, mid + w // 2 + 4
+
+
 def pier_layout(sc, lay, x0):
     """Where the queue stands on the pier. The tavern is anchored first, at the foot of the
     gangplank on its right, and grows to the right; then, toward the bow, the talkers, each under
@@ -3133,6 +3232,7 @@ def pier_layout(sc, lay, x0):
             spot = lay["hands"].get(q["partner"]) or lay["scouts"].get(q["partner"])
             groups.append({"act": "talk", "who": [q], "pref": (spot[0] - 2) if spot else x0 + 92, "sign": None, "w": TALK_W})
     taken, end = ([(x0 + TAVERN_FROM, tavern_end + 8)] if lay["tavern"] else []), max(x0 + 92, tavern_end)
+    taken.append(light_span(lay))
     order = {"talk": 0, "board": 1, "wait": 2}
     for g in sorted(groups, key=lambda g: (order[g["act"]], g["pref"])):
         gx = max(g["pref"], x0 + 92)
@@ -3226,8 +3326,8 @@ def ship_layout(sc):
     hatch_zone = 60 + HATCH_STEP * max(0, n["hatch"] - 1)
     rail_zone = max(40, RAIL_STEP * n["rail"] + 16)
     deck_len = max(260, deck_zone + hatch_zone + rail_zone)
-    fc_len = max(104, BOW_STEP * n["bow"] + 18)
-    x0 = PLANK_STEP * max(0, n["plank"] - 3) + 70
+    fc_len = max(104, BOW_STEP * n["bow"] + WATCH_STEP * n["watch"] + 18)
+    x0 = 70
     length = castle + deck_len + fc_len
     deck_x, fc_x = x0 + castle, x0 + castle + deck_len
     hatch_x = deck_x + deck_zone + 4
@@ -3260,15 +3360,10 @@ def ship_layout(sc):
         put[h["id"]] = (rail_x + 4 + RAIL_STEP * i, NEAR + 2, "fish", None)
     for i, h in enumerate(by["bow"]):
         put[h["id"]] = (fc_x + 8 + BOW_STEP * i, 166 + 3 * (i % 2), "signal", None)
-    plank = ((x0 + 86, NEAR + 2), (x0 + 30, PIER + 4))
-    out["plank"] = plank
-    for i, h in enumerate(by["plank"]):
-        if i < 3:
-            t = (0.22, 0.5, 0.78)[i]
-            put[h["id"]] = (int(plank[0][0] + (plank[1][0] - plank[0][0]) * t) - 8,
-                            int(plank[0][1] + (plank[1][1] - plank[0][1]) * t), "pack", None)
-        else:                                           # the rest wait on the pier at the foot of the plank
-            put[h["id"]] = (plank[1][0] - 12 - PLANK_STEP * (i - 3), PIER + 8, "pack", None)
+    for i, h in enumerate(by["watch"]):                 # ahead of the signallers, nearest the lighthouse
+        put[h["id"]] = (fc_x + 8 + BOW_STEP * n["bow"] + WATCH_STEP * i + pose_left("signal"), 166 + 3 * ((n["bow"] + i) % 2), "spy", None)
+    out["plank"] = ((x0 + 86, NEAR + 2), (x0 + 30, PIER + 4))
+    out["light_x"] = x0 + length + LIGHT_GAP
     out["seated"], out["crowd"] = cabin_line(sc["line"], put, x0 + CABIN_X)
     for h in sc["hands"]:
         if h["off"] and h["id"] in put:
@@ -3293,7 +3388,7 @@ def ship_layout(sc):
     # the opening frame also takes in the captain's cabin
     # and the queue on the pier below it; the tavern grows to the right of it
     every = list(put.values()) + list(out["pier"].values())
-    xs = ([x0 + CABIN_X - 10, fc_x + fc_len] + [x for x, _f, _p, _u in every if x >= x0]
+    xs = ([x0 + CABIN_X - 10, fc_x + fc_len, out["light_x"] + LIGHT_W] + [x for x, _f, _p, _u in every if x >= x0]
           + [x + len(POSES[p][0]) for x, _f, p, _u in every if x >= x0])
     ys = [FAR - 50, NEAR + 20] + [f - len(POSES[p][:u]) - 12 for _x, f, p, u in every] + [f + 8 for _x, f, _p, _u in every]
     out["crew"] = (min(xs) - 12, min(ys) - 8, max(xs) - min(xs) + 24, max(ys) - min(ys) + 16)
@@ -3422,8 +3517,6 @@ POSES = {
                          clear=ARM_L + ARM_R),
     "fish": build_pose(26, 21, 0, 0, [(11, 13, "s"), (12, 13, "s")] + [(x, y, "o") for x, y in line_points(13, 13, 25, 0)],
                        clear=[(11, 14), (11, 15)]),
-    "pack": build_pose(19, 21, 4, 0, [(x, y, "P") for x in range(-4, 2) for y in range(9, 17)] + [(x, 9, "w") for x in range(-4, 1)]
-                       + [(-4, 12, "O"), (-3, 12, "O"), (-2, 12, "O"), (3, 10, "O"), (3, 11, "O"), (4, 12, "O")] + STRIDE, clear=LEGS),
     "scroll": build_pose(19, 21, 0, 0, [(x, y, "m") for x in range(9, 18) for y in range(11, 16)]
                          + [(9, 11, "M"), (17, 11, "M"), (9, 15, "M"), (17, 15, "M"), (12, 13, "x"), (13, 12, "x"), (15, 14, "x"),
                             (10, 13, "s"), (16, 13, "s")], clear=[(11, 11), (11, 12)]),
@@ -3469,7 +3562,7 @@ POSES.update({k + "-l": [r[::-1] for r in v] for k, v in list(POSES.items())})
 # where each pose puts STAND's top left corner, so the hat, the name tag and the flag find the head
 POSE_HEAD = {"walk": (0, 0), "climb": (0, 0), "climb2": (0, 0), "wave": (0, 0), "reel": (0, 0),
              "carry": (0, 0), "carry2": (0, 0), "hammer2": (0, 5), "mop": (6, 0), "mop2": (6, 0), "broom": (0, 0), "broom2": (0, 0),
-             "stand": (0, 0), "spy": (0, 0), "hammer": (0, 5), "signal": (5, 5), "fish": (0, 0), "pack": (4, 0),
+             "stand": (0, 0), "spy": (0, 0), "hammer": (0, 5), "signal": (5, 5), "fish": (0, 0),
              "scroll": (0, 0), "rest": (0, 2), "cards": (0, 2), "drink": (0, 2), "talk": (0, 0)}
 ROD_TIP = (25, 0)     # the fishing rod's tip in the fish pose, where the line hangs from
 REEL_TIP = (25, 6)    # and in the reel pose, bent by a bite
@@ -3826,20 +3919,31 @@ def hand_frame(h, pose, flag=False, line_to=None):
     return p.svg()
 
 
-BUCKET = ["GGGGG", "GoooG", ".GGG."]
+BUCKET = ["GGGGGGGGGGGGG", "GoooooooooooG", ".GGGGGGGGGGG."]
 FISH = ["..lll..l", ".lllllll", "lklllll.", ".lllllll", "..lll..l"]
-BOOT = ["oooo..", "oooo..", "oooo..", "oooooo", "OOOOOO"]
 FISH_INK = {"l": "#bcd2dc", "k": "#1d140c"}
+FISH_UP = ["a.a", ".a.", "aad", "kad", "aad", "aad"]          # a fish in the bucket: tail up, head down
+# where each fish sits, in the order they are caught: its column in the bucket, how many rows its
+# tail rises over the rim, and its colour, side by side so each reads as one fish
+FISH_AT = [(1, 4, "#d4e3ea"), (7, 5, "#b9d3de"), (4, 6, "#e6eef2"), (10, 4, "#c6dbe4")]
 
 
 def bucket_svg(h, x, feet):
-    """The bucket beside a hand at the rail whose PR's checks all passed, a fish in it."""
+    """The bucket beside a hand fishing at the rail while it waits for the merge: a fish for when it
+    got there and one more for each hour since, up to FISH_MAX; its title says the exact wait. Each
+    fish is its own drawing (data-n, in the order caught), so the page can hold the newest back
+    while it is being caught."""
+    fish = []
+    for n, (cx, up, c) in enumerate(FISH_AT[:h.get("fish") or 1], 1):
+        f = Pix()
+        f.sprite(x + cx, feet - 2 - up, FISH_UP, {"a": c, "d": dark(c, 0.25), "k": "#1d140c"})
+        fish.append(f.svg(' class="sm-bucket__fish" data-n="%d"' % n))
     p = Pix()
     p.shaded(x, feet - 2, BUCKET, {})
-    p.rect(x + 1, feet - 4, 2, 2, FISH_INK["l"])
-    p.dot(x + 3, feet - 5, FISH_INK["l"])
-    return '<g class="sm-bucket" data-for="%s"><title>%s</title>%s</g>' % (
-        esc(h["id"]), esc(tr("%s: every check on the PR passed") % h["id"]), p.svg())
+    n, waited = h.get("fish") or 1, h.get("waited") or "?"
+    title = (tr("%s: one fish, waiting for the merge for %s") % (h["id"], waited) if n == 1 else
+             tr("%s: %d fish, waiting for the merge for %s") % (h["id"], n, waited))
+    return '<g class="sm-bucket" data-for="%s"><title>%s</title>%s%s</g>' % (esc(h["id"]), esc(title), "".join(fish), p.svg())
 
 
 def draw_pump(x, floor, top, bottom, stern):
@@ -3875,6 +3979,8 @@ def hand_title(h):
         title += " · %s%s" % (", ".join(h["why"]), (" · " + h["title"]) if h.get("title") else "")
     if h.get("line"):
         title += tr("; number %d in line for the captain, waiting %s") % (h["line"], h["wait"])
+    if h.get("waited") and h["place"] == "rail":
+        title += "; " + tr("for %s") % h["waited"]
     if h.get("checks"):
         title += "; " + tr(CHECKS_TEXT[h["checks"]])
     return title
@@ -4374,11 +4480,13 @@ def paint_signs(sc, lay, tags):
     sign(tags, tr("DECK · implementing"), lay["deck_x"] + 40, NEAR + 2)
     if any(h["place"] == "hatch" and not h["line"] for h in sc["hands"]):
         sign(tags, tr("? · phase unknown"), lay["hatch_x"] + 12, NEAR + 2)
-    sign(tags, tr("RAIL · waiting for CI"), lay["rail_x"] + 30, NEAR + 2)
-    sign(tags, tr("BOW · PR open"), lay["fc_x"] + lay["fc_len"] // 2, NEAR + 2)
+    sign(tags, tr("RAIL · waiting for merge"), lay["rail_x"] + 30, NEAR + 2)
+    sign(tags, tr("BOW · PR open and CI"), lay["fc_x"] + lay["fc_len"] // 2, NEAR + 2)
     hx0, hx1 = lay["hold"]
     sign(tags, tr("HOLD · quota barrels, context water"), (hx0 + hx1) // 2, NEAR + 16)
-    sign(tags, tr("GANGPLANK · ready to merge"), x0 + 48, PIER + 4)
+    sign(tags, tr("GANGPLANK · ashore and aboard"), x0 + 48, PIER + 4)
+    a, b = light_span(lay)
+    sign(tags, tr("LIGHTHOUSE · CI"), (a + b) // 2, PIER + 11)
     for text, cx, cls in lay["pier_signs"]:
         sign(tags, text, cx, PIER + 11, cls)
     if lay["scouts"]:
@@ -4429,11 +4537,13 @@ LAMP_CLEAR = 8       # a lamp post keeps this far from the tavern and the other 
 
 def pier_lamp_xs(lay):
     """Where the lamp posts stand along the pier: every LAMP_STEP, but not in the tavern (it has
-    its own lantern), at the foot of the gangplank, by the moored skiffs and the crates, or behind
-    the near layer's lamp at the scene's edge."""
+    its own lantern), at the foot of the gangplank, by the lighthouse, by the moored skiffs and the
+    crates, or behind the near layer's lamp at the scene's edge."""
     x0, W = lay["x0"], lay["width"]
     busy = [(a - LAMP_CLEAR, b + LAMP_CLEAR) for a, b, _u in lay["rooms"]]
     busy += [(x0 + 10, x0 + 100), (lay["dock_x"] - LAMP_CLEAR, W)]
+    a, b = light_span(lay)
+    busy.append((a - LAMP_CLEAR, b + LAMP_CLEAR))
     return [x for x in range(46, W - 40, LAMP_STEP) if not any(a <= x <= b for a, b in busy)]
 
 
@@ -4707,7 +4817,7 @@ def render_ship(sc):
            if f["context"] is not None else tr("context unknown"))
     people.append((152, shadow(x0 + 36, 153, 18) + '<g class="sm-fm"><title>%s</title>%s</g>'
                    % (esc(tr("firstmate at the helm: %s") % ctx), fm.svg())))
-    for place in ("deck", "hatch", "bow"):
+    for place in ("deck", "hatch", "bow", "watch"):
         for h in hands_at(place):
             people.append((spots[h["id"]][1], hand_svg(h, spots[h["id"]], tags)))
     for h in hands_at("nest"):
@@ -4778,8 +4888,7 @@ def render_ship(sc):
         def line(p, t, x=x + ROD_TIP[0]):
             fishing_line(p, x, t + ROD_TIP[1] + 1, WL + 10)
         ship.append(hand_svg(h, spots[h["id"]], tags, extra=line, shadow_on=False))
-        if h["checks"] == "pass":
-            ship.append(bucket_svg(h, x - 8, spots[h["id"]][1]))
+        ship.append(bucket_svg(h, x - 16, spots[h["id"]][1]))
     # the pier: the queue on the pier (drawn after it), scouts back with their maps, crates of delivered work
     stuff = Pix()
     for h in sc["scouts"]:
@@ -4806,6 +4915,7 @@ def render_ship(sc):
     ashore.append(pier.svg())
     ashore.append(draw_pier_lamps(lay, mid, lights, night))
     ashore.append(draw_pier(sc, lay, tags, lights, night))
+    ashore.append(lighthouse(sc, lay))
     # the newest MAX_CRATES crates, each its own drawing so the page can hold one back while its
     # hand carries it there (ship_events)
     crates = []
@@ -4828,12 +4938,7 @@ def render_ship(sc):
     bell.shaded(x0 + 66, 127, BELL, {})
     ship.append(bell.svg(' class="sm-bell"'))
     (px0, py0), (px1, py1) = lay["plank"]
-    if hands_at("plank"):
-        ashore.append(shadow(px1 + 10, py1, 24, 3, 0.25) + plank_svg(lay["plank"]))
-        for h in hands_at("plank"):
-            ashore.append(hand_svg(h, spots[h["id"]], tags, shadow_on=False))
-    else:
-        ashore.append(plank_svg(lay["plank"], hidden=True))
+    ashore.append(shadow(px1 + 10, py1, 24, 3, 0.25) + plank_svg(lay["plank"]))
     # the near layer: out of focus, dark and chunky, at the edges so it hides nobody
     fg = Pix()
     fg.rect(4, PIER + 13, 18, SHIP_H - PIER - 13, "#1c120a")      # below the pier's surface: the queue stands on it
@@ -4879,16 +4984,59 @@ def crate_spot(lay, i):
     return lay["crates_x"] + 9 * (i // 3), PIER + 2 - 8 * (i % 3 + 1)
 
 
-def plank_svg(plank, hidden=False):
-    """The gangplank from the ship down to the pier. It is out only while a hand stands on it; the
-    page puts it out again for a hand that walks down it (ship_events)."""
+def plank_svg(plank):
+    """The gangplank from the ship down to the pier, always out: a hand goes down it with its crate
+    once merged, and a queued task comes up it to board (ship_events)."""
     (px0, py0), (px1, py1) = plank
     p = Pix()
     for k in range(5):
         p.line(px0 + k, py0, px1 + k, py1, ("#e0aa72", "#d6a06a", "#b07a45", "#b07a45", "#6b3a1c")[k])
     for t in (0.2, 0.4, 0.6, 0.8):
         p.rect(int(px0 + (px1 - px0) * t), int(py0 + (py1 - py0) * t), 5, 1, "#5a3418")
-    return p.svg(' class="sm-plank"' + (' visibility="hidden"' if hidden else ""))
+    return p.svg(' class="sm-plank"')
+
+
+LIGHT_TALL = 104      # the lighthouse's tower, from the stone head to the gallery
+
+
+def lighthouse(sc, lay):
+    """The lighthouse ahead of the bow, on a stone head at the pier's edge. Its lamp says how CI
+    goes for the hands at the bow with a spyglass on it: it blinks yellow while any of them waits,
+    and is dark when none does; the page flashes it green or red as an answer comes (ship_events)."""
+    x, base = lay["light_x"], PIER
+    top = base - 4 - LIGHT_TALL
+    p = Pix()
+    p.rect(x - 5, base - 4, LIGHT_W, 5, "#7d7a74")                    # the stone head
+    p.rect(x - 5, base - 4, LIGHT_W, 1, "#a8a49b")
+    p.rect(x - 4, base + 1, LIGHT_W - 2, 2, "#5d5a55")
+    for y in range(top, base - 4):                                   # the tower, red and white bands, narrower up top
+        k = (base - 4 - y) * 3 // LIGHT_TALL
+        w, left = 20 - k * 2, x + k
+        c = "#c8402a" if ((base - 4 - y) // 16) % 2 else "#f2ece0"
+        p.rect(left, y, w, 1, c)
+        p.dot(left, y, lit(c))
+        p.dot(left + w - 1, y, dark(c))
+        p.dot(left + w - 2, y, dark(c, 0.15))
+    p.rect(x + 8, base - 24, 4, 7, "#24170d")                        # a door and two windows
+    p.rect(x + 9, base - 52, 2, 4, "#24170d")
+    p.rect(x + 9, base - 84, 2, 4, "#24170d")
+    p.rect(x - 1, top - 2, 22, 2, "#3e2a1c")                         # the gallery and its rail
+    for i in range(0, 22, 3):
+        p.rect(x - 1 + i, top - 6, 1, 4, "#3e2a1c")
+    p.rect(x - 1, top - 6, 22, 1, "#3e2a1c")
+    p.rect(x + 3, top - 16, 14, 1, "#3e2a1c")                        # the lantern room's frame
+    p.rect(x + 3, top - 16, 1, 10, "#3e2a1c")
+    p.rect(x + 16, top - 16, 1, 10, "#3e2a1c")
+    p.rect(x + 2, top - 20, 16, 4, "#8a2a1c")                        # the cap
+    p.rect(x + 2, top - 20, 16, 1, lit("#8a2a1c"))
+    p.rect(x + 5, top - 22, 10, 2, "#8a2a1c")
+    p.rect(x + 9, top - 25, 2, 3, "#3e2a1c")
+    watchers = [h["id"] for h in sc["hands"] if h["place"] == "watch" and not h["line"]]
+    title = (tr("the lighthouse: the checks are running for %s") % ", ".join(watchers) if watchers
+             else tr("the lighthouse: nobody is waiting for CI"))
+    return ('<g class="sm-beacon %s"><title>%s</title><circle class="sm-beacon__halo" cx="%d" cy="%d" r="13"/>%s'
+            '<rect class="sm-beacon__lamp" x="%d" y="%d" width="12" height="9"/></g>'
+            % ("is-running" if watchers else "is-idle", esc(title), x + 10, top - 11, p.svg(), x + 4, top - 15))
 
 
 def sprite_icon(rows, pal, scale=2):
@@ -4930,8 +5078,10 @@ STAGES = [
     ("nest", "spy", "exploring", "in the crow's nest with a spyglass: reading the code and planning before it builds"),
     ("deck", "hammer", "implementing", "on deck with a hammer, a mop or a broom: making the change"),
     ("bow", "signal", "PR open", "at the bow with signal flags: the pull request is open"),
-    ("rail", "fish", "waiting for CI", "fishing at the rail: the checks are running"),
-    ("plank", "pack", "ready to merge", "on the gangplank with a pack: done, waiting to go ashore"),
+    ("watch", "spy", "waiting for CI", "at the bow with a spyglass on the lighthouse: the checks are running, and the light "
+                                       "blinks yellow; it flashes green or red when they come back"),
+    ("rail", "fish", "waiting for merge", "fishing at the rail: every check passed, the merge is next; one more fish in the "
+                                          "bucket for each hour it waits, up to four"),
     ("hatch", "stand", "phase unknown", "under a question mark: no sign of its phase yet"),
     ("scouts", "scroll", "scouts", "in a skiff: rowing out to explore, back with the map, then moored at the pier with the report"),
     ("off", "rest", "off duty", "sitting with the dice: paused, or quiet for a while"),
@@ -5024,10 +5174,11 @@ def demo_snapshot(now=None, moved=False):
     """A made-up home with every phase, flag and gauge in use, for `--demo` and the tests.
     Every name in it is invented; nothing is read from disk. `moved` is the same home a moment
     later, so the ship's animations have something to show: a lookout went down to the deck, a
-    deck hand asked the captain, the blocked hand was answered, a ready task was dispatched, the
-    checks at the rail came back, firstmate's context was compacted, a hand on the gangplank was
-    delivered, a deck hand without a PR was delivered and handed its build slot to a card player,
-    and a new task joined the tavern to wait for that slot."""
+    deck hand asked the captain, the blocked hand was answered, a ready task was dispatched up the
+    gangplank, the checks of one of the hands watching the lighthouse passed and it went fishing,
+    the longest fisher caught one more fish, firstmate's context was compacted, a fisher was merged
+    and went down the gangplank with its crate, a deck hand without a PR was delivered and handed
+    its build slot to a card player, and a new task joined the tavern to wait for that slot."""
     now = time.time() if now is None else now
     h = 3600
 
@@ -5053,7 +5204,7 @@ def demo_snapshot(now=None, moved=False):
         agent("DEMO-RATE", "Rate limit the public endpoints", "harbor-api", 1, crew="parked",
               decisions=[("needs-decision", "limits", "per user or per key? A) per user B) per key", 50 * 60)]),
         agent("DEMO-CACHE", "Cache the tide tables", "harbor-api", 2),
-        agent("DEMO-LOGS", "Structured logs for the workers", "harbor-api", 3),
+        agent("DEMO-LOGS", "Structured logs for the workers", "harbor-api", 4 if moved else 3, crew="done" if moved else "working"),
         agent("DEMO-I18N", "Translate the settings page", "harbor-api", 4, crew="done"),
         agent("DEMO-DARK", "Dark theme for the charts", "lighthouse-web", 0, crew="paused"),
         agent("DEMO-NAV", "Keyboard navigation in the menu", "tide-charts", 1,
@@ -5067,12 +5218,19 @@ def demo_snapshot(now=None, moved=False):
         agent("DEMO-SCOUT-CDN", "Survey the image CDN costs", "lighthouse-web", 1, kind="scout"),
         agent("DEMO-SCOUT-UX", "Review the onboarding flow", "lighthouse-web", 2, crew="done", kind="scout"),
     ]
-    for a in agents:                                    # the checks at the rail
-        if a["id"] in ("DEMO-LOGS", "DEMO-FORMS"):
-            a["checks"] = ({"DEMO-LOGS": "pass", "DEMO-FORMS": "fail"}[a["id"]] if moved else "pending")
+    waited = {"DEMO-LOGS": 10, "DEMO-I18N": 20 * 60, "DEMO-ICONS": (3 * h + 10 * 60) if moved else (2 * h + 50 * 60)}
+    for a in agents:                                    # the PRs' checks, and how long the fishers have waited for the merge
+        if a["id"] == "DEMO-LOGS":
+            a["checks"] = "pass" if moved else "pending"
+        elif a["id"] == "DEMO-FORMS":
+            a["checks"] = "pending"
+        elif a["phase"] == 4 and a["kind"] == "ship":
+            a["checks"] = "pass"
+        if a["phase"] == 4 and a["id"] in waited:
+            a["phase_since"] = now - waited[a["id"]]
     if moved:
         agents.append(agent("DEMO-Q-THEME", "Theme picker", "lighthouse-web", 0, ago=60))
-        # delivered: the hand on the gangplank, and the deck hand without a PR, whose build slot the
+        # delivered: a fisher at the rail, and the deck hand without a PR, whose build slot the
         # first card player took
         agents = [a for a in agents if a["id"] not in ("DEMO-I18N", "DEMO-AUTH")]
         agents.append(agent("DEMO-Q-PUSH", "Push notifications", "harbor-api", 0, ago=60))

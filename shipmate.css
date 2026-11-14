@@ -319,6 +319,19 @@ body.sm-locked { overflow: hidden; }
 .motion-all .pace-slow > .sm-alt { animation: sm-frame-b-slow 2.7s steps(1) infinite; }
 .motion-all .pose-signal > g:first-of-type { animation: sm-signal 1.4s steps(2) infinite; }
 .motion-all .pose-rest > g:first-of-type { animation: sm-breathe 3s steps(2) infinite; }
+/* the lighthouse shows CI (shipmate.py, lighthouse): dark glass when nobody waits for it, yellow
+   while someone does (blinking between bright and amber only with all motion, so it never looks
+   dark), and green or red for a few seconds when an answer comes (the page script, playBeacon) */
+.sm-beacon__lamp { fill: #3b4248; }
+.sm-beacon__halo { fill: none; }
+.sm-beacon.is-running .sm-beacon__lamp { fill: #f6c33a; }
+.sm-beacon.is-running .sm-beacon__halo { fill: #f6c33a; opacity: 0.3; }
+.motion-all .sm-beacon.is-running .sm-beacon__lamp { animation: sm-beacon-lamp 1.2s steps(1) infinite; }
+.motion-all .sm-beacon.is-running .sm-beacon__halo { animation: sm-beacon-halo 1.2s steps(1) infinite; }
+.sm-beacon.is-pass .sm-beacon__lamp { fill: #46c35a; }
+.sm-beacon.is-pass .sm-beacon__halo { fill: #46c35a; opacity: 0.45; }
+.sm-beacon.is-fail .sm-beacon__lamp { fill: #e5402a; }
+.sm-beacon.is-fail .sm-beacon__halo { fill: #e5402a; opacity: 0.45; }
 /* the queue on the pier passes the time; none of it looks like work */
 .motion-all .pose-hammock > g:first-of-type { animation: sm-sway 4s steps(2) infinite; }
 .motion-all .pose-drink > g:first-of-type { animation: sm-sip 4.4s steps(1) infinite; }
@@ -364,6 +377,8 @@ body.sm-locked { overflow: hidden; }
 @keyframes sm-twinkle { 0%, 88% { opacity: 1; } 92% { opacity: 0.3; } 96% { opacity: 1; } }
 @keyframes sm-pennant { 0% { transform: scaleY(1); } 50% { transform: scaleY(0.75); } }
 @keyframes sm-blink { 0% { opacity: 1; } 50% { opacity: 0.25; } }
+@keyframes sm-beacon-lamp { 0% { fill: #f6c33a; } 50% { fill: #b07d1c; } }
+@keyframes sm-beacon-halo { 0% { opacity: 0.35; } 50% { opacity: 0; } }
 @keyframes sm-frame-a { 0%, 49.9% { visibility: visible; } 50%, 100% { visibility: hidden; } }
 @keyframes sm-frame-b { 0%, 49.9% { visibility: hidden; } 50%, 100% { visibility: visible; } }
 @keyframes sm-frame-a-slow { 0%, 83.2% { visibility: visible; } 83.3%, 100% { visibility: hidden; } }

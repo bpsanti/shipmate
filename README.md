@@ -3,7 +3,7 @@
 A small local dashboard for a [Firstmate](https://github.com/kunchenguid/firstmate) home.
 It shows one page, read live from the home's own records every time the page loads and every 30 seconds after that:
 
-- **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, ready / delivered.
+- **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, waiting for merge / delivered.
   A phase with nothing in it shrinks to a thin labelled strip so the busy lanes get the width; a lane taller than the screen scrolls inside itself and says how many cards are below; when lanes are out of view the board says so.
 - **A fixed sidebar** on the right keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
 - **A detail drawer** opens from any card: facts about that piece of work, gathered from the home's records.
@@ -39,7 +39,7 @@ It listens on `127.0.0.1` only.
 | `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed); it changes between two moments every 30 s, so the ship's animations can be seen |
 | `--lang en\|pt-BR` | `SHIPMATE_LANG` | `en` | the page's language: English, or Brazilian Portuguese with `pt-BR` |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
-| | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only by the detail drawer to read a PR's checks |
+| | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only to read a PR's checks, for the phases and the detail drawer |
 
 Reloading the page, the page's own refresh and the ship view share one reading of the fleet for `--cache-seconds` seconds instead of reading it again each time.
 Sending an answer or a new task drops that reading, so what comes back right after is never stale.
@@ -123,7 +123,18 @@ When the evidence cannot tell, the page says `unknown`.
 | implementing | first `Edit`/`Write` on a file inside the worktree, or a `git commit` |
 | PR open | `pr=` in the task record, a PR URL in a status line, or a `gh pr create` result |
 | waiting for CI | PR open, the worker is working or paused, and its latest activity since its last edit is a CI read (`gh pr checks`, `gh run watch/view/list`) |
-| ready to merge | PR open and current state `done` |
+| waiting for merge | PR open and current state `done` |
+
+Once a GitHub PR's checks are read (see the drawer's table below), they decide between the last phases, since a worker often reports `done` as it opens the PR, before CI has said anything:
+
+| The PR's checks | Phase |
+| --- | --- |
+| one is still running | waiting for CI, even when the worker reported `done`; it started when the earliest check started |
+| one failed | implementing, on the board too: the PR goes back to the work; it started when the last check finished |
+| all passed, and the worker reported `done` | waiting for merge, since the last check finished or the worker reported `done`, whichever came later |
+| all passed, and the worker is still at work | PR open |
+
+Without checks, without an answer from GitHub, for a PR elsewhere, or before the first reading, the milestones above stand.
 
 A scout goes exploring, writing the report (`data/<id>/report.md` exists), report delivered (`done`).
 The bar under each agent shows the phases completed; hover `why?` for the evidence used.
@@ -138,7 +149,7 @@ Apart from the answer form described below, everything in it is read-only and co
 | Title and the captain's intent | the backlog title, and the `Captain's intent` section of `data/<task>/brief.md` |
 | Phase timeline with the time of each milestone | the same evidence as the card's phase: spawn time, first edit or commit in the worktree, PR URL, first CI read, `done` |
 | Latest status lines | the last 8 lines of `state/<task>.status`, newest first |
-| PR with its state and checks | `gh pr view <url> --json state,isDraft,statusCheckRollup`, read when a drawer opens, and in the background for every agent waiting for CI, at most every 120 s per PR in all (GitHub PRs only) |
+| PR with its state and checks | `gh pr view <url> --json state,isDraft,statusCheckRollup`, read when a drawer opens, and in the background for every ship agent with its PR open, at most every 120 s per PR in all (GitHub PRs only); a page never waits for that background read |
 | Project, model, effort, account, harness | `state/<task>.meta` |
 | Tokens, and the worker's context against its window | the task's transcripts, as on the card; the window is inferred like firstmate's |
 | How long it has been idle | the time since the newest record in the task's transcripts |
@@ -157,11 +168,14 @@ Each element stands for one thing:
 | A hand in the crow's nest with a spyglass | an agent exploring |
 | A hand on deck with a hammer, a mop or a broom | an agent implementing; the tools take turns by when each hand reached the deck (see [Work on deck](#work-on-deck)) |
 | A hand at the bow with signal flags | an agent with a PR open |
-| A hand fishing at the rail | an agent waiting for CI |
-| A hand on the gangplank with a pack | an agent ready to merge |
+| A hand at the bow with a spyglass on the lighthouse | an agent waiting for CI; these stand ahead of the signal flags, nearest the lighthouse |
+| The lighthouse on the pier's edge, ahead of the bow | CI: its lamp blinks yellow while any hand waits for CI, and is dark when none does; it flashes green or red for about four seconds when a hand's checks come back (see [Motion](#motion)) |
+| A hand fishing at the rail | an agent waiting for the merge: every check on its PR passed and it reported `done` |
+| A bucket beside a hand at the rail | how long it has waited for the merge: one fish when it got there and one more each hour, up to four; its title gives the exact wait |
+| The gangplank, from the stern down to the pier | the way ashore and aboard, always out: a merged hand goes down it with its crate, and a queued task comes up it when firstmate dispatches it. Nobody waits on it |
 | A hand under a question mark | an agent whose phase is unknown |
 | A badge on a card in the log | the captain's answer to the decision open now: sent, not woken, received or replied (see below) |
-| A hand sitting with the dice | off duty: an unflagged agent exploring, implementing, at the bow or of unknown phase whose crew state is `paused`, or that has had no transcript activity for 20 minutes without a busy session |
+| A hand sitting with the dice | off duty: an unflagged agent exploring, implementing, signalling at the bow or of unknown phase whose crew state is `paused`, or that has had no transcript activity for 20 minutes without a busy session |
 | A hand's shirt | its project's colour, in the order of `data/projects.md` (the bandana is a darker shade of it); the sails carry one stripe per project aboard |
 | A hand's neckerchief | its Claude account's colour, in the order of `config/claude-accounts` (an account a worker reports that the list lacks comes after); "Accounts aboard" below the scene names them. A queued hand has no account yet, so its neckerchief is a dark shade of its shirt |
 | A hand's hat | its state: a bandana at work, a straw hat when not working (off duty, or queued on the pier), bare-headed when it waits on the captain, a grey wool cap when its phase is unknown |
@@ -173,10 +187,9 @@ Each element stands for one thing:
 | Barrels in the hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
 | Water in the hold | firstmate's context; the white line is the warning threshold |
 | The pump on the orlop | it works when firstmate's context is compacted, and the water goes down (see [Motion](#motion)) |
-| A bucket with a fish beside a hand at the rail | every check on that agent's PR passed (read in the background, see the table above) |
 | Hammocks in the quarters, cut open in the hull forward of the hold | queued tasks held until a date, one asleep in each hammock under a blanket in its project's colour, the date over it (see below) |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
-| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away, and the browser remembers it |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the lighthouse, the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks firstmate closed as done in the last 7 days: the backlog's `closed` date, read with the rest of the backlog (`bin/fm-tasks-axi.sh list`), so a task pruned from the backlog leaves the pile. The session sheets are written later and in batches, so they feed only the usage block |
 | The bell on the mizzen mast | it rings when a task is delivered (see [Motion](#motion)) |
 | Day or night | the local hour: the lamps are lit from 18:00 to 06:00 (on the ship, along the pier and in the tavern's windows); the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
@@ -207,7 +220,7 @@ Around the ship the harbour lives on its own, and none of it stands for anything
 | Little waves | they rise, roll a pixel or two and sink, in three sets a beat apart |
 | Foam at the hull, the hull's reflection, the glitter under the sun or the moon | two frames that take turns |
 | Stars | at night a few brighter ones dip now and then, on two beats |
-| Lamp posts along the pier | dark by day; at night lit, with a pool of light on the planks and their reflection in the water between the piles. They keep clear of the tavern (it has its own lantern), the foot of the gangplank, and the moored skiffs and crates |
+| Lamp posts along the pier | dark by day; at night lit, with a pool of light on the planks and their reflection in the water between the piles. They keep clear of the tavern (it has its own lantern), the foot of the gangplank, the lighthouse, and the moored skiffs and crates |
 
 All of it moves only while the motion switch says "all", stands with "changes only" or "off" (the gulls are then gone and the clouds stand), and stops where it is in a hidden tab.
 A loop longer than the page's refresh (a cloud's crossing, a gull's round) starts where the local clock says, so a new drawing goes on where the last one was instead of starting it over.
@@ -235,12 +248,13 @@ When the scene changes between two refreshes, the change plays once on the new d
 
 | What plays | When |
 | --- | --- |
-| A hand walks from its old place to its new one: down the ladder from the crow's nest, along the deck, up to the forecastle, down the gangplank | its place changed: a new phase |
+| A hand walks from its old place to its new one: down the ladder from the crow's nest, along the deck, up to the forecastle or along it | its place changed: a new phase |
 | It waves its red flag three times, then walks into the captain's cabin | a `needs-decision` or `blocked` line opened, or its crew state became parked, blocked or failed |
 | A green mark over its head, then it walks out of the cabin back to its place | the decision was resolved |
 | A queued hand walks from the pier up the gangplank, swaps the straw hat for the bandana as it steps aboard, and goes to its place; one held for the captain walks out of the cabin | firstmate dispatched the task: its id left the queue and is a live agent |
-| The rod bends, a fish comes up and goes into the bucket | the checks of a hand at the rail all passed |
-| The rod bends, an old boot comes up and falls back | a check failed |
+| The lighthouse flashes green while the hand at the bow keeps its spyglass on it a moment longer, then the hand walks to the rail, where the rod bends and its first fish goes into the bucket | every check on its PR passed and it reported `done` |
+| The lighthouse flashes red while the hand keeps its spyglass on it, then it walks back to the deck | a check on its PR failed |
+| The rod bends, a fish comes up and goes into the bucket | a hand at the rail has waited one more hour for the merge |
 | The pump works six strokes, water spouts out of the stern, and the water drops from the old level to the new | firstmate's last compaction is newer than the previous reading's |
 | The lamps light one at a time, from the stern | night fell since the previous reading |
 | A new hand walks in from the near end of the pier to its seat in the tavern, in its straw hat | a task joined the queue to wait for a build slot or a lane: it was neither queued, aboard nor in a skiff in the earlier reading |
@@ -248,14 +262,13 @@ When the scene changes between two refreshes, the change plays once on the new d
 | The hand walks down the gangplank empty-handed, without the bell, and off the near end of the pier | the agent is gone and its task was not closed as done |
 | The card player gets up as the bell rings and waits at the foot of the gangplank; the one leaving comes down with its crate, the two nod, and each goes on: one to the pile, the other up the gangplank to its place | in the same reading, a hand that held a build slot left and a task that waited for that slot was dispatched |
 
-The page sends the print of the drawing on screen (`data-print`: where each hand and each scout stood and the colours to draw it again once gone, where each queued task waited and who held the build slot it waited for, the delivered crates, the rail's checks, firstmate's context and last compaction, and whether the lamps were lit) with its request for the next one, and `ship_events` compares the two.
+The page sends the print of the drawing on screen (`data-print`: where each hand and each scout stood and the colours to draw it again once gone, where each queued task waited and who held the build slot it waited for, the delivered crates, each hand's checks and the fish in each bucket, firstmate's context and last compaction, and whether the lamps were lit) with its request for the next one, and `ship_events` compares the two.
 Nothing plays when the page has just opened, when the earlier print is more than 90 s old (a tab left in the background, or the board shown meanwhile), or for a change no reading saw happen: a hand that appears aboard without having been queued, a scout's boat at sea.
 A task that goes back to the queue does not leave the ship; a scout walks off only from its skiff moored at the pier.
 The slot is handed over only when the one leaving held it: like firstmate, shipmate counts as the slot's holder a task with no recorded PR, so a hand that opened a PR gave its slot up when it went to the bow, and its departure plays on its own.
-At most two hands leave, four walk, two arrive at the tavern and three catches come up after one refresh; the rest of that refresh's changes just show in their new places.
-The gangplank is out only while a hand stands on it; it is put out for whoever walks down or up it, and taken in again behind them.
+At most two hands leave, four walk, two arrive at the tavern, the lighthouse flashes one answer and three fish come up after one refresh; the rest of that refresh's changes just show in their new places.
 Each kind has one detector in `shipmate.py` (`EVENT_DETECTORS`) and one player in the page script (`PLAYERS`), so a new animation is added in those two places.
-The frames it needs (a stride, two holds on the ladder, the arm with the flag, the bent rod, the catch, the jet, the crate carried and the bell's ring) are drawn by `hand_sprite` and the server like every other sprite, and arrive with the change; a hand that has left is drawn from the colours its last print kept.
+The frames it needs (a stride, two holds on the ladder, the spyglass held on the lighthouse, the arm with the flag, the bent rod, the catch, the jet, the crate carried and the bell's ring) are drawn by `hand_sprite` and the server like every other sprite, and arrive with the change; a hand that has left is drawn from the colours its last print kept.
 
 The "motion" button in the scene's corner cycles through:
 
@@ -311,7 +324,7 @@ A hand fishing at the rail stands over the quarters, and its line hangs in front
 The four stage chips for the queue (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
 A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a hammock sways; nothing there looks like progress, and none of it moves unless the motion switch says "all".
 Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` (with `POSE_HEAD`, where each pose puts the head), the hats in `HATS` and the colours in `hand_palette`, so a new art style replaces those and nothing else; a hand asleep in a hammock, which lies down, is painted by `hammock_sprite`, from the same `hand_palette`.
-A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, a mop and its bucket, a broom, flags, a rod, a pack, a crate, a map, cards, a mug) make some poses wider.
+A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, a mop and its bucket, a broom, flags, a rod, a crate, a map, cards, a mug) make some poses wider.
 The captain and firstmate at the helm are drawn on the same scale.
 
 ## Answering the captain's decisions
