@@ -2596,7 +2596,7 @@ LINE_STEP = 22
 DOZE_STEP = 26
 TALK_W = 22           # a hand talking up to the one it waits for
 PIER_FEET = PIER + 8  # where a hand on the pier stands
-PIER_WEST = 32        # the tavern starts here, clear of the post in the near layer
+TAVERN_GAP = 10       # between what already stands on the pier and the first table of the tavern
 
 
 def sign_w(text):
@@ -2629,36 +2629,12 @@ def tavern_units(sc):
 
 
 def pier_layout(sc, lay, x0):
-    """Where the queue stands on the pier: the tavern west of the ship, under the stern; then, from
-    the gangplank on, the talkers, each under the hand it talks to, the lines in the gaps they
-    leave, and the dozing bench under the forecastle. Nothing overlaps: the talkers claim their
+    """Where the queue stands on the pier: from the gangplank on, the talkers, each under the hand it
+    talks to, the lines in the gaps they leave, and the dozing bench under the forecastle; then,
+    to the right of all of them, the tavern. Nothing overlaps: the talkers claim their
     places first, and a group that would land on another moves toward the bow to the first gap
     wide enough. Returns the spots, the props, the signs, the counted overflow and where it ends."""
     spots, props, signs, more = {}, [], [], []
-    x = PIER_WEST
-    for u in lay["tavern"]:
-        signs.append((u["sign"], x + u["w"] // 2, ""))
-        props.append(("lantern", x + 1))
-        tx = x + 22
-        players = u["cards"][:TABLE_SEATS * MAX_TABLES]
-        for t in range(u["tables"]):
-            seat = players[TABLE_SEATS * t:TABLE_SEATS * t + TABLE_SEATS]
-            props.append(("table", tx))
-            for i, q in enumerate(seat):
-                spots[q["id"]] = [(tx - 16, PIER_FEET, "cards", None), (tx + 13, PIER_FEET, "cards-l", None),
-                                  (tx + 1, PIER_FEET - 3, "stand", None)][i]
-            tx += TABLE_W
-        if u["bench"]:
-            props.append(("bench", tx - 4, tx + BENCH_STEP * u["bench"] + 2))
-            for i, q in enumerate(u["drink"][:MAX_ROW]):
-                spots[q["id"]] = (tx + BENCH_STEP * i, PIER_FEET, "drink", None)
-            tx += BENCH_STEP * u["bench"] + 2
-            props.append(("keg", tx))
-            tx += 18
-        hidden = u["cards"][TABLE_SEATS * MAX_TABLES:] + u["drink"][MAX_ROW:]
-        if hidden:
-            more.append((tx, hidden))
-        x += u["w"] + 14
     # from the gangplank toward the bow
     groups = []
     for act, label, cls in (("board", tr("READY · boards next"), ""), ("wait", tr("WAITS FOR A TASK"), "")):
@@ -2703,6 +2679,33 @@ def pier_layout(sc, lay, x0):
                     props.append(("bag", gx + LINE_STEP * i + 14))
         if len(g["who"]) > len(shown):
             more.append((gx + (DOZE_STEP if g["act"] == "doze" else LINE_STEP) * len(shown) + 4, g["who"][len(shown):]))
+    # the tavern comes last: it grows to the right from where the pier already ends, so a short
+    # queue adds a short stretch and nothing is reserved west of the ship
+    x = end + TAVERN_GAP
+    for u in lay["tavern"]:
+        signs.append((u["sign"], x + u["w"] // 2, ""))
+        props.append(("lantern", x + 1))
+        tx = x + 22
+        players = u["cards"][:TABLE_SEATS * MAX_TABLES]
+        for t in range(u["tables"]):
+            seat = players[TABLE_SEATS * t:TABLE_SEATS * t + TABLE_SEATS]
+            props.append(("table", tx))
+            for i, q in enumerate(seat):
+                spots[q["id"]] = [(tx - 16, PIER_FEET, "cards", None), (tx + 13, PIER_FEET, "cards-l", None),
+                                  (tx + 1, PIER_FEET - 3, "stand", None)][i]
+            tx += TABLE_W
+        if u["bench"]:
+            props.append(("bench", tx - 4, tx + BENCH_STEP * u["bench"] + 2))
+            for i, q in enumerate(u["drink"][:MAX_ROW]):
+                spots[q["id"]] = (tx + BENCH_STEP * i, PIER_FEET, "drink", None)
+            tx += BENCH_STEP * u["bench"] + 2
+            props.append(("keg", tx))
+            tx += 18
+        hidden = u["cards"][TABLE_SEATS * MAX_TABLES:] + u["drink"][MAX_ROW:]
+        if hidden:
+            more.append((tx, hidden))
+        x += u["w"] + 14
+        end = max(end, x - 14)
     return spots, props, signs, more, end
 
 
@@ -2735,7 +2738,6 @@ def ship_layout(sc):
     """Where every hand, boat and part of the ship goes. Hands get (x, feet, pose, upto) with x
     the sprite's left edge and feet its lowest painted row; nothing here depends on the clock."""
     tavern = tavern_units(sc)
-    west = sum(u["w"] + 14 for u in tavern)
     by = {k: [h for h in sc["hands"] if h["place"] == k and not h["line"]] for k in PLACES + ["hatch"]}
     n = {k: len(v) for k, v in by.items()}
     castle = CABIN_X + CABIN_W + 4
@@ -2744,7 +2746,7 @@ def ship_layout(sc):
     rail_zone = max(40, RAIL_STEP * n["rail"] + 16)
     deck_len = max(260, deck_zone + hatch_zone + rail_zone)
     fc_len = max(104, BOW_STEP * n["bow"] + 18)
-    x0 = PLANK_STEP * max(0, n["plank"] - 3) + max(70, PIER_WEST + west + 16)
+    x0 = PLANK_STEP * max(0, n["plank"] - 3) + 70
     length = castle + deck_len + fc_len
     deck_x, fc_x = x0 + castle, x0 + castle + deck_len
     hatch_x = deck_x + deck_zone + 4
@@ -2803,7 +2805,7 @@ def ship_layout(sc):
     out["width"] = max(640, right + SCOUT_STEP * widest + 9 * ((min(len(sc["crates"]), MAX_CRATES) + 2) // 3) + 70)
     # the opening frame: the deck and every hand aboard, with a margin; the nest only when manned
     # the opening frame also takes in the captain's cabin
-    # and the queue on the pier below it; the tavern, west of the ship, is a pan or a stage chip away
+    # and the queue on the pier below it; the tavern grows to the right of it
     every = list(put.values()) + list(out["pier"].values())
     xs = ([x0 + CABIN_X - 10, fc_x + fc_len] + [x for x, _f, _p, _u in every if x >= x0]
           + [x + len(POSES[p][0]) for x, _f, p, _u in every if x >= x0])

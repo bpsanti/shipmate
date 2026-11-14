@@ -1337,6 +1337,33 @@ class TestShip(unittest.TestCase):
             random.Random(seed).shuffle(shuffled)
             self.assertEqual(where(shuffled), want, seed)
 
+    def test_the_tavern_grows_to_the_right_and_the_scene_widens_with_the_queue(self):
+        today = dt.date.fromtimestamp(T0).isoformat()
+        slot = {"group": "demo-app", "cap": 2, "taken": 2, "holders": []}
+        agents = [self.hand("H1", 1)]
+        def lay_of(n):
+            queue = [self.queue_item("C%02d" % i, "slot", today, slot=slot) for i in range(n)]
+            return shipmate.ship_layout(shipmate.ship_scene(self.snap(agents, queue=queue)))
+        bare = lay_of(0)
+        lays = {n: lay_of(n) for n in (1, 3, 15)}
+        for n, lay in lays.items():
+            self.assertEqual(lay["x0"], bare["x0"], n)                    # nothing is reserved west of the ship
+            self.assertTrue(all(x > lay["plank"][1][0] for x, _f, _p, _u in lay["pier"].values()), n)
+            self.assertEqual(len(lay["pier"]), min(n, shipmate.TABLE_SEATS * shipmate.MAX_TABLES), n)
+        # the same queue seats the same way: first in, first at the anchor
+        firsts = {n: lay["pier"]["C00"][0] for n, lay in lays.items()}
+        self.assertEqual(len(set(firsts.values())), 1, firsts)
+        # compact: a short queue never widens the scene, and the tavern's reach follows how many wait
+        w0 = bare["width"]
+        self.assertEqual(lays[1]["width"], w0)
+        self.assertEqual(lays[3]["width"], w0)
+        reach = {n: max(x for x, _f, _p, _u in lay["pier"].values()) for n, lay in lays.items()}
+        self.assertLessEqual(reach[1], reach[3])
+        self.assertLess(reach[3], reach[15])
+        self.assertLessEqual(lays[1]["width"], lays[3]["width"])
+        self.assertLessEqual(lays[3]["width"], lays[15]["width"])
+        self.assertLessEqual(lays[15]["width"] - w0, 2 * shipmate.TABLE_W * shipmate.MAX_TABLES)
+
     def test_the_pier_gives_every_queued_hand_its_own_spot(self):
         today = dt.date.fromtimestamp(T0).isoformat()
         slot = {"group": "demo-app", "cap": 2, "taken": 2, "holders": ["H1", "H2"]}
@@ -1351,11 +1378,11 @@ class TestShip(unittest.TestCase):
         lay = shipmate.ship_layout(sc)
         bare = shipmate.ship_layout(shipmate.ship_scene(self.snap(agents)))
         spots = lay["pier"]
-        self.assertGreater(lay["x0"], bare["x0"])                        # the ship moves over to make room for the tavern
+        self.assertEqual(lay["x0"], bare["x0"])                          # the tavern reserves nothing west of the ship
         plank_foot = lay["plank"][1][0]
         tavern = [k for k in spots if k[0] in "CD"]
         self.assertEqual(len(tavern), shipmate.TABLE_SEATS * shipmate.MAX_TABLES + 3)
-        self.assertTrue(all(spots[k][0] + 12 < plank_foot for k in tavern))   # the tavern is ashore under the stern
+        self.assertTrue(all(spots[k][0] > plank_foot for k in tavern))        # the tavern is ashore, east of the gangplank
         self.assertEqual([len(h) for _x, h in lay["pier_more"]], [16 - shipmate.TABLE_SEATS * shipmate.MAX_TABLES])
         self.assertEqual({spots[k][2] for k in tavern}, {"cards", "cards-l", "stand", "drink"})
         # nobody stands on anybody: the same row never holds two sprites over the same pixels
