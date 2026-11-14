@@ -485,6 +485,28 @@ class TestBoardAndDetail(Base):
             self.assertEqual(len(fh.read().splitlines()), 1)                      # second read came from the cache
         self.assertIn("error", cache.get(self.cfg, "https://forge.example/o/r/-/merge_requests/3"))
 
+    def test_the_rail_reads_checks_in_the_background_and_never_waits(self):
+        cache = shipmate.ChecksCache()
+        url = "https://github.com/o/r/pull/9"
+        self.assertIsNone(cache.watch(self.cfg, url))                           # no read yet: nothing, at once
+        for _ in range(200):
+            if url not in cache.busy:
+                break
+            time.sleep(0.02)
+        got = cache.watch(self.cfg, url)
+        self.assertEqual(got["counts"], {"pass": 1, "fail": 1, "pending": 2, "skipped": 1})
+        self.assertEqual(shipmate.checks_verdict(got), "fail")
+        cache.get(self.cfg, url)
+        with open(os.path.join(self.fake, "gh.log")) as fh:
+            self.assertEqual(len(fh.read().splitlines()), 1)                    # one read serves the rail and the drawer
+        self.assertIsNone(cache.watch(self.cfg, "https://forge.example/o/r/-/merge_requests/3"))
+        verdict = shipmate.checks_verdict
+        self.assertEqual(verdict({"counts": {"pass": 3, "fail": 0, "pending": 0, "skipped": 1}}), "pass")
+        self.assertEqual(verdict({"counts": {"pass": 3, "fail": 0, "pending": 1, "skipped": 0}}), "pending")
+        self.assertIsNone(verdict({"counts": {"pass": 0, "fail": 0, "pending": 0, "skipped": 2}}))   # no check ran
+        self.assertIsNone(verdict({"error": "gh failed"}))
+        self.assertIsNone(verdict(None))
+
     def test_queue_detail_reads_the_full_item(self):
         rows, _ = shipmate.read_backlog(self.cfg)
         item = next(q for q in shipmate.queue_rows(self.cfg, rows) if q["id"] == "TASK-D")
@@ -1433,10 +1455,15 @@ class TestShip(unittest.TestCase):
         self.assertEqual(sorted(set(calls)), sorted(drawn))
 
     def test_motion_respects_reduced_motion(self):
-        css = shipmate.asset("shipmate.css")
-        start = css.index("@media (prefers-reduced-motion: no-preference)")
-        before = css[:start]
-        self.assertNotRegex(before, r"\banimation\s*:")                 # every animation sits behind the media query
+        css = re.sub(r"/\*.*?\*/", "", shipmate.asset("shipmate.css"), flags=re.S)
+        rules = re.findall(r"^([^{}@/][^{}]*)\{([^}]*)\}", css, re.M)
+        moving = [sel.strip() for sel, body in rules if re.search(r"\banimation(-duration)?\s*:", body)]
+        self.assertGreater(len(moving), 10)
+        self.assertEqual([m for m in moving if not m.startswith(".motion-all ")], [])   # every loop sits behind the switch
+        page = shipmate.asset("shipmate.html")
+        self.assertIn('matchMedia("(prefers-reduced-motion: reduce)")', page)            # which starts off for that reader
+        self.assertIn("data-motion", page)
+        self.assertRegex(page, r'if \(mode === "off" \|\| document\.hidden')        # and then no change plays either
 
     def test_demo_server_serves_the_page_ship_and_details(self):
         panel = shipmate.DemoPanel(0)
@@ -1459,7 +1486,15 @@ class TestShip(unittest.TestCase):
                 self.assertIn(h, page)
             self.assertNotIn("http://", page.replace("http://127.0.0.1", ""))
             st, ship = get("/ship")
-            self.assertEqual(set(json.loads(ship)), {"ship", "counts", "projects", "accounts", "stages", "log"})
+            self.assertEqual(set(json.loads(ship)), {"ship", "counts", "projects", "accounts", "stages", "log", "events"})
+            self.assertEqual(json.loads(ship)["events"], [])                                 # nothing to compare with
+            now = time.time()
+            other = shipmate.ship_print(shipmate.ship_scene(shipmate.demo_snapshot(now, moved=int(now // 30) % 2 == 0)))
+            other["at"] = int(now) - 5
+            st, moved = get("/ship?prev=" + urllib.parse.quote(json.dumps(other)))
+            self.assertEqual(st, 200)
+            self.assertTrue(json.loads(moved)["events"])                                    # the demo moved since
+            self.assertEqual(json.loads(get("/ship?prev=%7Bnot%20json")[1])["events"], [])
             st, det = get("/detail?id=DEMO-RATE")
             self.assertEqual(st, 200)
             self.assertIn("per user or per key?", det)
@@ -1482,6 +1517,135 @@ class TestShip(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+class TestMotion(unittest.TestCase):
+    """What changed between two readings of the ship, which the page plays once (ship_events)."""
+
+    def print_(self, at=T0, hands=None, queue=(), checks=None, context=50.0, compaction=None, night=False):
+        return {"at": at, "hands": dict(hands or {}), "queue": queue if isinstance(queue, dict) else {q: "pier" for q in queue},
+                "checks": dict(checks or {}),
+                "context": context, "compaction": compaction, "night": night}
+
+    def kinds(self, prev, cur):
+        return [(e["kind"], e.get("id")) for e in shipmate.ship_events(prev, cur)]
+
+    def test_nothing_plays_without_a_recent_earlier_reading(self):
+        cur = self.print_(hands={"A": "deck"})
+        self.assertEqual(shipmate.ship_events(None, cur), [])
+        self.assertEqual(shipmate.ship_events({}, cur), [])
+        old = self.print_(at=T0 - shipmate.PRINT_FRESH - 1, hands={"A": "nest"})
+        self.assertEqual(shipmate.ship_events(old, cur), [])                           # old news
+        self.assertEqual(shipmate.ship_events(self.print_(at=T0 + 5, hands={"A": "nest"}), cur), [])   # from later
+        self.assertEqual(self.kinds(self.print_(at=T0 - 30, hands={"A": "nest"}), cur), [("move", "A")])
+        junk = {"at": T0 - 30, "hands": ["A"], "queue": "A", "checks": 3, "context": "x", "night": "yes"}
+        self.assertEqual(shipmate.ship_events(junk, cur), [])                          # a print of the wrong shape plays nothing
+
+    def test_a_hand_walks_when_its_place_changes(self):
+        prev = self.print_(at=T0 - 30, hands={"A": "nest", "B": "deck", "C": "cabin", "D": "plank", "S": "out"},
+                           queue={"Q": "pier", "R": "pier", "C2": "cabin"})
+        cur = self.print_(hands={"A": "deck", "B": "cabin", "C": "bow", "D": "plank", "Q": "nest", "S": "back", "N": "deck"},
+                          queue=["R"])
+        ev = shipmate.ship_events(prev, cur)
+        self.assertEqual(ev, [{"kind": "board", "id": "Q", "from": "pier", "to": "nest"},
+                              {"kind": "move", "id": "A", "from": "nest", "to": "deck"},
+                              {"kind": "move", "id": "B", "from": "deck", "to": "cabin"},
+                              {"kind": "move", "id": "C", "from": "cabin", "to": "bow"}])
+        held = self.print_(at=T0 - 30, queue={"H": "cabin"})
+        self.assertEqual(shipmate.ship_events(held, self.print_(hands={"H": "nest"})),
+                         [{"kind": "board", "id": "H", "from": "cabin", "to": "nest"}])   # out of the cabin, not the pier
+        # a task that appears aboard without having been queued, and a scout's boat, do not walk
+        many = self.print_(at=T0 - 30, hands={"H%d" % i: "nest" for i in range(9)})
+        moved = self.print_(hands={"H%d" % i: "deck" for i in range(9)})
+        self.assertEqual(len(shipmate.ship_events(many, moved)), shipmate.EVENT_LIMITS["walk"])
+
+    def test_a_fish_or_a_boot_when_the_checks_at_the_rail_come_back(self):
+        prev = self.print_(at=T0 - 30, hands={"A": "rail", "B": "rail", "C": "rail", "D": "deck"},
+                           checks={"A": "pending", "B": "pending", "C": "pass"})
+        cur = self.print_(hands={"A": "rail", "B": "rail", "C": "rail", "D": "rail"},
+                          checks={"A": "pass", "B": "fail", "C": "pass", "D": "pass"})
+        self.assertEqual([(e["kind"], e.get("id"), e.get("result")) for e in shipmate.ship_events(prev, cur)],
+                         [("move", "D", None), ("checks", "A", "pass"), ("checks", "B", "fail")])
+        # still running, or no answer from gh: nothing
+        self.assertEqual(shipmate.ship_events(prev, self.print_(hands={"A": "rail"}, checks={"A": "pending"})), [])
+
+    def test_the_pump_works_only_for_a_new_compaction(self):
+        prev = self.print_(at=T0 - 30, context=72.0, compaction=T0 - 7 * 3600)
+        fresh = self.print_(context=19.0, compaction=T0 - 20)
+        self.assertEqual(shipmate.ship_events(prev, fresh), [{"kind": "pump", "from": 72.0, "to": 19.0}])
+        self.assertEqual(shipmate.ship_events(prev, self.print_(context=80.0, compaction=T0 - 20)), [])       # it grew
+        self.assertEqual(shipmate.ship_events(prev, self.print_(context=19.0, compaction=T0 - 7 * 3600)), [])  # same one
+        stale = self.print_(context=19.0, compaction=T0 - shipmate.PRINT_FRESH - 60)
+        self.assertEqual(shipmate.ship_events(self.print_(at=T0 - 30, context=72.0), stale), [])   # long ago, newly seen
+        self.assertEqual(shipmate.ship_events(self.print_(at=T0 - 30, context=None), fresh), [])
+
+    def test_the_lamps_are_lit_when_night_falls(self):
+        self.assertEqual(self.kinds(self.print_(at=T0 - 30, night=False), self.print_(night=True)), [("lights", None)])
+        self.assertEqual(self.kinds(self.print_(at=T0 - 30, night=True), self.print_(night=True)), [])
+        self.assertEqual(self.kinds(self.print_(at=T0 - 30, night=True), self.print_(night=False)), [])
+        prev = self.print_(at=T0 - 30)
+        del prev["night"]
+        self.assertEqual(self.kinds(prev, self.print_(night=True)), [])
+
+    def test_the_night_falls_and_lifts_in_steps(self):
+        def at(h, m):
+            return time.mktime((2026, 11, 13, h, m, 0, 0, 0, -1))
+        steps = [(12, 0, 0), (17, 30, 0), (17, 35, 1), (17, 50, 2), (18, 0, 3), (18, 25, 6), (23, 0, 6),
+                 (5, 30, 6), (5, 45, 5), (6, 0, 3), (6, 29, 1), (6, 30, 0)]
+        self.assertEqual([(h, m, shipmate.twilight(at(h, m))) for h, m, _k in steps], steps)
+        self.assertEqual([shipmate.is_night(at(h, m)) for h, m in ((17, 59), (18, 0), (5, 59), (6, 0))],
+                         [False, True, True, False])                                   # the lamps keep their hours
+        noon = shipmate.render_ship(shipmate.ship_scene(shipmate.demo_snapshot(at(12, 0))))
+        dusk = shipmate.render_ship(shipmate.ship_scene(shipmate.demo_snapshot(at(17, 45))))
+        night = shipmate.render_ship(shipmate.ship_scene(shipmate.demo_snapshot(at(22, 0))))
+        self.assertNotIn("sm-shade", noon)
+        self.assertIn('class="sm-shade" opacity="0.127"', dusk)
+        self.assertIn('class="sm-shade" opacity="0.380"', night)
+        self.assertNotIn("is-night", dusk)
+        self.assertIn("is-night", night)
+
+    def test_the_demo_moves_and_each_change_comes_with_its_frames(self):
+        now = T0
+        a = shipmate.ship_scene(shipmate.demo_snapshot(now))
+        b_snap = shipmate.demo_snapshot(now + 30, moved=True)
+        b = shipmate.ship_scene(b_snap)
+        ev = shipmate.block_ship(b_snap, shipmate.ship_print(a))["events"]
+        self.assertEqual([(e["kind"], e.get("id")) for e in ev],
+                         [("board", "DEMO-Q-THEME"), ("move", "DEMO-EXPORT"), ("move", "DEMO-NAV"), ("move", "DEMO-SEARCH"),
+                          ("checks", "DEMO-FORMS"), ("checks", "DEMO-LOGS"), ("pump", None)])
+        frames = {(e["kind"], e.get("id")): e["frames"] for e in ev}
+        self.assertTrue(set(shipmate.WALK_POSES) | {"ashore-stand", "ashore-walk"} <= set(frames[("board", "DEMO-Q-THEME")]))
+        self.assertIn("alarm", frames[("move", "DEMO-NAV")])                            # the red flag on the way to the cabin
+        self.assertIn("answered", frames[("move", "DEMO-EXPORT")])                      # the answer on the way out
+        self.assertEqual(set(frames[("checks", "DEMO-LOGS")]), {"fish", "reel", "catch"})
+        self.assertIn("jet", frames[("pump", None)])
+        for f in frames.values():
+            for svg in f.values():
+                self.assertTrue(svg.startswith("<g>") and "<path" in svg)
+        # the drawing it plays over: the bucket at the rail, the pump, every hand's anchor
+        drawn = shipmate.render_ship(b)
+        self.assertIn('class="sm-bucket" data-for="DEMO-LOGS"', drawn)
+        self.assertNotIn('data-for="DEMO-FORMS"><title>DEMO-FORMS: every', drawn)
+        self.assertIn('class="sm-pump__down" visibility="hidden"', drawn)
+        lay = shipmate.ship_layout(b)
+        for hid, (x, feet, pose, _u) in lay["hands"].items():
+            self.assertIn('data-id="%s" data-stage="' % hid, drawn)
+            self.assertRegex(drawn, r'data-id="%s" data-stage="[^"]*" data-at="%d,%d"' % (hid, x + shipmate.pose_left(pose), feet))
+        printed = json.loads(html.unescape(re.search(r'data-print="([^"]*)"', drawn).group(1)))
+        self.assertEqual(printed, json.loads(json.dumps(shipmate.ship_print(b))))
+        geo = json.loads(html.unescape(re.search(r'data-geo="([^"]*)"', drawn).group(1)))
+        self.assertEqual(set(geo), {"ladder", "walk", "deck_x", "nest", "door", "floor", "fc", "plank", "pier", "stern", "wl",
+                                    "rod", "reel", "hold", "pump"})
+        # and back: the changes the other way walk too, but nobody boards and no pump works
+        back = shipmate.ship_events(shipmate.ship_print(b), dict(shipmate.ship_print(a), at=now + 60))
+        self.assertEqual([e["kind"] for e in back], ["move", "move", "move"])
+
+    def test_a_pose_puts_the_body_where_the_frames_expect_it(self):
+        self.assertEqual([shipmate.pose_left(p) for p in ("stand", "hammer", "hammer-l", "signal", "signal-l", "pack", "walk-l")],
+                         [0, 0, 4, 5, 5, 4, 2])
+        for pose in shipmate.WALK_POSES:
+            rows = shipmate.POSES[pose]
+            self.assertEqual(len(rows), 21, pose)                                      # same height: feet stay on the deck
+
 
 class TestLanguage(unittest.TestCase):
     """--lang pt-BR (or SHIPMATE_LANG) shows the interface in Brazilian Portuguese."""
@@ -1508,6 +1672,7 @@ class TestLanguage(unittest.TestCase):
         phrases |= set(shipmate.PLACE_TEXT.values()) | set(shipmate.LANE_NAMES) | set(shipmate.SHIP_PHASES)
         phrases |= set(shipmate.SCOUT_PHASES) | set(shipmate.CREW_TONE) | set(shipmate.CLASSES) | {"unknown", "inferred", "configured"}
         phrases |= {label for _mark, label in shipmate.ANSWER_PILLS.values()} | set(shipmate.ANSWER_MESSAGES.values())
+        phrases |= set(shipmate.CHECKS_TEXT.values())
         phrases |= set(m[1] for m in shipmate.RE_PHRASE.findall(shipmate.asset("shipmate.html")))
         phrases = {p.replace('\\"', '"') for p in phrases if p}
         self.assertGreater(len(phrases), 150)

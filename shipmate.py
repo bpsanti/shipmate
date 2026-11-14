@@ -47,6 +47,7 @@ import glob
 import hmac
 import html
 import json
+import math
 import os
 import random
 import re
@@ -1299,29 +1300,68 @@ def summarize_checks(doc):
             "error": None}
 
 
+RE_GITHUB_PR = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+$")
+
+
+def checks_verdict(summary):
+    """One word for a PR's checks, for the hand fishing at the rail: pass when every check that ran
+    passed, fail when one failed, pending while one runs; None when there are none or no answer."""
+    if not summary or summary.get("error"):
+        return None
+    counts = summary.get("counts") or {}
+    if counts.get("fail"):
+        return "fail"
+    if counts.get("pending"):
+        return "pending"
+    return "pass" if counts.get("pass") else None
+
+
 class ChecksCache:
-    """PR state and checks, read from the forge only when a detail is opened, at most every CHECKS_TTL s."""
+    """PR state and checks, read from the forge at most every CHECKS_TTL s per PR: when a detail is
+    opened (get), and for the hands waiting for CI (watch), which never waits for the forge."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.data = {}
+        self.busy = set()                    # PRs being read in the background now
+
+    def read(self, cfg, url):
+        now, val = time.time(), {"error": "unreadable answer from gh"}
+        try:
+            rc, out, err = run([cfg.gh_cmd, "pr", "view", url, "--json", "state,isDraft,statusCheckRollup"], timeout=20)
+            val = summarize_checks(json.loads(out)) if rc == 0 else {"error": (err or out).strip()[:200] or "exit %d" % rc}
+        except (ValueError, AttributeError, OSError):
+            pass
+        finally:                                 # the answer lands with the read marked done, together
+            with self.lock:
+                self.data[url] = (now, val)
+                self.busy.discard(url)
+        return val
 
     def get(self, cfg, url):
-        if not re.match(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/\d+$", url or ""):
+        if not RE_GITHUB_PR.match(url or ""):
             return {"error": "checks are only read for GitHub pull requests"}
         now = time.time()
         with self.lock:
             hit = self.data.get(url)
             if hit and now - hit[0] < CHECKS_TTL:
                 return dict(hit[1], age=int(now - hit[0]))
-        rc, out, err = run([cfg.gh_cmd, "pr", "view", url, "--json", "state,isDraft,statusCheckRollup"], timeout=20)
-        try:
-            val = summarize_checks(json.loads(out)) if rc == 0 else {"error": (err or out).strip()[:200] or "exit %d" % rc}
-        except (ValueError, AttributeError):
-            val = {"error": "unreadable answer from gh"}
+        return dict(self.read(cfg, url), age=0)
+
+    def watch(self, cfg, url):
+        """The latest read of a PR's checks, at once: when it is missing or older than CHECKS_TTL, a
+        new read starts in the background and a later snapshot sees it. None until a first read."""
+        if not RE_GITHUB_PR.match(url or ""):
+            return None
+        now = time.time()
         with self.lock:
-            self.data[url] = (now, val)
-        return dict(val, age=0)
+            hit = self.data.get(url)
+            start = (not hit or now - hit[0] >= CHECKS_TTL) and url not in self.busy
+            if start:
+                self.busy.add(url)
+        if start:
+            threading.Thread(target=self.read, args=(cfg, url), daemon=True).start()
+        return dict(hit[1], age=int(now - hit[0])) if hit else None
 
 
 # ---------------------------------------------------------------- snapshot and the add form
@@ -1381,6 +1421,9 @@ class Panel:
                 "delivered": delivered(self.cfg, self.index, by_id, now),
                 "machine": machine_load(),
             }
+            for a in snap["agents"]:                       # the hands fishing at the rail: their PR's checks
+                waits_ci = a["kind"] == "ship" and a["phase"] == SHIP_PHASES.index("waiting for CI") and a["pr"]
+                a["checks"] = checks_verdict(self.checks.watch(self.cfg, a["pr"])) if waits_ci else None
             snap["answers"], snap["answers_error"] = self.inbox.get(self.cfg)
             snap["quota"] = quota.result()
             self.last = snap
@@ -1644,6 +1687,9 @@ PT_BR = {
     "%d wait on my word. The longest, %s, has waited %s.": "%d esperam a minha palavra. O mais antigo, %s, espera há %s.",
     "queued, %s": "na fila, %s", "All clear. Nothing waits on my word.": "Tudo em ordem. Nada espera a minha palavra.",
     "Nobody is waiting for you.": "Ninguém está esperando você.", "Captain": "Capitão",
+    "%s: every check on the PR passed": "%s: todos os checks da PR passaram",
+    "the bilge pump: it works when firstmate's context is compacted": "a bomba do porão: trabalha quando o contexto do firstmate é compactado",
+    "every check passed": "todos os checks passaram", "a check failed": "um check falhou", "checks running": "checks rodando",
 }
 
 # the page template's own phrases ({{t:...}} and {{j:...}} in shipmate.html)
@@ -1674,15 +1720,23 @@ PT_BR.update({
         "lista todos. O capitão atende à mesa, ou senta com uma caneca quando ninguém espera.",
     "Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.":
         "Barris no porão: a cota de cada conta, em âmbar o que resta, em vermelho quando acaba antes de renovar.",
-    "Water in the hold: firstmate's context, the white line its warning threshold.":
-        "Água no porão: o contexto do firstmate, a linha branca é o limite de aviso.",
+    "Water in the hold: firstmate's context, the white line its warning threshold; the pump works when the context is compacted.":
+        "Água no porão: o contexto do firstmate, a linha branca é o limite de aviso; a bomba trabalha quando o contexto é compactado.",
+    "A bucket with a fish beside a hand at the rail: every check on its PR passed.":
+        "Um balde com peixe ao lado de um marujo na amurada: todos os checks da PR dele passaram.",
+    "When a hand changes place between two refreshes, it walks there; the motion button sets how much moves.":
+        "Quando um marujo muda de lugar entre duas atualizações, ele anda até lá; o botão de movimento diz quanto se mexe.",
+    "How much the ship moves: all, changes only, or nothing": "Quanto o navio se mexe: tudo, só as mudanças ou nada",
+    "motion: all": "movimento: tudo", "motion: changes only": "movimento: só mudanças", "motion: off": "movimento: parado",
     "Scouts row out to the horizon, back with the map, and moor at the pier with it.":
         "Os batedores remam até o horizonte, voltam com o mapa e atracam no cais com ele.",
     "On the pier, the queue: cards or a mug at the tavern while it waits for a free slot, a sea bag at the gangplank when nothing holds it, talking up to the hand it waits for, asleep until its date.":
         "No cais, a fila: cartas ou uma caneca na taverna enquanto espera uma vaga livre, a bolsa ao pé da prancha quando "
         "nada a segura, conversando com o marujo que ela espera, dormindo até a data.",
     "Crates: tasks delivered in the last 7 days.": "Caixotes: tarefas entregues nos últimos 7 dias.",
-    "The sky follows the local time, the sea the machine's load.": "O céu segue a hora local, o mar a carga da máquina.",
+    "The sky follows the local time, darkening over the hour around 18:00 and lightening around 06:00, and the sea the machine's load.":
+        "O céu segue a hora local, escurecendo ao longo da hora em volta das 18:00 e clareando em volta das 06:00, e o mar a "
+        "carga da máquina.",
     "Usage": "Uso", "per day and per delivered task": "por dia e por tarefa entregue",
     "Firstmate session and accounts": "Sessão do firstmate e contas", "Firstmate session": "Sessão do firstmate",
     "Accounts and quota": "Contas e cota", "Details": "Detalhes", "Close": "Fechar",
@@ -2362,6 +2416,8 @@ SEA_LOAD = (0.6, 1.0)                              # load per CPU where the sea 
 OFF_DUTY_AFTER = 20 * 60                           # seconds without activity before an idle hand rests
 OFF_DUTY_PLACES = {"nest", "deck", "bow", "hatch"}  # waiting for CI or to go ashore is the job itself
 DAY_HOURS = (6, 18)                                # local hours of daylight in the picture
+TWILIGHT = 30 * 60                                 # either side of those hours the light changes ...
+TWILIGHT_STEPS = 6                                 # ... in this many steps, one every ten minutes
 MAX_CRATES = 12
 NEST_SEATS = 6
 # strong project colours, none of them the red that marks a red flag
@@ -2422,6 +2478,23 @@ def sea_state(machine):
 def is_night(now):
     h = dt.datetime.fromtimestamp(now).hour
     return not (DAY_HOURS[0] <= h < DAY_HOURS[1])
+
+
+def twilight(now):
+    """How dark the picture is, from 0 (day) to TWILIGHT_STEPS (night): the night falls one step
+    every ten minutes over the hour around DAY_HOURS[1] and lifts the same way around DAY_HOURS[0],
+    so each refresh across dusk or dawn is a shade darker or lighter. The lamps follow is_night."""
+    t = dt.datetime.fromtimestamp(now)
+    sec = t.hour * 3600 + t.minute * 60 + t.second
+    step = 2.0 * TWILIGHT / TWILIGHT_STEPS
+    dawn, dusk = DAY_HOURS[0] * 3600, DAY_HOURS[1] * 3600
+    if dusk - TWILIGHT <= sec < dusk + TWILIGHT:
+        k = math.ceil((sec - (dusk - TWILIGHT)) / step)
+    elif dawn - TWILIGHT <= sec < dawn + TWILIGHT:
+        k = math.ceil((dawn + TWILIGHT - sec) / step)
+    else:
+        k = 0 if dawn + TWILIGHT <= sec < dusk - TWILIGHT else TWILIGHT_STEPS
+    return max(0, min(TWILIGHT_STEPS, k))
 
 
 def off_duty(a, place, flagged, now):
@@ -2489,6 +2562,7 @@ def ship_scene(s):
              "account": a.get("account") or "", "neck": necks.get(a.get("account") or ""),
              "phase": tr(phases[ph] if ph is not None and ph < len(phases) else "unknown")}
         h["off"] = off_duty(a, place, h["flag"], now)
+        h["checks"] = a.get("checks") if place == "rail" else None
         h["since"] = agent_waiting_since(a) if h["flag"] else None
         h["exact"] = True
         (scouts if scout else hands).append(h)
@@ -2541,13 +2615,15 @@ def ship_scene(s):
         elif q["act"] == "doze":
             q["tag"] = "%s · %s" % (q["id"], q["until"])
     return {
+        "now": now,
         "line": line, "captain": {"busy": bool(line), "waiting": len(line), "oldest": line[0] if line else None},
         "hands": hands, "scouts": scouts, "queue": queue, "pier": pier, "crates": crates, "barrels": barrels,
         "firstmate": {"context": pct, "warn_at": warn, "over": pct is not None and pct >= warn,
-                      "tokens": fm.get("context"), "limit": fm.get("limit"), "known": bool(fm)},
+                      "tokens": fm.get("context"), "limit": fm.get("limit"), "known": bool(fm),
+                      "compaction": (fm.get("last_compaction") or {}).get("at")},
         "colors": {p: c for p, c in colors.items() if p in used},
         "accounts": {a: c for a, c in necks.items() if a in {h["account"] for h in hands + scouts}},
-        "sea": sea_state(s.get("machine")), "night": is_night(now),
+        "sea": sea_state(s.get("machine")), "night": is_night(now), "dark": twilight(now) / float(TWILIGHT_STEPS),
         "flags": sum(h["flag"] for h in hands + scouts) + sum(q["flag"] for q in queue),
         "off": sum(h["off"] for h in hands),
     }
@@ -2562,6 +2638,157 @@ def ship_counts(sc):
         parts.append(tr("%d off duty") % sc["off"])
     parts.append(tr("%d in the queue") % len(sc["queue"]))
     return " · ".join(parts)
+
+
+# -- motion: what changed between two readings of the ship, for the page to play once
+#
+# The ship drawn for a reading carries its print (data-print): where each hand stood, the queue,
+# the rail's checks, firstmate's last compaction and whether the lamps were lit. The page sends the
+# print of the drawing it shows when it asks for the next one, and ship_events compares the two.
+# Every animation has one detector here and one player in the page's script, keyed by its kind,
+# so an animation is added or taken out in those two places.
+
+PRINT_FRESH = 3 * REFRESH_SECONDS   # an older print plays nothing: what changed since is old news
+MAX_PRINT = 64 * 1024
+WALK_PLACES = set(PLACES) | {"hatch", "cabin"}   # where a hand aboard can walk from and to
+
+
+def ship_print(sc):
+    """What the next reading is compared with: each hand aboard by its place (the cabin when it
+    waits there), each queued task by where it waits (the cabin or the pier), the rail's checks,
+    firstmate's context and last compaction, and whether the lamps are lit."""
+    fm = sc["firstmate"]
+    return {"at": int(sc["now"]), "hands": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["hands"]},
+            "queue": {q["id"]: "cabin" if q["line"] else "pier" for q in sc["queue"]},
+            "checks": {h["id"]: h["checks"] for h in sc["hands"] if h.get("checks")},
+            "context": fm["context"], "compaction": fm["compaction"], "night": sc["night"]}
+
+
+def parse_print(text):
+    """The print the page sent back, or None when it is missing, too long or not one."""
+    if not text or len(text) > MAX_PRINT:
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _strings(doc, key, kind):
+    """A field of a print sent back by the page, kept only when it has the expected shape."""
+    v = doc.get(key)
+    if kind is dict:
+        return {k: x for k, x in v.items() if isinstance(k, str) and isinstance(x, str)} if isinstance(v, dict) else {}
+    return {x for x in v if isinstance(x, str)} if isinstance(v, list) else set()
+
+
+def _number(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def board_events(prev, cur):
+    """A queued task that firstmate dispatched: it walks up the gangplank to its place, or out of
+    the cabin when it waited there for the captain."""
+    was_queued, was_aboard = _strings(prev, "queue", dict), _strings(prev, "hands", dict)
+    return [{"kind": "board", "id": i, "from": "cabin" if was_queued[i] == "cabin" else "pier", "to": p}
+            for i, p in sorted(cur["hands"].items()) if i in was_queued and i not in was_aboard and p in WALK_PLACES]
+
+
+def move_events(prev, cur):
+    """A hand whose place changed: a new phase, a red flag that takes it to the cabin, or the
+    decision answered that brings it back."""
+    was = _strings(prev, "hands", dict)
+    return [{"kind": "move", "id": i, "from": was[i], "to": p} for i, p in sorted(cur["hands"].items())
+            if i in was and was[i] != p and was[i] in WALK_PLACES and p in WALK_PLACES]
+
+
+def checks_events(prev, cur):
+    """A hand at the rail whose PR's checks have just all passed (a fish) or failed (a boot)."""
+    was_at, was = _strings(prev, "hands", dict), _strings(prev, "checks", dict)
+    return [{"kind": "checks", "id": i, "result": r} for i, r in sorted(cur["checks"].items())
+            if r in ("pass", "fail") and was.get(i) != r and cur["hands"].get(i) == "rail" and was_at.get(i) == "rail"]
+
+
+def pump_events(prev, cur):
+    """firstmate's context was compacted since the last reading: the bilge is pumped down."""
+    at, before, after = _number(cur["compaction"]), _number(prev.get("context")), _number(cur["context"])
+    if at is None or before is None or after is None or after >= before:
+        return []
+    last = _number(prev.get("compaction"))
+    if (last is not None and at <= last) or cur["at"] - at > PRINT_FRESH:
+        return []
+    return [{"kind": "pump", "from": before, "to": after}]
+
+
+def lights_events(prev, cur):
+    """Night came since the last reading: the lamps are lit one by one."""
+    return [{"kind": "lights"}] if cur["night"] and prev.get("night") is False else []
+
+
+# each detector with the group it counts in; past a group's limit the rest of a refresh's changes
+# just show in their new places, so a busy refresh never fills the ship with walkers
+EVENT_DETECTORS = ((board_events, "walk"), (move_events, "walk"), (checks_events, "checks"),
+                   (pump_events, "pump"), (lights_events, "lights"))
+EVENT_LIMITS = {"walk": 4, "checks": 3, "pump": 1, "lights": 1}
+
+
+def ship_events(prev, cur):
+    """The animations to play for the change from print prev to print cur, each once and at most
+    EVENT_LIMITS of a group; none when there is no earlier print, or it is older than PRINT_FRESH
+    or from later."""
+    if not isinstance(prev, dict):
+        return []
+    at = _number(prev.get("at"))
+    if at is None or not 0 <= cur["at"] - at <= PRINT_FRESH:
+        return []
+    out, used = [], {}
+    for detect, group in EVENT_DETECTORS:
+        for ev in detect(prev, cur):
+            if used.get(group, 0) < EVENT_LIMITS[group]:
+                used[group] = used.get(group, 0) + 1
+                out.append(ev)
+    return out
+
+
+WALK_POSES = ("walk", "walk-l", "stand", "stand-l", "climb", "climb2")
+
+
+def event_sprites(ev, sc):
+    """The frames the page needs to play one event, drawn here like every other sprite: the hand
+    that walks (ashore in its straw hat first when it boards), the flag it waves on its way to the
+    cabin, the bent rod and the catch, the pump's jet."""
+    hand = next((h for h in sc["hands"] if h["id"] == ev.get("id")), None)
+    f = {}
+    if ev["kind"] in ("move", "board") and hand:
+        f.update({k: hand_frame(hand, k) for k in WALK_POSES})
+        if ev["kind"] == "board" and ev.get("from") == "pier":
+            ashore = dict(hand, kind="queue", neck=None, flag=False, off=False)
+            f.update({"ashore-" + k: hand_frame(ashore, k) for k in ("walk", "walk-l", "stand", "stand-l")})
+        if hand["flag"] and ev.get("to") == "cabin":
+            f["alarm"] = hand_frame(hand, "wave", flag=True)
+        if ev.get("from") == "cabin" and not hand["flag"]:
+            p = Pix()
+            p.rect(-1, -1, 9, 9, "#1d140c")
+            p.rect(0, 0, 7, 7, "#3fa34d")
+            for x, y in ((1, 3), (2, 4), (3, 5), (4, 4), (5, 3), (5, 2), (6, 1)):
+                p.dot(x, y, "#ffffff")
+            f["answered"] = p.svg()
+    elif ev["kind"] == "checks" and hand:
+        f["fish"] = hand_frame(hand, "fish", line_to=WL + 10 - (NEAR + 2))
+        f["reel"] = hand_frame(hand, "reel", line_to=WL + 10 - (NEAR + 2))
+        p = Pix()
+        if ev["result"] == "pass":
+            p.shaded(0, 0, FISH, FISH_INK)
+        else:
+            p.shaded(0, 0, BOOT, {})
+        f["catch"] = p.svg()
+    elif ev["kind"] == "pump":
+        p = Pix()
+        for x in range(0, 22, 2):
+            p.rect(-x - 2, int(0.06 * x * x), 2, 1, "#9ad0ee")
+        f["jet"] = p.svg()
+    return dict(ev, frames=f)
 
 
 # -- layout, in art pixels: the ship grows with its crew so nobody stands on anybody
@@ -2597,6 +2824,9 @@ DOZE_STEP = 26
 TALK_W = 22           # a hand talking up to the one it waits for
 PIER_FEET = PIER + 8  # where a hand on the pier stands
 TAVERN_FROM = 42      # from the stern post to the first lantern of the tavern: just right of the gangplank's foot
+DECK_WALK = 190       # the feet of a hand walking along the main deck from one place to another
+BOW_WALK = 168        # and along the forecastle
+PUMP_FROM_END = 84    # the bilge pump stands this far from the hold's forward end, clear of the chart table
 
 
 def sign_w(text):
@@ -2925,13 +3155,25 @@ POSES = {
                                       (6, 5, "E"), (9, 5, "E"), (6, 4, "E"), (9, 4, "E"), (6, 6, "s"), (9, 6, "s")], clear=ARM_R),
     # asleep sitting up, eyes shut
     "doze": seated(15, [(6, 5, "s"), (9, 5, "s"), (5, 6, "E"), (6, 6, "E"), (9, 6, "E"), (10, 6, "E")]),
+    # on the move between places (ship_events): a stride, the two holds of climbing the ladder, an
+    # arm waving the red flag on the way to the cabin, and the rod bent by a bite at the rail
+    "walk": build_pose(15, 21, 0, 0, STRIDE, clear=LEGS),
+    "climb": build_pose(13, 21, 0, 0, [(2, 10, "c"), (1, 9, "c"), (1, 8, "s"), (1, 7, "s")]
+                        + [(11, 11, "c"), (11, 12, "c"), (11, 13, "c"), (11, 14, "s")], clear=ARM_L),
+    "climb2": build_pose(13, 21, 0, 0, [(11, 10, "c"), (12, 9, "c"), (12, 8, "s"), (12, 7, "s")]
+                         + [(2, 11, "c"), (2, 12, "c"), (2, 13, "c"), (2, 14, "s")], clear=ARM_R),
+    "wave": build_pose(14, 21, 0, 0, [(11, 11, "c"), (12, 10, "c"), (12, 9, "c"), (13, 8, "s"), (13, 7, "s")], clear=ARM_R),
+    "reel": build_pose(26, 21, 0, 0, [(11, 13, "s"), (12, 13, "s")] + [(x, y, "o") for x, y in line_points(13, 13, 22, 4)]
+                       + [(x, y, "o") for x, y in line_points(22, 4, 25, 6)], clear=[(11, 14), (11, 15)]),
 }
 # the same poses facing left, for the line in the captain's cabin and across a card table
 POSES.update({k + "-l": [r[::-1] for r in v] for k, v in list(POSES.items())})
 # where each pose puts STAND's top left corner, so the hat, the name tag and the flag find the head
-POSE_HEAD = {"stand": (0, 0), "spy": (0, 0), "hammer": (0, 5), "signal": (5, 5), "fish": (0, 0), "pack": (4, 0),
+POSE_HEAD = {"walk": (0, 0), "climb": (0, 0), "climb2": (0, 0), "wave": (0, 0), "reel": (0, 0),
+             "stand": (0, 0), "spy": (0, 0), "hammer": (0, 5), "signal": (5, 5), "fish": (0, 0), "pack": (4, 0),
              "scroll": (0, 0), "rest": (0, 2), "cards": (0, 2), "drink": (0, 2), "talk": (0, 0), "doze": (0, 2)}
 ROD_TIP = (25, 0)     # the fishing rod's tip in the fish pose, where the line hangs from
+REEL_TIP = (25, 6)    # and in the reel pose, bent by a bite
 
 # The hat tells the hand's state: the bandana at work, a straw hat when not working (off duty, or
 # queued ashore), bare-headed before the captain, a grey wool cap when its phase is unknown. Each
@@ -3258,6 +3500,71 @@ def hand_sprite(p, h, x, feet, pose, upto=None):
     return rows, top, (x + cx, top + oy)
 
 
+def pose_left(pose):
+    """Where a pose puts the hand's body (STAND's left edge), from the sprite's own left edge."""
+    base = pose.split("-")[0]
+    ox = POSE_HEAD[base][0]
+    return len(POSES[base][0]) - len(STAND[0]) - ox if pose.endswith("-l") else ox
+
+
+def fishing_line(p, x, top, bottom):
+    """The line from a rod's tip at (x, top) down to its float on the water at bottom."""
+    p.line(x, top, x, bottom, "#f2f5f8")
+    p.rect(x - 1, bottom - 1, 3, 3, "#f6f1e3")
+
+
+def hand_frame(h, pose, flag=False, line_to=None):
+    """One frame of hand h for the page's script to move about: its body's left edge at x 0 and its
+    feet on row 0, with the red flag over it, or the fishing line down to line_to rows below."""
+    p = Pix()
+    _rows, top, (cx, head) = hand_sprite(p, h, -pose_left(pose), 0, pose)
+    if flag:
+        red_flag(p, cx - 8, head - 10)
+    if line_to is not None:
+        tip = REEL_TIP if pose.split("-")[0] == "reel" else ROD_TIP
+        fishing_line(p, tip[0] - pose_left(pose), top + tip[1] + 1, line_to)
+    return p.svg()
+
+
+BUCKET = ["GGGGG", "GoooG", ".GGG."]
+FISH = ["..lll..l", ".lllllll", "lklllll.", ".lllllll", "..lll..l"]
+BOOT = ["oooo..", "oooo..", "oooo..", "oooooo", "OOOOOO"]
+FISH_INK = {"l": "#bcd2dc", "k": "#1d140c"}
+
+
+def bucket_svg(h, x, feet):
+    """The bucket beside a hand at the rail whose PR's checks all passed, a fish in it."""
+    p = Pix()
+    p.shaded(x, feet - 2, BUCKET, {})
+    p.rect(x + 1, feet - 4, 2, 2, FISH_INK["l"])
+    p.dot(x + 3, feet - 5, FISH_INK["l"])
+    return '<g class="sm-bucket" data-for="%s"><title>%s</title>%s</g>' % (
+        esc(h["id"]), esc(tr("%s: every check on the PR passed") % h["id"]), p.svg())
+
+
+def draw_pump(x, floor, top, bottom, stern):
+    """The bilge pump on the orlop: a pipe down into the bilge, one along the hold out through the
+    stern, and its handle up; the handle's other stroke is drawn hidden for the page's script, which
+    works it when firstmate's context is compacted."""
+    p = Pix()
+    p.rect(x + 1, floor, 1, bottom - floor, "#6b3a1c")
+    p.rect(stern + 1, top + 3, x - stern, 2, "#a06a32")
+    p.rect(stern + 1, top + 3, x - stern, 1, "#c08a55")
+    p.rect(x, top + 3, 3, floor - top - 3, "#c08a55")
+    p.rect(x, top + 3, 1, floor - top - 3, "#e0aa72")
+    p.rect(x, floor - 9, 3, 1, "#e0b552")
+    p.rect(x - 3, floor - 2, 9, 2, "#e0b552")
+    up, down = Pix(), Pix()
+    up.line(x + 1, top + 4, x + 10, top, "#f0d38c")
+    down.line(x + 1, top + 4, x + 10, top + 8, "#f0d38c")
+    return ('<g class="sm-pump"><title>%s</title>%s%s%s</g>'
+            % (esc(tr("the bilge pump: it works when firstmate's context is compacted")), p.svg(),
+               up.svg(' class="sm-pump__up"'), down.svg(' class="sm-pump__down" visibility="hidden"')))
+
+
+CHECKS_TEXT = {"pass": "every check passed", "fail": "a check failed", "pending": "checks running"}
+
+
 def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
     """One clickable hand at its spot, with its flag, its rest marks, and its name tag (shown only
     on hover or focus with hover_tag)."""
@@ -3284,10 +3591,13 @@ def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
         title += " · %s%s" % (", ".join(h["why"]), (" · " + h["title"]) if h.get("title") else "")
     if h.get("line"):
         title += tr("; number %d in line for the captain, waiting %s") % (h["line"], h["wait"])
+    if h.get("checks"):
+        title += "; " + tr(CHECKS_TEXT[h["checks"]])
     stage = h.get("stage") or ("scouts" if h.get("kind") == "scout" else h["place"])
-    return ('%s<g class="sm-hand pose-%s%s" data-id="%s" data-stage="%s"%s tabindex="0" role="button" aria-label="%s"><title>%s</title>%s%s</g>'
+    return ('%s<g class="sm-hand pose-%s%s" data-id="%s" data-stage="%s" data-at="%d,%d"%s tabindex="0" role="button" aria-label="%s">'
+            '<title>%s</title>%s%s</g>'
             % (shadow(cx, feet + 1, 16) if shadow_on else "", base, " has-flag" if h["flag"] else "", esc(h["id"]), stage,
-               ' data-off="1"' if h["off"] else "", esc(tr("%s: details") % title), esc(title), p.svg(), flag))
+               x + pose_left(pose), feet, ' data-off="1"' if h["off"] else "", esc(tr("%s: details") % title), esc(title), p.svg(), flag))
 
 
 def boat_pix(x, wl):
@@ -3319,12 +3629,18 @@ def sail(x0, x1, y0, y1, colors, belly=4):
     return p.svg()
 
 
-def sky_and_sea(w, night, sea, rnd):
+DAY_SKY = ["#6fb3e0", "#78b9e4", "#83c0e8", "#8fc8ec", "#9dd0ee", "#b3dcf2"]
+NIGHT_SKY = ["#0d1631", "#111c3b", "#152244", "#1a294d", "#203157", "#283a60"]
+
+
+def sky_and_sea(w, dusk, night, sea, rnd):
+    """The sky, the hills and the sea behind the ship, `dusk` of the way from day (0) to night (1);
+    the stars and the moon come out with the night (is_night)."""
+    def tint(day, nite):
+        return mix(day, nite, dusk)
     far, mid = [], []
-    sky = (["#0d1631", "#111c3b", "#152244", "#1a294d", "#203157", "#283a60"] if night else
-           ["#6fb3e0", "#78b9e4", "#83c0e8", "#8fc8ec", "#9dd0ee", "#b3dcf2"])
-    for i, c in enumerate(sky):
-        far.append(band(-300, HOR * i // 6, w + 600, HOR * (i + 1) // 6, c))
+    for i, (d, n) in enumerate(zip(DAY_SKY, NIGHT_SKY)):
+        far.append(band(-300, HOR * i // 6, w + 600, HOR * (i + 1) // 6, tint(d, n)))
     deco = Pix()
     if night:
         for _ in range(w // 6):
@@ -3337,23 +3653,23 @@ def sky_and_sea(w, night, sea, rnd):
         for y in range(-8, 9):
             for x in range(-8, 9):
                 if x * x + y * y <= 64:
-                    deco.dot(w - 90 + x, 22 + y, "#fff1b8" if x * x + y * y < 40 else "#ffe58a")
+                    deco.dot(w - 90 + x, 22 + y, tint("#fff1b8", "#f2a35a") if x * x + y * y < 40 else tint("#ffe58a", "#d9783a"))
     clouds = Pix()
     for cx, cy in ((40, 14), (250, 30), (470, 10), (690, 26), (910, 16), (1130, 30)):
         if cx > w + 100:
             break
         for dx, dy, ww in ((6, 0, 14), (0, 4, 30), (3, 8, 26)):
-            clouds.rect(cx + dx, cy + dy, ww, 4, "#3a4a72" if night else "#fbfdff")
-        clouds.rect(cx + 3, cy + 12, 26, 1, "#2c3a5e" if night else "#dfeef7")
+            clouds.rect(cx + dx, cy + dy, ww, 4, tint("#fbfdff", "#3a4a72"))
+        clouds.rect(cx + 3, cy + 12, 26, 1, tint("#dfeef7", "#2c3a5e"))
     hills = Pix()
-    hc = ("#2a3b5c", "#304466", "#22314f") if night else ("#8fb7c9", "#9ec2d2", "#7aa6bb")
+    hc = [tint(d, n) for d, n in zip(("#8fb7c9", "#9ec2d2", "#7aa6bb"), ("#2a3b5c", "#304466", "#22314f"))]
     for x in range(-300, w + 300):
         hgt = int(9 + 8 * abs(((x * 7) % 130) - 65) / 65.0 + 4 * ((x // 37) % 2))
         hills.rect(x, HOR - hgt, 1, hgt, hc[0] if x % 210 < 130 else hc[1])
         hgt = int(4 + 4 * abs(((x * 5 + 40) % 100) - 50) / 50.0)
         hills.rect(x, HOR - hgt, 1, hgt, hc[2])
     far += [deco.svg(), '<g class="sm-drift">%s</g>' % clouds.svg(), hills.svg()]
-    near_c, far_c = ("#0c2440", "#1d3d64") if night else ("#2c6f9f", "#5aa6cf")
+    near_c, far_c = tint("#2c6f9f", "#0c2440"), tint("#5aa6cf", "#1d3d64")
     for i in range(6):
         mid.append(band(-300, HOR + (SHIP_H - HOR) * i // 6, w + 600, HOR + (SHIP_H - HOR) * (i + 1) // 6,
                         mix(far_c, near_c, i / 5.0)))
@@ -3364,9 +3680,9 @@ def sky_and_sea(w, night, sea, rnd):
         t = (y - HOR) / float(SHIP_H - HOR)
         x = rnd.randrange(-100, w + 100)
         size = 2 + int((4 if sea == "rough" else 3) * t)
-        caps.rect(x, y, size, 1, mix("#cfe8f5", "#9bc9e4", t) if not night else mix("#5a7aa8", "#3a5a88", t))
+        caps.rect(x, y, size, 1, tint(mix("#cfe8f5", "#9bc9e4", t), mix("#5a7aa8", "#3a5a88", t)))
         if t > 0.5 and sea != "calm":
-            caps.rect(x + 1, y - 1, max(1, size - 2), 1, "#f6fbfd" if not night else "#8aa6cc")
+            caps.rect(x + 1, y - 1, max(1, size - 2), 1, tint("#f6fbfd", "#8aa6cc"))
     mid.append('<g class="sm-waves">%s</g>' % caps.svg())
     return far, mid
 
@@ -3600,12 +3916,12 @@ def render_ship(sc):
     """The ship as one SVG in art pixels; the page frames, zooms and pans it."""
     lay = ship_layout(sc)
     W, x0, L = lay["width"], lay["x0"], lay["length"]
-    night = sc["night"]
+    night, dusk = sc["night"], sc["dark"]
     rnd = random.Random(21)                     # the same stars, clouds and waves on every refresh
     tags = Tags()
     paint_signs(sc, lay, tags)
     colors = list(sc["colors"].values())
-    far, mid = sky_and_sea(W, night, sc["sea"], rnd)
+    far, mid = sky_and_sea(W, dusk, night, sc["sea"], rnd)
     ship, ashore, near, lights = [], [], [], []
     spots = lay["hands"]
     by_id = {h["id"]: h for h in sc["hands"]}
@@ -3621,7 +3937,7 @@ def render_ship(sc):
         if h["place"] == "out":
             mid.append(hand_svg(h, (x + 3, wl - 3, pose, upto), tags, shadow_on=False) + boat_pix(x, wl).svg())
     mid.append(polygon([(x0 + 10, WL), (x0 + L - 60, WL), (x0 + L - 80, WL + 12), (x0 + 20, WL + 12)],
-                       "#0a2238" if night else "#1d4f73", ' opacity="0.45"'))
+                       mix("#1d4f73", "#0a2238", dusk), ' opacity="0.45"'))
     # masts, stays and sails
     deck_x, fc_x, main_x = lay["deck_x"], lay["fc_x"], lay["main_x"]
     masts = [(x0 + 60, 36, (x0 + 24, x0 + 100, 50, 124)), (main_x, 6, (main_x - 54, main_x + 56, 56, 150)),
@@ -3774,15 +4090,18 @@ def render_ship(sc):
     hold.shaded(hx1 - 62, orlop - 12, MAP, {})
     ship.append('<g><title>%s</title>%s</g>'
                 % (esc(tr("the hold: bilge water is firstmate's %s; the white line is the warning threshold") % ctx), hold.svg()))
+    pump_x = hx1 - PUMP_FROM_END
+    ship.append(draw_pump(pump_x, orlop, hy0, hy1, x0))
     ship += barrels
     ship.append('<text class="sm-ship__name" x="%d" y="%d">firstmate</text>' % (x0 + L - 60, WL - 12))
     for h in hands_at("rail"):
         x = spots[h["id"]][0]
 
         def line(p, t, x=x + ROD_TIP[0]):
-            p.line(x, t + ROD_TIP[1] + 1, x, WL + 10, "#f2f5f8")
-            p.rect(x - 1, WL + 9, 3, 3, "#f6f1e3")
+            fishing_line(p, x, t + ROD_TIP[1] + 1, WL + 10)
         ship.append(hand_svg(h, spots[h["id"]], tags, extra=line, shadow_on=False))
+        if h["checks"] == "pass":
+            ship.append(bucket_svg(h, x - 8, spots[h["id"]][1]))
     # the pier: the queue on the pier (drawn after it), scouts back with their maps, crates of delivered work
     stuff = Pix()
     for h in sc["scouts"]:
@@ -3840,19 +4159,26 @@ def render_ship(sc):
     fg.rect(W - 20, 211, 6, 4, "#fff0b0")
     for _ in range(W // 16):
         x = rnd.randrange(-40, W + 40)
-        fg.rect(x, SHIP_H - 3, 14, 3, "#0a1c33" if night else "#24577d")
-        fg.rect(x + 2, SHIP_H - 5, 10, 2, "#0f2846" if night else "#2c6690")
+        fg.rect(x, SHIP_H - 3, 14, 3, mix("#24577d", "#0a1c33", dusk))
+        fg.rect(x + 2, SHIP_H - 5, 10, 2, mix("#2c6690", "#0f2846", dusk))
     near.append(fg.svg())
     lights.append('<circle class="sm-glow" cx="%d" cy="215" r="%d" fill="#fff0b0" opacity="%s"/>'
                   % (W - 15, 30 if night else 20, "0.3" if night else "0.18"))
     # the night's tint, the near layer and the lights lie over the hands: they take no clicks (see the stylesheet)
-    shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' class="sm-shade" opacity="0.38"') if night else ""
+    shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' class="sm-shade" opacity="%.3f"' % (0.38 * dusk)) if dusk else ""
+    # where the page's script walks a hand and works the pump (see ship_events)
+    geo = {"ladder": [[main_x - 38, FAR], [main_x - 8, 46]], "walk": DECK_WALK, "deck_x": deck_x, "nest": nx,
+           "door": lay["cabin"][1] - 8, "floor": CABIN_FLOOR - 2, "fc": [fc_x, BOW_WALK], "plank": [[px0, py0], [px1, py1]],
+           "pier": PIER_FEET, "stern": x0, "wl": WL, "rod": list(ROD_TIP), "reel": list(REEL_TIP),
+           "hold": [hx0, hx1, hy1, room, thr], "pump": [pump_x, hy0]}
     args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc(tr("The ship: %s") % ship_counts(sc)), W, SHIP_H)
             + tuple(lay["crew"])
-            + ("#0c2440" if night else "#2c6f9f", "#0d1631" if night else "#6fb3e0", "".join(far), "".join(mid),
+            + (esc(json.dumps(ship_print(sc), separators=(",", ":"))), esc(json.dumps(geo, separators=(",", ":"))))
+            + (mix("#2c6f9f", "#0c2440", dusk), mix(DAY_SKY[0], NIGHT_SKY[0], dusk), "".join(far), "".join(mid),
                "".join(ship), "".join(ashore), shade, "".join(near), "".join(lights), tags.svg()))
     return ('<svg class="sm-ship__svg sea-%s%s" viewBox="0 0 %d %d" preserveAspectRatio="xMidYMid meet" '
-            'shape-rendering="crispEdges" role="group" aria-label="%s" data-w="%d" data-h="%d" data-crew="%d,%d,%d,%d">'
+            'shape-rendering="crispEdges" role="group" aria-label="%s" data-w="%d" data-h="%d" data-crew="%d,%d,%d,%d" '
+            'data-print="%s" data-geo="%s">'
             '<rect x="-3000" y="-3000" width="7000" height="7000" fill="%s"/>'
             '<rect x="-3000" y="-3000" width="7000" height="3010" fill="%s"/>'
             '<g class="sm-far">%s</g><g class="sm-mid">%s<g class="sm-bob">%s</g>%s</g>%s'
@@ -3961,22 +4287,28 @@ def captain_log(sc):
             % (sprite_icon((CAPTAIN_BUSY if cap["busy"] else CAPTAIN_OFF)[:15], CAPTAIN_INK, 3), esc(tr("Captain")), esc(say), body))
 
 
-def block_ship(s):
+def block_ship(s, prev=None):
+    """The ship's parts of the page; with the print of the drawing the page shows, also the
+    animations from that drawing to this one (ship_events)."""
     sc = ship_scene(s)
+    events = [event_sprites(e, sc) for e in ship_events(prev, ship_print(sc))] if prev else []
     chips = "".join('<li><span class="sm-sw" style="background:%s"></span>%s</li>' % (c, esc(p))
                     for p, c in sc["colors"].items()) or '<li class="sm-faint">%s</li>' % esc(tr("no project aboard"))
     necks = "".join('<li><span class="sm-sw" style="background:%s"></span>%s</li>' % (c, esc(a))
                     for a, c in sc["accounts"].items()) or '<li class="sm-faint">%s</li>' % esc(tr("no account aboard"))
     return {"ship": render_ship(sc), "counts": ship_counts(sc), "projects": chips, "accounts": necks, "stages": stage_chips(sc),
-            "log": captain_log(sc)}
+            "log": captain_log(sc), "events": events}
 
 
 # ---------------------------------------------------------------- demo (--demo)
 
 
-def demo_snapshot(now=None):
+def demo_snapshot(now=None, moved=False):
     """A made-up home with every phase, flag and gauge in use, for `--demo` and the tests.
-    Every name in it is invented; nothing is read from disk."""
+    Every name in it is invented; nothing is read from disk. `moved` is the same home a moment
+    later, so the ship's animations have something to show: a lookout went down to the deck, a
+    deck hand asked the captain, the blocked hand was answered, a ready task was dispatched, the
+    checks at the rail came back, and firstmate's context was compacted."""
     now = time.time() if now is None else now
     h = 3600
 
@@ -3992,11 +4324,11 @@ def demo_snapshot(now=None):
                              if kind == "ship" and phase is not None and phase >= 2 else None),
                 "tokens": {"new": 40000 + len(tid) * 3100, "cache": 900000 + len(title) * 9000, "calls": 40, "model": None},
                 "cites": True, "sessions": 1, "context": 60000 + len(title) * 1500, "context_limit": 200000,
-                "context_how": "inferred", "last_activity": now - 300,
+                "context_how": "inferred", "last_activity": now - 300, "checks": None,
                 "decisions": [{"state": st, "key": k, "at": int(now - age), "text": t} for st, k, t, age in decisions]}
 
     agents = [
-        agent("DEMO-SEARCH", "Find where the search index drifts", "harbor-api", 0),
+        agent("DEMO-SEARCH", "Find where the search index drifts", "harbor-api", 1 if moved else 0),
         agent("DEMO-AUTH", "Rotate session tokens on login", "harbor-api", 1),
         agent("DEMO-RATE", "Rate limit the public endpoints", "harbor-api", 1, crew="parked",
               decisions=[("needs-decision", "limits", "per user or per key? A) per user B) per key", 50 * 60)]),
@@ -4004,16 +4336,22 @@ def demo_snapshot(now=None):
         agent("DEMO-LOGS", "Structured logs for the workers", "harbor-api", 3),
         agent("DEMO-I18N", "Translate the settings page", "harbor-api", 4, crew="done"),
         agent("DEMO-DARK", "Dark theme for the charts", "lighthouse-web", 0, crew="paused"),
-        agent("DEMO-NAV", "Keyboard navigation in the menu", "tide-charts", 1),
+        agent("DEMO-NAV", "Keyboard navigation in the menu", "tide-charts", 1,
+              decisions=[("needs-decision", "keys", "which key opens the menu? A) Alt+M B) F10", 60)] if moved else ()),
         agent("DEMO-FORMS", "Validate the signup form", "lighthouse-web", 3),
         agent("DEMO-ICONS", "Redraw the toolbar icons", "lighthouse-web", 4, crew="done"),
-        agent("DEMO-EXPORT", "Export charts as CSV", "tide-charts", 2, crew="blocked",
-              decisions=[("blocked", "bucket", "the export bucket refuses writes from the worker", 3 * h + 5 * 60)]),
+        agent("DEMO-EXPORT", "Export charts as CSV", "tide-charts", 2, crew="working" if moved else "blocked",
+              decisions=() if moved else [("blocked", "bucket", "the export bucket refuses writes from the worker", 3 * h + 5 * 60)]),
         agent("DEMO-AXIS", "Fix the time axis labels", "tide-charts", None, crew="unknown"),
         agent("DEMO-SCOUT-DB", "Compare two storage engines", "harbor-api", 0, kind="scout"),
         agent("DEMO-SCOUT-CDN", "Survey the image CDN costs", "lighthouse-web", 1, kind="scout"),
         agent("DEMO-SCOUT-UX", "Review the onboarding flow", "lighthouse-web", 2, crew="done", kind="scout"),
     ]
+    for a in agents:                                    # the checks at the rail
+        if a["id"] in ("DEMO-LOGS", "DEMO-FORMS"):
+            a["checks"] = ({"DEMO-LOGS": "pass", "DEMO-FORMS": "fail"}[a["id"]] if moved else "pending")
+    if moved:
+        agents.append(agent("DEMO-Q-THEME", "Theme picker", "lighthouse-web", 0, ago=60))
     day = dt.date.fromtimestamp(now)
     slot = {"group": "harbor-api", "cap": 2, "taken": 2, "holders": ["DEMO-AUTH", "DEMO-RATE"]}
 
@@ -4036,7 +4374,7 @@ def demo_snapshot(now=None):
         queued("DEMO-Q-BILL", "New billing plan", "harbor-api", "decision", hold="which plan ships first"),
         queued("DEMO-Q-MAPS", "Offline maps", "lighthouse-web", "date"),
         queued("DEMO-Q-AUDIT", "Audit log", "harbor-api", "task", deps=["DEMO-AUTH"]),
-        queued("DEMO-Q-THEME", "Theme picker", "lighthouse-web", "ready"),
+    ] + ([] if moved else [queued("DEMO-Q-THEME", "Theme picker", "lighthouse-web", "ready")]) + [
         queued("DEMO-Q-TILES", "Faster chart tiles", "tide-charts", "decision", kind="scout", hold="worth a scout?"),
         queued("DEMO-Q-DOCS", "API reference pages", "harbor-api", "slot"),
         queued("DEMO-Q-WEBHOOK", "Outgoing webhooks", "harbor-api", "slot"),
@@ -4069,14 +4407,17 @@ def demo_snapshot(now=None):
                                "sheet_total": 3000000, "split": {"new": 300000 + i * 20000, "cache": 2600000, "calls": 80,
                                                                  "model": None, "subagents": i % 2},
                                "pr": None, "pr_number": 100 + i if kind == "ship" else None, "partial": False})
+    fm = {"session": "demo0000-session", "found_by": tr("the demo"), "model": "model-a", "context": 144000,
+          "last_call": now - 60, "limit": 200000, "limit_how": "inferred", "percent": 72.0,
+          "warn_at": DEFAULT_CONTEXT_WARN, "growth": 38000, "growth_since": now - GROWTH_HOURS * h,
+          "growth_since_compaction": False, "today_new": 1200000, "today_cache": 30000000,
+          "compactions": 1, "last_compaction": {"at": now - 7 * h, "trigger": "auto", "before": 180000, "after": 40000}}
+    if moved:
+        fm.update(context=38000, percent=19.0, growth=0, growth_since=now - 40, growth_since_compaction=True, compactions=2,
+                  last_compaction={"at": now - 40, "trigger": "auto", "before": 146000, "after": 38000})
     return {
         "now": now,
-        "firstmate": {"session": "demo0000-session", "found_by": tr("the demo"), "model": "model-a", "context": 144000,
-                      "last_call": now - 60, "limit": 200000, "limit_how": "inferred", "percent": 72.0,
-                      "warn_at": DEFAULT_CONTEXT_WARN, "growth": 38000, "growth_since": now - GROWTH_HOURS * h,
-                      "growth_since_compaction": False, "today_new": 1200000, "today_cache": 30000000,
-                      "compactions": 1, "last_compaction": {"at": now - 7 * h, "trigger": "auto",
-                                                            "before": 180000, "after": 40000}},
+        "firstmate": fm,
         "agents": agents, "queue": queue, "backlog_error": None,
         "projects": ["harbor-api", "lighthouse-web", "tide-charts"], "accounts": ["account-a", "account-b", "ordinary"],
         "daily": daily, "delivered": delivered_rows,
@@ -4097,7 +4438,8 @@ def demo_snapshot(now=None):
 
 
 class DemoPanel:
-    """`--demo`: serves demo_snapshot() in place of a home; the add form queues nothing."""
+    """`--demo`: serves demo_snapshot() in place of a home, a moment later every other refresh; the
+    add form queues nothing."""
     @property
     def notice(self):
         return '<div class="sm-notice sm-notice--warn">%s</div>' % esc(tr("Demo: a made-up home, not real data."))
@@ -4109,7 +4451,9 @@ class DemoPanel:
         self.sent = {}                       # answers sent on this page, kept here only: task id -> rows
 
     def snapshot(self):
-        snap = demo_snapshot()
+        # the made-up home changes every refresh between two moments, so the ship has moves to show
+        now = time.time()
+        snap = demo_snapshot(now, moved=int(now // REFRESH_SECONDS) % 2 == 1)
         for tid, rows in self.sent.items():
             snap["answers"].setdefault(tid, []).extend(rows)
         self.last = snap
@@ -4198,7 +4542,8 @@ def make_handler(panel):
             if u.path == "/blocks":
                 return self.send(200, json.dumps(render_blocks(panel.snapshot())), "application/json")
             if u.path == "/ship":
-                return self.send(200, json.dumps(block_ship(panel.recent())), "application/json")
+                prev = parse_print((urllib.parse.parse_qs(u.query).get("prev") or [""])[0])
+                return self.send(200, json.dumps(block_ship(panel.recent(), prev)), "application/json")
             if u.path == "/detail":
                 tid = (urllib.parse.parse_qs(u.query).get("id") or [""])[0]
                 body = panel.detail(tid)

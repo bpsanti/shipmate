@@ -36,7 +36,7 @@ It listens on `127.0.0.1` only.
 | `--context-warn P` | `SHIPMATE_CONTEXT_WARN` | `60` | warn when firstmate's context passes P percent of the window |
 | `--cache-seconds N` | `SHIPMATE_CACHE_SECONDS` | `5` | seconds one reading of the fleet (backlog, records, inbox receipts) answers every request; `0` reads again on each request |
 | `--once` | | | print the JSON snapshot and exit |
-| `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed) |
+| `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed); it changes between two moments every 30 s, so the ship's animations can be seen |
 | `--lang en\|pt-BR` | `SHIPMATE_LANG` | `en` | the page's language: English, or Brazilian Portuguese with `pt-BR` |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
 | | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only by the detail drawer to read a PR's checks |
@@ -51,7 +51,7 @@ The language covers everything the page writes itself: labels, the board's lanes
 Text read from the home's records (task titles, status lines, hold reasons, notes) is shown as it was written.
 
 `GET /state.json` returns the same snapshot the page is built from.
-`GET /ship` returns the ship view drawn from that snapshot.
+`GET /ship` returns the ship view drawn from that snapshot; with `?prev=<print>` (the `data-print` of the drawing on screen) it also lists what changed since, for the page to animate (see [Motion](#motion)).
 `GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
 
 ### Keep it running (optional)
@@ -135,7 +135,7 @@ Apart from the answer form described below, everything in it is read-only and co
 | Title and the captain's intent | the backlog title, and the `Captain's intent` section of `data/<task>/brief.md` |
 | Phase timeline with the time of each milestone | the same evidence as the card's phase: spawn time, first edit or commit in the worktree, PR URL, first CI read, `done` |
 | Latest status lines | the last 8 lines of `state/<task>.status`, newest first |
-| PR with its state and checks | `gh pr view <url> --json state,isDraft,statusCheckRollup`, read only when a drawer opens and at most every 120 s per PR (GitHub PRs only) |
+| PR with its state and checks | `gh pr view <url> --json state,isDraft,statusCheckRollup`, read when a drawer opens, and in the background for every agent waiting for CI, at most every 120 s per PR in all (GitHub PRs only) |
 | Project, model, effort, account, harness | `state/<task>.meta` |
 | Tokens, and the worker's context against its window | the task's transcripts, as on the card; the window is inferred like firstmate's |
 | How long it has been idle | the time since the newest record in the task's transcripts |
@@ -169,10 +169,12 @@ Each element stands for one thing:
 | A skiff on the horizon, rowing back with the map, moored at the pier | a scout exploring, writing the report, report delivered |
 | Barrels in the hold | one per Claude account: the amber level is the quota left; red when it runs out before it resets or has less than 15% left |
 | Water in the hold | firstmate's context; the white line is the warning threshold |
+| The pump on the orlop | it works when firstmate's context is compacted, and the water goes down (see [Motion](#motion)) |
+| A bucket with a fish beside a hand at the rail | every check on that agent's PR passed (read in the background, see the table above) |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
 | Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task, asleep); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
-| Day or night | the local hour: night from 18:00 to 06:00 |
+| Day or night | the local hour: the lamps are lit from 18:00 to 06:00; the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
 
 The scene is larger than its frame and grows with the crew so no hand stands on another.
@@ -184,7 +186,50 @@ Names show from a readable zoom up, never overlap, and come back on hover or foc
 Clicking a hand, on board, in the cabin or on the pier, opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand (or the crowd at the cabin door it is in), and clicking it opens its drawer.
-The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only when the browser does not ask for reduced motion.
+The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only while the motion switch says "all" (see below).
+
+### Motion
+
+When the scene changes between two refreshes, the change plays once on the new drawing, and every animation stands for something that happened:
+
+| What plays | When |
+| --- | --- |
+| A hand walks from its old place to its new one: down the ladder from the crow's nest, along the deck, up to the forecastle, down the gangplank | its place changed: a new phase |
+| It waves its red flag three times, then walks into the captain's cabin | a `needs-decision` or `blocked` line opened, or its crew state became parked, blocked or failed |
+| A green mark over its head, then it walks out of the cabin back to its place | the decision was resolved |
+| A queued hand walks from the pier up the gangplank, swaps the straw hat for the bandana as it steps aboard, and goes to its place; one held for the captain walks out of the cabin | firstmate dispatched the task: its id left the queue and is a live agent |
+| The rod bends, a fish comes up and goes into the bucket | the checks of a hand at the rail all passed |
+| The rod bends, an old boot comes up and falls back | a check failed |
+| The pump works six strokes, water spouts out of the stern, and the water drops from the old level to the new | firstmate's last compaction is newer than the previous reading's |
+| The lamps light one at a time, from the stern | night fell since the previous reading |
+
+The page sends the print of the drawing on screen (`data-print`: where each hand stood, where each queued task waited, the rail's checks, firstmate's context and last compaction, and whether the lamps were lit) with its request for the next one, and `ship_events` compares the two.
+Nothing plays when the page has just opened, when the earlier print is more than 90 s old (a tab left in the background, or the board shown meanwhile), or for a change no reading saw happen: a hand that appears aboard without having been queued, a scout's boat, a task that leaves the ship.
+At most four hands walk and three catches come up after one refresh; the rest of that refresh's changes just show in their new places.
+Each kind has one detector in `shipmate.py` (`EVENT_DETECTORS`) and one player in the page script (`PLAYERS`), so a new animation is added in those two places.
+The frames it needs (a stride, two holds on the ladder, the arm with the flag, the bent rod, the catch, the jet) are drawn by `hand_sprite` and the server like every other sprite, and arrive with the change.
+
+The "motion" button in the scene's corner cycles through:
+
+| Setting | What moves |
+| --- | --- |
+| all | the ship lives (bobbing, blinking, hammering) and the changes play |
+| changes only | only the changes play |
+| off | nothing moves; every change shows at once in its new place |
+
+It starts at "off" when the browser asks for reduced motion and at "all" otherwise, and the browser remembers the choice.
+The drawing is the same in every setting; only the way there differs.
+
+The cost per frame was measured with a Chrome performance trace of the `--demo` ship view at 1440 x 900, framed on the crew, on one Apple Silicon Mac, 14 Nov 2026: the busy time of the page's renderer main thread, its compositor, the GPU process and the viz compositor, per frame drawn.
+
+| | Frames drawn per second | Main thread per frame | All four per frame |
+| --- | --- | --- | --- |
+| Before (main `028ec27`), the ship at rest, three runs | 10.7 to 10.8 | 0.02 to 0.23 ms | 2.7 to 3.3 ms |
+| After, the ship at rest, three runs | 10.6 to 10.8 | 0.03 to 0.30 ms | 3.1 to 3.6 ms |
+| After, a refresh of the demo that plays a boarding, three walks, a fish, a boot and the pump, two runs | 28 | 2.3 to 2.5 ms | 4.7 to 5.0 ms |
+
+At rest the cost stays within the runs' spread: the loops are the same CSS `steps()` animations as before.
+While changes play, the walkers redraw at most 30 times a second, and the extra work stops when the last one arrives; a refresh that comes meanwhile waits for them before it draws.
 
 ### The queue on the pier
 
@@ -205,7 +250,7 @@ The tavern is anchored at the foot of the gangplank, on its right, and grows to 
 The tavern's names show only on hover or focus, so a full table stays readable; the others keep their names on.
 The ship moves over to make room for the tavern, and the moored scouts and crates move toward the bow past the queue.
 The four stage chips for the pier (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
-A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a sleeper breathes; nothing there looks like progress, and none of it moves when the browser asks for reduced motion.
+A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a sleeper breathes; nothing there looks like progress, and none of it moves unless the motion switch says "all".
 Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` (with `POSE_HEAD`, where each pose puts the head), the hats in `HATS` and the colours in `hand_palette`, so a new art style replaces those and nothing else.
 A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, flags, a rod, a pack, a map, cards, a mug) make some poses wider.
 The captain and firstmate at the helm are drawn on the same scale.

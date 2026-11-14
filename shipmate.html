@@ -55,6 +55,7 @@
           <button type="button" class="is-wide" data-zoom="crew" aria-label="{{t:Frame the crew}}">{{t:crew}}</button>
           <button type="button" class="is-wide" data-zoom="all" aria-label="{{t:Fit everything}}">{{t:fit all}}</button>
           <button type="button" class="is-wide" data-signs aria-pressed="true" aria-label="{{t:Show the signs on the ship}}">{{t:signs}}</button>
+          <button type="button" class="is-wide" data-motion aria-label="{{t:How much the ship moves: all, changes only, or nothing}}">{{t:motion: all}}</button>
         </div>
         <div class="sm-ship__zoom" id="sm-ship-zoom" aria-hidden="true"></div>
         <div id="b-ship">{{SHIP}}</div>
@@ -69,11 +70,13 @@
           {{t:A red flag: the hand needs the captain (its crew is parked, blocked or failed, or a needs-decision or blocked line is still open), or a queued task waits on the captain's decision.}}
           {{t:Whoever needs the captain waits in the captain's cabin, numbered by how long it has waited: a hand aboard, or a queued task with its sea bag. Three fit in the cabin; the rest crowd the door with their count, and the log below lists everyone. The captain attends them at the desk, or sits with a mug when nobody waits.}}
           {{t:Barrels in the hold: each account's quota, amber what is left, red when it runs out before it resets.}}
-          {{t:Water in the hold: firstmate's context, the white line its warning threshold.}}
+          {{t:Water in the hold: firstmate's context, the white line its warning threshold; the pump works when the context is compacted.}}
           {{t:Scouts row out to the horizon, back with the map, and moor at the pier with it.}}
           {{t:On the pier, the queue: cards or a mug at the tavern while it waits for a free slot, a sea bag at the gangplank when nothing holds it, talking up to the hand it waits for, asleep until its date.}}
           {{t:Crates: tasks delivered in the last 7 days.}}
-          {{t:The sky follows the local time, the sea the machine's load.}}</p></section>
+          {{t:A bucket with a fish beside a hand at the rail: every check on its PR passed.}}
+          {{t:The sky follows the local time, darkening over the hour around 18:00 and lightening around 06:00, and the sea the machine's load.}}
+          {{t:When a hand changes place between two refreshes, it walks there; the motion button sets how much moves.}}</p></section>
       </div>
     </section>
 
@@ -257,6 +260,261 @@
   })();
   window.shipView = ship;
 
+  // motion: what changed since the drawing on screen plays once when the next one arrives. The
+  // server compares the two (ship_events in shipmate.py) and sends each change with the frames it
+  // needs; each kind has one player below. The switch picks how much moves: all (the ship lives
+  // and the changes play), changes only, or nothing. A browser that asks for reduced motion starts
+  // with nothing; the drawing is the same in every mode, only the way there differs.
+  var motion = (function () {
+    var NS = null;                                   // the drawing's own namespace, taken from it
+    var frameEl = document.getElementById("sm-ship"), btn = frameEl.querySelector("[data-motion]");
+    var MODES = ["all", "changes", "off"];
+    var LABELS = { all: {{j:motion: all}}, changes: {{j:motion: changes only}}, off: {{j:motion: off}} };
+    var mode = "all", run = 0, undo = [];
+    try { if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) mode = "off"; } catch (e) {}
+    try { var saved = localStorage.getItem("shipmate.motion"); if (MODES.indexOf(saved) >= 0) mode = saved; } catch (e) {}
+    function set(m) {
+      mode = m;
+      MODES.forEach(function (k) { frameEl.classList.toggle("motion-" + k, k === m); });
+      btn.textContent = LABELS[m];
+      if (m === "off") stop();
+    }
+    btn.addEventListener("click", function () {
+      set(MODES[(MODES.indexOf(mode) + 1) % MODES.length]);
+      try { localStorage.setItem("shipmate.motion", mode); } catch (e) {}
+    });
+    set(mode);
+
+    // stopping puts every hidden hand back and drops the walkers; a new drawing does it too
+    var STOP = {};
+    function stop() { run++; undo.splice(0).forEach(function (f) { f(); }); }
+    function el(tag, attrs, parent) {
+      var e = document.createElementNS(NS, tag);
+      for (var k in attrs) e.setAttribute(k, attrs[k]);
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+    function sprite(svgText, x, y, parent) {
+      var g = el("g", {}, parent);
+      g.innerHTML = svgText;
+      put(g, x, y);
+      return g;
+    }
+    function put(g, x, y) { g._x = x; g._y = y; g.setAttribute("transform", "translate(" + Math.round(x) + " " + Math.round(y) + ")"); }
+    // every wait and every move counts the time the page is shown: a hidden tab gets no animation
+    // frames, so a walk stops where it stands and goes on from there, like the rest of the scene
+    function sleep(ms) { return frames(function (t) { return t * 1000 < ms; }); }
+    // calls step with the seconds shown since the start, at most 30 times a second: a pixel-art
+    // figure moves a pixel or two a step, and every step repaints the whole drawing
+    function frames(step) {
+      var my = run;
+      return new Promise(function (ok, no) {
+        var shown = 0, prev = null, last = -1;
+        function tick(ts) {
+          if (my !== run) return no(STOP);
+          shown += prev === null ? 0 : Math.min(ts - prev, 100);
+          prev = ts;
+          if (last >= 0 && shown - last < 32) return requestAnimationFrame(tick);
+          last = shown;
+          if (step(shown / 1000) === false) return ok();
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      });
+    }
+    // hides one hand (its shadow and name tag too) until the animation ends or stops
+    function hide(svg, sel) {
+      var els = [].slice.call(svg.querySelectorAll(sel));
+      els.forEach(function (g) {
+        var s = g.previousElementSibling;
+        if (g.classList.contains("sm-hand") && s && s.tagName === "g" && !s.getAttribute("class") && s.getAttribute("opacity")) els.push(s);
+        var id = g.getAttribute("data-id");
+        if (id) [].push.apply(els, svg.querySelectorAll('.sm-tag[data-for="' + id + '"]'));
+      });
+      els.forEach(function (e) { e.style.visibility = "hidden"; });
+      var back = function () { els.forEach(function (e) { e.style.visibility = ""; }); };
+      undo.push(back);
+      return back;
+    }
+    function at(g) { return g ? g.getAttribute("data-at").split(",").map(Number) : null; }
+
+    // -- walking from one place to another (kinds move and board)
+    function zone(place) { return place === "hatch" || place === "rail" ? "deck" : place; }
+    function origin(z, geo) {
+      return { nest: geo.nest, deck: geo.deck_x, bow: geo.fc[0], cabin: geo.door, plank: geo.plank[0][0] }[z] || 0;
+    }
+    // the way from a spot in a zone to the main deck, as points and how each leg is gone
+    function toDeck(z, p, g) {
+      var W = g.walk, lad = g.ladder, pl = g.plank;
+      if (z === "nest") return [[lad[1][0] - 6, p[1], "walk"], [lad[0][0] - 6, lad[0][1], "climb"], [lad[0][0] - 6, W, "walk"]];
+      if (z === "bow") return [[g.fc[0] + 4, g.fc[1], "walk"], [g.fc[0] - 12, W, "walk"]];
+      if (z === "cabin") return [[g.door, g.floor, "walk"], [g.door + 12, W, "walk"]];
+      if (z === "plank") return [[pl[0][0] - 4, pl[0][1], "walk"], [g.deck_x + 4, W, "walk"]];
+      if (z === "pier") return [[pl[1][0] - 4, g.pier, "ashore"], [pl[0][0] - 4, pl[0][1], "ashore"], [g.deck_x + 4, W, "walk"]];
+      return [[p[0], W, "walk"]];
+    }
+    function route(fz, start, tz, end, g) {
+      var out = toDeck(fz, start, g), back = toDeck(tz, end, g);
+      var pts = [end].concat(back);                    // walked backwards: each leg keeps how it is gone
+      out.push([pts[back.length][0], pts[back.length][1], "walk"]);
+      for (var i = back.length - 1; i >= 0; i--) out.push([pts[i][0], pts[i][1], back[i][2]]);
+      return out;
+    }
+    function walk(g, start, legs, f, secs) {
+      var len = 0, x = start[0], y = start[1], cost = [];
+      legs.forEach(function (l) { var d = Math.hypot(l[0] - x, l[1] - y) * (l[2] === "climb" ? 1.6 : 1); cost.push(d); len += d; x = l[0]; y = l[1]; });
+      var leg = 0, from = start.slice(), done = 0, right = true;
+      return frames(function (t) {
+        var want = Math.min(len, len * t / secs);
+        while (leg < legs.length && done + cost[leg] <= want) { done += cost[leg]; from = legs[leg]; leg++; }
+        var l = legs[Math.min(leg, legs.length - 1)], k = leg < legs.length && cost[leg] ? (want - done) / cost[leg] : 1;
+        var px = from[0] + (l[0] - from[0]) * k, py = from[1] + (l[1] - from[1]) * k;
+        if (l[0] - from[0] > 0.5) right = true; else if (l[0] - from[0] < -0.5) right = false;
+        var step = Math.floor(want / 4) % 2, key;
+        if (l[2] === "climb") key = step ? "climb" : "climb2";
+        else key = (l[2] === "ashore" ? "ashore-" : "") + (step ? "walk" : "stand") + (right ? "" : "-l");
+        if (g._key !== key && f[key]) { g.innerHTML = f[key]; g._key = key; }
+        put(g, px, py - (step && l[2] !== "climb" ? 1 : 0));
+        return want < len;
+      });
+    }
+    async function playWalk(ev, ctx) {
+      var svg = ctx.svg, geo = ctx.geo, f = ev.frames;
+      var hand = svg.querySelector('.sm-hand[data-id="' + ev.id + '"]'), end = at(hand), show = ctx.hidden[ev.id];
+      var fz = zone(ev.from), tz = zone(ev.to), ashore = ev.kind === "board" && fz === "pier";
+      var old = ctx.before.at[ev.id], start = null;
+      if (old) start = [old[0] + origin(fz, geo) - origin(fz, ctx.before.geo || geo), old[1]];
+      else if (ashore) start = [geo.plank[1][0] - 4, geo.pier];
+      if (!end || !f.stand || !start) { show(); return; }
+      var g = sprite(f[ashore ? "ashore-stand" : "stand"], start[0], start[1], ctx.layer);
+      if (f.alarm) {                                    // the red flag goes up before the walk to the cabin
+        g.innerHTML = f.alarm;
+        for (var i = 0; i < 6; i++) { put(g, start[0] + (i % 2), start[1]); await sleep(200); }
+      }
+      if (f.answered) {                                 // answered: a mark over the head, then out of the cabin
+        var mark = sprite(f.answered, start[0] + 3, start[1] - 31, ctx.layer);
+        await sleep(900);
+        mark.remove();
+      }
+      var legs = route(fz, start, tz, end, geo);
+      var len = legs.reduce(function (a, l, j) { var p = j ? legs[j - 1] : start; return a + Math.hypot(l[0] - p[0], l[1] - p[1]); }, 0);
+      await walk(g, start, legs, f, Math.min(ashore ? 7 : 5, Math.max(1.5, len / 90)));
+      g.remove();
+      show();
+    }
+
+    // -- a bite at the rail: a fish for the bucket when every check passed, an old boot when one failed
+    async function playChecks(ev, ctx) {
+      var svg = ctx.svg, geo = ctx.geo, f = ev.frames;
+      var hand = svg.querySelector('.sm-hand[data-id="' + ev.id + '"]'), p = at(hand), show = ctx.hidden[ev.id];
+      if (!p) { show(); return; }
+      var showHand = hide(svg, '.sm-hand[data-id="' + ev.id + '"]');
+      var g = sprite(f.fish, p[0], p[1], ctx.layer);
+      await sleep(300);
+      for (var i = 0; i < 4; i++) { g.innerHTML = i % 2 ? f.fish : f.reel; await sleep(170); }
+      var tip = [p[0] + geo.reel[0] - 4, p[1] - 20 + geo.reel[1] + 8], water = geo.wl + 6;
+      var c = sprite(f.catch, tip[0], water, ctx.layer);
+      await frames(function (t) { var k = Math.min(1, t / 0.5); put(c, tip[0], water + (tip[1] - water) * k); return k < 1; });
+      g.innerHTML = f.fish;
+      if (ev.result === "pass") {
+        var to = [p[0] - 9, p[1] - 6];
+        await frames(function (t) {
+          var k = Math.min(1, t / 0.6);
+          put(c, tip[0] + (to[0] - tip[0]) * k, tip[1] + (to[1] - tip[1]) * k - 14 * 4 * k * (1 - k));
+          return k < 1;
+        });
+      } else {
+        await sleep(500);
+        await frames(function (t) { var k = Math.min(1, t / 0.4); put(c, tip[0] + 4 * k, tip[1] + (water + 2 - tip[1]) * k * k); return k < 1; });
+      }
+      c.remove();
+      show();                                           // the bucket, with its fish, when every check passed
+      await sleep(400);
+      g.remove();
+      showHand();
+    }
+
+    // -- a compaction: the pump works and the bilge water goes down from the old level to the new
+    async function playPump(ev, ctx) {
+      var svg = ctx.svg, geo = ctx.geo, f = ev.frames, h = geo.hold, pump = svg.querySelector(".sm-pump");
+      if (!pump) return;
+      function lvl(pct) { return Math.floor(h[3] * Math.max(0, Math.min(100, pct)) / 100); }
+      var hi = lvl(ev.from), lo = lvl(ev.to);
+      var over = el("g", {}, null);
+      pump.parentNode.insertBefore(over, pump);
+      var water = el("rect", { x: h[0], width: h[1] - h[0], fill: "#3d82ad" }, over);
+      var crest = el("rect", { x: h[0], width: h[1] - h[0], height: 1, fill: "#7fb6d8" }, over);
+      var warn = el("rect", { x: h[0], y: h[2] - h[4], width: h[1] - h[0], height: 1, fill: "#f6f1e3" }, over);
+      function level(n) {
+        water.setAttribute("y", h[2] - n); water.setAttribute("height", Math.max(0, n - lo));
+        crest.setAttribute("y", h[2] - n); warn.style.visibility = n >= h[4] && lo <= h[4] ? "" : "hidden";
+      }
+      var up = pump.querySelector(".sm-pump__up"), down = pump.querySelector(".sm-pump__down");
+      undo.push(function () { over.remove(); up.setAttribute("visibility", "visible"); down.setAttribute("visibility", "hidden"); });
+      level(hi);
+      var strokes = 6;
+      for (var i = 1; i <= strokes; i++) {
+        up.setAttribute("visibility", "hidden"); down.setAttribute("visibility", "visible");
+        var jet = sprite(f.jet, geo.stern - 1, geo.pump[1] + 4, ctx.layer);
+        await sleep(240);
+        level(Math.round(hi + (lo - hi) * i / strokes));
+        up.setAttribute("visibility", "visible"); down.setAttribute("visibility", "hidden");
+        await sleep(240);
+        jet.remove();
+      }
+      over.remove();
+    }
+
+    // -- night fell: the lamps are lit one by one, from the stern
+    async function playLights(ev, ctx) {
+      var lamps = [].slice.call(ctx.svg.querySelectorAll(".sm-lights > *"));
+      lamps.sort(function (a, b) { return (+a.getAttribute("cx") || 0) - (+b.getAttribute("cx") || 0); });
+      lamps.forEach(function (l) { l.style.visibility = "hidden"; });
+      undo.push(function () { lamps.forEach(function (l) { l.style.visibility = ""; }); });
+      for (var i = 0; i < lamps.length; i++) { await sleep(180); lamps[i].style.visibility = ""; }
+    }
+
+    var PLAYERS = { board: playWalk, move: playWalk, checks: playChecks, pump: playPump, lights: playLights };
+
+    // what the drawing on screen says, kept before the next one replaces it
+    function capture(svg) {
+      var out = { at: {}, geo: null };
+      if (!svg) return out;
+      try { out.geo = JSON.parse(svg.getAttribute("data-geo")); } catch (e) {}
+      [].forEach.call(svg.querySelectorAll(".sm-hand[data-at]"), function (g) { out.at[g.getAttribute("data-id")] = at(g); });
+      return out;
+    }
+    function play(events, before) {
+      stop();
+      var svg = document.querySelector("#b-ship svg");
+      if (mode === "off" || document.hidden || !svg || !events || !events.length) return;
+      NS = svg.namespaceURI;
+      var geo;
+      try { geo = JSON.parse(svg.getAttribute("data-geo")); } catch (e) { return; }
+      var layer = el("g", { "class": "sm-walkers" }, svg.querySelector(".sm-mid"));
+      var ctx = { svg: svg, geo: geo, layer: layer, before: before || { at: {} }, hidden: {} }, runs = [];
+      // whoever walks is out of its new place at once, and a new bucket waits for its fish
+      events.forEach(function (ev) {
+        if (ev.kind === "move" || ev.kind === "board") ctx.hidden[ev.id] = hide(svg, '.sm-hand[data-id="' + ev.id + '"]');
+        if (ev.kind === "checks") ctx.hidden[ev.id] = hide(svg, '.sm-bucket[data-for="' + ev.id + '"]');
+      });
+      events.forEach(function (ev, i) {
+        var p = PLAYERS[ev.kind];
+        if (!p) return;
+        // the walkers set out a moment apart; the pump and the lamps start at once, before the new
+        // water level or the lit lamps can show
+        var wait = ev.kind === "pump" || ev.kind === "lights" ? 0 : 250 * i;
+        runs.push(sleep(wait).then(function () { return p(ev, ctx); }).catch(function (e) { if (e !== STOP && window.console) console.error(e); }));
+      });
+      busy = Promise.all(runs);
+    }
+    // the next drawing waits for the changes on screen to finish playing, so none is cut short
+    var busy = Promise.resolve();
+    function idle() { return busy; }
+    return { capture: capture, play: play, idle: idle, mode: function () { return mode; } };
+  })();
+  window.shipMotion = motion;
+
   // the stage chips: one lights its hands, fades the rest, and takes the view to them; the
   // choice survives the refresh, which only swaps the drawing and the chips
   var stages = (function () {
@@ -330,11 +588,21 @@
   logEl.addEventListener("focusin", function (e) { logLight(e, true); });
   logEl.addEventListener("focusout", function (e) { logLight(e, false); });
 
+  // the next drawing comes with what changed since the one on screen (its print), played by motion.
+  // Only the latest request is drawn: two in flight carry the same print, and the later one would
+  // replay the change over a drawing that already shows it.
+  var shipAsked = 0;
   function loadShip() {
-    fetch("/ship", { cache: "no-store" }).then(function (r) {
+    var mine = ++shipAsked;
+    var old = document.querySelector("#b-ship svg"), print = old && old.getAttribute("data-print");
+    fetch("/ship" + (print ? "?prev=" + encodeURIComponent(print) : ""), { cache: "no-store" }).then(function (r) {
       if (!r.ok) throw new Error(String(r.status));
       return r.json();
     }).then(function (b) {
+      return motion.idle().then(function () { return b; });
+    }).then(function (b) {
+      if (mine !== shipAsked) return;
+      var before = motion.capture(document.querySelector("#b-ship svg"));
       document.getElementById("b-ship").innerHTML = b.ship;
       document.getElementById("b-shipcounts").textContent = b.counts;
       document.getElementById("b-shipprojects").innerHTML = b.projects;
@@ -343,6 +611,7 @@
       document.getElementById("b-shiplog").innerHTML = b.log;
       ship.bind();
       stages.light(stages.lit(), false);
+      motion.play(b.events, before);
     }).catch(function () {});
   }
   function setView(v, fresh) {
