@@ -152,7 +152,7 @@ Each element stands for one thing:
 | --- | --- |
 | The ship | the home; firstmate stands at the helm on the stern castle |
 | A hand in the crow's nest with a spyglass | an agent exploring |
-| A hand on deck with a hammer | an agent implementing |
+| A hand on deck with a hammer, a mop or a broom | an agent implementing; the tools take turns by when each hand reached the deck (see [Work on deck](#work-on-deck)) |
 | A hand at the bow with signal flags | an agent with a PR open |
 | A hand fishing at the rail | an agent waiting for CI |
 | A hand on the gangplank with a pack | an agent ready to merge |
@@ -174,7 +174,8 @@ Each element stands for one thing:
 | Hammocks in the quarters, cut open in the hull forward of the hold | queued tasks held until a date, one asleep in each hammock under a blanket in its project's colour, the date over it (see below) |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
 | Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away, and the browser remembers it |
-| Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
+| Crates on the pier | tasks firstmate closed as done in the last 7 days: the backlog's `closed` date, read with the rest of the backlog (`bin/fm-tasks-axi.sh list`), so a task pruned from the backlog leaves the pile. The session sheets are written later and in batches, so they feed only the usage block |
+| The bell on the mizzen mast | it rings when a task is delivered (see [Motion](#motion)) |
 | Day or night | the local hour: the lamps are lit from 18:00 to 06:00; the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
 
@@ -187,7 +188,23 @@ Names show from a readable zoom up, never overlap, and come back on hover or foc
 Clicking a hand, on board, in the cabin, in a hammock or on the pier, opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand (or the crowd at the cabin door it is in), and clicking it opens its drawer.
-The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only while the motion switch says "all" (see below).
+The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, the tools on deck and the flags move, and lamps flicker, all only while the motion switch says "all" (see below).
+
+### Work on deck
+
+Every hand implementing works on deck with a tool: the first to reach the deck hammers, the second mops, the third sweeps, and so on around again.
+The order is when each one reached the implementing phase (its `phase_since`), then its id, so a hand keeps its tool from one refresh to the next; it changes only when a hand that came earlier leaves the deck, and then in the same refresh as that departure.
+The tool says nothing about the work itself; it tells the hands apart.
+
+Each tool has two frames, the raised hammer and the blow that throws chips, the mop and its stroke that leaves the deck wet, the broom and its sweep that raises dust, and how often they alternate follows the worker's transcript:
+
+| Pace | When |
+| --- | --- |
+| a stroke every beat | the transcript moved in the last 2 minutes |
+| a stroke in three | quiet for longer; after 20 minutes without a busy session it is off duty and sits down |
+| none, the first frame only | it reported `done` or is `paused` |
+
+The two frames swap by visibility in the stylesheet, which both take in the same style pass, so they never show together; with the motion switch on "changes only" or "off", the first frame stays.
 
 ### Motion
 
@@ -203,18 +220,24 @@ When the scene changes between two refreshes, the change plays once on the new d
 | The rod bends, an old boot comes up and falls back | a check failed |
 | The pump works six strokes, water spouts out of the stern, and the water drops from the old level to the new | firstmate's last compaction is newer than the previous reading's |
 | The lamps light one at a time, from the stern | night fell since the previous reading |
+| The bell rings; the hand walks down the gangplank with a crate in its arms, from wherever it stood (a task without a PR leaves from the deck, through the cabin), along the pier to the pile of delivered crates, sets the crate on it, waves and walks off the end of the pier; a scout steps from its skiff onto the pier with its crate | the agent is gone and firstmate closed its task as done (its crate is on the pile now) |
+| The hand walks down the gangplank empty-handed, without the bell, and off the near end of the pier | the agent is gone and its task was not closed as done |
+| The card player gets up as the bell rings and waits at the foot of the gangplank; the one leaving comes down with its crate, the two nod, and each goes on: one to the pile, the other up the gangplank to its place | in the same reading, a hand that held a build slot left and a task that waited for that slot was dispatched |
 
-The page sends the print of the drawing on screen (`data-print`: where each hand stood, where each queued task waited, the rail's checks, firstmate's context and last compaction, and whether the lamps were lit) with its request for the next one, and `ship_events` compares the two.
-Nothing plays when the page has just opened, when the earlier print is more than 90 s old (a tab left in the background, or the board shown meanwhile), or for a change no reading saw happen: a hand that appears aboard without having been queued, a scout's boat, a task that leaves the ship.
-At most four hands walk and three catches come up after one refresh; the rest of that refresh's changes just show in their new places.
+The page sends the print of the drawing on screen (`data-print`: where each hand and each scout stood and the colours to draw it again once gone, where each queued task waited and who held the build slot it waited for, the delivered crates, the rail's checks, firstmate's context and last compaction, and whether the lamps were lit) with its request for the next one, and `ship_events` compares the two.
+Nothing plays when the page has just opened, when the earlier print is more than 90 s old (a tab left in the background, or the board shown meanwhile), or for a change no reading saw happen: a hand that appears aboard without having been queued, a scout's boat at sea.
+A task that goes back to the queue does not leave the ship; a scout walks off only from its skiff moored at the pier.
+The slot is handed over only when the one leaving held it: like firstmate, shipmate counts as the slot's holder a task with no recorded PR, so a hand that opened a PR gave its slot up when it went to the bow, and its departure plays on its own.
+At most two hands leave, four walk and three catches come up after one refresh; the rest of that refresh's changes just show in their new places.
+The gangplank is out only while a hand stands on it; it is put out for whoever walks down or up it, and taken in again behind them.
 Each kind has one detector in `shipmate.py` (`EVENT_DETECTORS`) and one player in the page script (`PLAYERS`), so a new animation is added in those two places.
-The frames it needs (a stride, two holds on the ladder, the arm with the flag, the bent rod, the catch, the jet) are drawn by `hand_sprite` and the server like every other sprite, and arrive with the change.
+The frames it needs (a stride, two holds on the ladder, the arm with the flag, the bent rod, the catch, the jet, the crate carried and the bell's ring) are drawn by `hand_sprite` and the server like every other sprite, and arrive with the change; a hand that has left is drawn from the colours its last print kept.
 
 The "motion" button in the scene's corner cycles through:
 
 | Setting | What moves |
 | --- | --- |
-| all | the ship lives (bobbing, blinking, hammering) and the changes play |
+| all | the ship lives (bobbing, blinking, the tools on deck) and the changes play |
 | changes only | only the changes play |
 | off | nothing moves; every change shows at once in its new place |
 
@@ -258,7 +281,7 @@ A hand fishing at the rail stands over the quarters, and its line hangs in front
 The four stage chips for the queue (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
 A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a hammock sways; nothing there looks like progress, and none of it moves unless the motion switch says "all".
 Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` (with `POSE_HEAD`, where each pose puts the head), the hats in `HATS` and the colours in `hand_palette`, so a new art style replaces those and nothing else; a hand asleep in a hammock, which lies down, is painted by `hammock_sprite`, from the same `hand_palette`.
-A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, flags, a rod, a pack, a map, cards, a mug) make some poses wider.
+A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, a mop and its bucket, a broom, flags, a rod, a pack, a crate, a map, cards, a mug) make some poses wider.
 The captain and firstmate at the helm are drawn on the same scale.
 
 ## Answering the captain's decisions

@@ -246,7 +246,7 @@ def clean_title(t):
     return t
 
 
-LIST_FIELDS = "blocked,blocked_by,created,deps,held,hold_kind,hold_reason,hold_until,priority,links"
+LIST_FIELDS = "blocked,blocked_by,closed,created,deps,held,hold_kind,hold_reason,hold_until,priority,links"
 
 
 def read_backlog(cfg):
@@ -260,6 +260,17 @@ def read_backlog(cfg):
             if v == "-":
                 r[k] = ""
     return rows, None
+
+
+def closed_rows(backlog, now):
+    """The tasks firstmate closed as done in the last DAYS days, oldest first: what the crates on the
+    pier count. firstmate closes a task when it delivers it, so a crate appears with the delivery;
+    the session sheets come later and in batches, and only feed the usage block."""
+    since = (dt.date.fromtimestamp(now) - dt.timedelta(days=DAYS - 1)).isoformat()
+    rows = [{"id": r["id"], "kind": r.get("kind") or "", "repo": r.get("repo") or "", "closed": r["closed"][:10]}
+            for r in backlog or [] if r.get("state") == "done" and (r.get("closed") or "")[:10] >= since]
+    rows.sort(key=lambda r: (r["closed"], r["id"]))
+    return rows
 
 
 def read_projects(home):
@@ -1420,6 +1431,7 @@ class Panel:
                 "accounts": [account_label(path) for _line, path in self.cfg.accounts],
                 "daily": daily_usage(self.cfg, self.index, now),
                 "delivered": delivered(self.cfg, self.index, by_id, now),
+                "closed": closed_rows(backlog, now),
                 "machine": machine_load(),
             }
             for a in snap["agents"]:                       # the hands fishing at the rail: their PR's checks
@@ -1615,6 +1627,8 @@ PT_BR = {
     "Demo: a made-up home, not real data.": "Demo: uma home inventada, não são dados reais.",
     # the ship
     "in the crow's nest with a spyglass": "na gávea com a luneta", "on deck with a hammer": "no convés com o martelo",
+    "on deck with a mop": "no convés com o esfregão", "on deck with a broom": "no convés com a vassoura",
+    "on deck with a hammer, a mop or a broom": "no convés com o martelo, o esfregão ou a vassoura",
     "at the bow, signalling with flags": "na proa, sinalizando com bandeiras", "fishing at the rail": "pescando na amurada",
     "on the gangplank with a pack, waiting to go ashore": "na prancha com a mochila, esperando para desembarcar",
     "on deck, phase unknown": "no convés, fase desconhecida", "rowing out to sea": "remando mar adentro",
@@ -1664,7 +1678,7 @@ PT_BR = {
     "scouts": "batedores", "off duty": "de folga", "waiting for you": "esperando você",
     "in the crow's nest with a spyglass: reading the code and planning before it builds":
         "na gávea com a luneta: lendo o código e planejando antes de construir",
-    "on deck with a hammer: making the change": "no convés com o martelo: fazendo a mudança",
+    "on deck with a hammer, a mop or a broom: making the change": "no convés com o martelo, o esfregão ou a vassoura: fazendo a mudança",
     "at the bow with signal flags: the pull request is open": "na proa com as bandeiras de sinal: o pull request está aberto",
     "fishing at the rail: the checks are running": "pescando na amurada: os checks estão rodando",
     "on the gangplank with a pack: done, waiting to go ashore": "na prancha com a mochila: pronto, esperando para desembarcar",
@@ -2401,7 +2415,7 @@ PLACES = ["nest", "deck", "bow", "rail", "plank"]          # a ship agent's plac
 SCOUT_PLACES = ["out", "back", "dock"]                     # a scout's boat, by scout phase index
 PLACE_TEXT = {
     "nest": "in the crow's nest with a spyglass",
-    "deck": "on deck with a hammer",
+    "deck": "on deck with a hammer, a mop or a broom",
     "bow": "at the bow, signalling with flags",
     "rail": "fishing at the rail",
     "plank": "on the gangplank with a pack, waiting to go ashore",
@@ -2411,6 +2425,12 @@ PLACE_TEXT = {
     "dock": "moored at the pier with the map",
 }
 PLACE_POSE = {"nest": "spy", "deck": "hammer", "bow": "signal", "rail": "fish", "plank": "pack", "hatch": "stand"}
+# On deck the tools take turns among the hands at work, by when each reached the deck: the first
+# hammers, the second mops, the third sweeps, and so on. The tool says nothing about the work; it
+# only tells the hands apart, and stays with a hand while it is on deck.
+DECK_TOOLS = ("hammer", "mop", "broom")
+TOOL_TEXT = {"hammer": "on deck with a hammer", "mop": "on deck with a mop", "broom": "on deck with a broom"}
+BUSY_FOR = 120          # seconds since the last transcript activity while a deck hand works at full pace
 # The queue waits on the pier, and what a queued hand does there says why it waits. Only the
 # queue's own reasons decide it (pier_activity); nothing a queued hand does looks like work.
 PIER_ACTS = {
@@ -2562,6 +2582,20 @@ def pier_activity(q, aboard, today):
     return ("board" if k == "ready" else "wait"), None
 
 
+def deck_tools(hands, now):
+    """The tool of each hand at work on deck (DECK_TOOLS, by when it reached the deck, then by id)
+    and its pace: full while its transcript moved in the last BUSY_FOR seconds, a stroke now and
+    then after that, and none once it reported done or paused, or went off duty."""
+    deck = [h for h in hands if h["place"] == "deck" and not h["line"]]
+    deck.sort(key=lambda h: (h["arrived"] is None, h["arrived"] or 0, h["id"]))
+    for i, h in enumerate(deck):
+        h["tool"] = DECK_TOOLS[i % len(DECK_TOOLS)]
+        if h["off"] or h["crew"] in ("done", "paused"):
+            h["pace"] = "still"
+        else:
+            h["pace"] = "busy" if h["last"] is not None and now - h["last"] <= BUSY_FOR else "slow"
+
+
 def ship_scene(s):
     """What the ship shows, derived from the snapshot alone; render_ship draws it."""
     now, colors, necks = s["now"], project_colors(s), account_colors(s)
@@ -2580,6 +2614,7 @@ def ship_scene(s):
              "phase": tr(phases[ph] if ph is not None and ph < len(phases) else "unknown")}
         h["off"] = off_duty(a, place, h["flag"], now)
         h["checks"] = a.get("checks") if place == "rail" else None
+        h["arrived"], h["last"] = a.get("phase_since"), a.get("last_activity")
         h["since"] = agent_waiting_since(a) if h["flag"] else None
         h["exact"] = True
         (scouts if scout else hands).append(h)
@@ -2606,7 +2641,7 @@ def ship_scene(s):
         q.update(project=q["repo"], phase=tr("queued"), off=False, color=colors.get(q["repo"], "#8a8a8a"))
         if not q["flag"]:
             q["since"] = None
-    crates = [{"id": r.get("id") or "?", "kind": r.get("kind") or "?"} for r in (s.get("delivered") or [])]
+    crates = [{"id": r.get("id") or "?", "kind": r.get("kind") or "?"} for r in (s.get("closed") or [])]
     used = {h["project"] for h in hands + scouts}
     for x in hands + scouts + queue:
         x["line"], x["wait"] = 0, None
@@ -2616,6 +2651,7 @@ def ship_scene(s):
         x["line"], x["wait"] = i + 1, wait_text(x["since"], now, x["exact"])
         x["answer"] = marks.get(x["id"])
         x["tag"] = "%d · %s · %s" % (x["line"], x["id"], x["wait"])
+    deck_tools(hands, now)
     # the captain's queued decisions wait in the captain's line, in the cabin; the rest of the queue is on the pier
     for q in queue:
         if q["line"]:
@@ -2679,11 +2715,18 @@ WALK_PLACES = set(PLACES) | {"hatch", "cabin"}   # where a hand aboard can walk 
 
 def ship_print(sc):
     """What the next reading is compared with: each hand aboard by its place (the cabin when it
-    waits there), each queued task by where it waits (the cabin or the pier), the rail's checks,
-    firstmate's context and last compaction, and whether the lamps are lit."""
+    waits there) and its colours, so it can be drawn again once it has left; each scout by its
+    place; each queued task by where it waits (the cabin or the pier) and, when it waits for a build
+    slot, the tasks that hold that slot; the tasks delivered (the crates on the pier); the rail's
+    checks, firstmate's context and last compaction, and whether the lamps are lit."""
     fm = sc["firstmate"]
     return {"at": int(sc["now"]), "hands": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["hands"]},
+            "scouts": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["scouts"]},
+            "looks": {h["id"]: " ".join(c for c in (h["color"], h.get("neck")) if c) for h in sc["hands"] + sc["scouts"]},
             "queue": {q["id"]: "cabin" if q["line"] else "pier" for q in sc["queue"]},
+            "holds": {q["id"]: " ".join(q["slot"]["holders"]) for q in sc["queue"]
+                      if q["reason"] == "slot" and (q.get("slot") or {}).get("group") and q["slot"].get("holders")},
+            "crates": [c["id"] for c in sc["crates"]],
             "checks": {h["id"]: h["checks"] for h in sc["hands"] if h.get("checks")},
             "context": fm["context"], "compaction": fm["compaction"], "night": sc["night"]}
 
@@ -2711,12 +2754,63 @@ def _number(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-def board_events(prev, cur):
-    """A queued task that firstmate dispatched: it walks up the gangplank to its place, or out of
-    the cabin when it waited there for the captain."""
+def _boards(prev, cur):
     was_queued, was_aboard = _strings(prev, "queue", dict), _strings(prev, "hands", dict)
     return [{"kind": "board", "id": i, "from": "cabin" if was_queued[i] == "cabin" else "pier", "to": p}
             for i, p in sorted(cur["hands"].items()) if i in was_queued and i not in was_aboard and p in WALK_PLACES]
+
+
+def _leaves(prev, cur):
+    """Who left the ship since the last reading: a hand from wherever it stood, a scout only from
+    its skiff moored at the pier (one out at sea is too far to walk); delivered when its task is
+    among the crates now, that is when firstmate closed it as done. Back in the queue is no leaving."""
+    gone = set(cur["hands"]) | set(cur.get("scouts") or ()) | set(cur["queue"])
+    looks, crates = _strings(prev, "looks", dict), set(cur.get("crates") or ())
+    out = [{"kind": "leave", "id": i, "from": p} for i, p in sorted(_strings(prev, "hands", dict).items())
+           if i not in gone and p in WALK_PLACES and valid_id(i)]
+    out += [{"kind": "leave", "id": i, "from": "dock"} for i, p in sorted(_strings(prev, "scouts", dict).items())
+            if i not in gone and p == "dock" and valid_id(i)]
+    for ev in out:
+        ev["delivered"], ev["look"] = ev["id"] in crates, looks.get(ev["id"], "")
+    return out
+
+
+def _handovers(prev, cur):
+    """A build slot handed over at the foot of the gangplank: a hand that held the slot leaves, and a
+    task that waited for that very slot boards, in the same reading. Only a task without a recorded
+    PR holds a slot (queue_rows counts them as firstmate does), so a hand that opened a PR gave its
+    slot up when it went to the bow, and never hands it over here. Each leaver and each boarder
+    takes part in one handover at most."""
+    holds = {q: set(h.split()) for q, h in _strings(prev, "holds", dict).items()}
+    leaves = [ev for ev in _leaves(prev, cur) if ev["from"] != "dock"]
+    out, used = [], set()
+    for b in _boards(prev, cur):
+        if b["from"] != "pier":
+            continue
+        lv = next((ev for ev in leaves if ev["id"] in holds.get(b["id"], ()) and ev["id"] not in used), None)
+        if lv:
+            used.add(lv["id"])
+            out.append({"kind": "handover", "id": lv["id"], "leave": lv, "board": b})
+    return out
+
+
+def board_events(prev, cur):
+    """A queued task that firstmate dispatched: it walks up the gangplank to its place, or out of
+    the cabin when it waited there for the captain (unless it boards in a handover)."""
+    taken = {h["board"]["id"] for h in _handovers(prev, cur)}
+    return [ev for ev in _boards(prev, cur) if ev["id"] not in taken]
+
+
+def leave_events(prev, cur):
+    """A hand that left the ship: it walks down the gangplank, with its crate to the pile on the
+    pier when it was delivered and empty-handed off the pier when not (unless it hands its slot over)."""
+    taken = {h["id"] for h in _handovers(prev, cur)}
+    return [ev for ev in _leaves(prev, cur) if ev["id"] not in taken]
+
+
+def handover_events(prev, cur):
+    """A slot handed over: the one who leaves and the one who boards meet at the gangplank's foot."""
+    return _handovers(prev, cur)
 
 
 def move_events(prev, cur):
@@ -2752,9 +2846,9 @@ def lights_events(prev, cur):
 
 # each detector with the group it counts in; past a group's limit the rest of a refresh's changes
 # just show in their new places, so a busy refresh never fills the ship with walkers
-EVENT_DETECTORS = ((board_events, "walk"), (move_events, "walk"), (checks_events, "checks"),
-                   (pump_events, "pump"), (lights_events, "lights"))
-EVENT_LIMITS = {"walk": 4, "checks": 3, "pump": 1, "lights": 1}
+EVENT_DETECTORS = ((handover_events, "leave"), (leave_events, "leave"), (board_events, "walk"), (move_events, "walk"),
+                   (checks_events, "checks"), (pump_events, "pump"), (lights_events, "lights"))
+EVENT_LIMITS = {"leave": 2, "walk": 4, "checks": 3, "pump": 1, "lights": 1}
 
 
 def ship_events(prev, cur):
@@ -2776,12 +2870,42 @@ def ship_events(prev, cur):
 
 
 WALK_POSES = ("walk", "walk-l", "stand", "stand-l", "climb", "climb2")
+CARRY_POSES = ("carry", "carry-l", "carry2", "carry2-l")
+RE_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def gone_hand(ev):
+    """A hand that has left the ship, drawn again from the colours its last print kept (a colour
+    that is not one is dropped, since the print came back from the page)."""
+    look = [c for c in (ev.get("look") or "").split() if RE_COLOR.match(c)]
+    return {"id": ev["id"], "color": look[0] if look else None, "neck": look[1] if len(look) > 1 else None,
+            "kind": "hand", "place": "deck", "flag": False, "off": False}
+
+
+def leave_sprites(ev):
+    """A leaving hand: walking, and with its crate in its arms when it was delivered; the bell's ring."""
+    hand = gone_hand(ev)
+    f = {k: hand_frame(hand, k) for k in WALK_POSES + ("wave", "wave-l")}
+    if ev.get("delivered"):
+        f.update({k: hand_frame(hand, k) for k in CARRY_POSES})
+        p = Pix()
+        p.shaded(0, 0, CRATE, CRATE_INK)
+        f["crate"] = p.svg()
+        p = Pix()
+        for x, y in ((0, 0), (-1, 1), (-1, 2), (0, 3), (6, 0), (7, 1), (7, 2), (6, 3)):
+            p.dot(x, y, "#fff3b0")
+        f["ring"] = p.svg()
+    return dict(ev, frames=f)
 
 
 def event_sprites(ev, sc):
     """The frames the page needs to play one event, drawn here like every other sprite: the hand
     that walks (ashore in its straw hat first when it boards), the flag it waves on its way to the
     cabin, the bent rod and the catch, the pump's jet."""
+    if ev["kind"] == "leave":
+        return leave_sprites(ev)
+    if ev["kind"] == "handover":
+        return dict(ev, leave=leave_sprites(ev["leave"]), board=event_sprites(ev["board"], sc))
     hand = next((h for h in sc["hands"] if h["id"] == ev.get("id")), None)
     f = {}
     if ev["kind"] in ("move", "board") and hand:
@@ -3057,7 +3181,9 @@ def ship_layout(sc):
         else:
             put[h["id"]] = (main_x + 14 + NEST_STEP * (i - NEST_SEATS - 3), FAR + 6, "spy", None)
     for i, h in enumerate(by["deck"]):
-        put[h["id"]] = (deck_x + 12 + DECK_STEP * (i // 2) + DECK_STEP // 2 * (i % 2), 194 if i % 2 == 0 else 183, "hammer", None)
+        tool = h.get("tool") or "hammer"
+        put[h["id"]] = (deck_x + 12 + DECK_STEP * (i // 2) + DECK_STEP // 2 * (i % 2) - pose_left(tool),
+                        194 if i % 2 == 0 else 183, tool, None)
     for i, h in enumerate(by["hatch"]):
         put[h["id"]] = (hatch_x + 38 + HATCH_STEP * i, 188, "stand", None)
     for i, h in enumerate(by["rail"]):
@@ -3089,6 +3215,7 @@ def ship_layout(sc):
         out["scouts"][h["id"]] = (right + 44 + SCOUT_STEP * i, WL + 16, "scroll", SKIFF_UPTO)
     for i, h in enumerate(sb["dock"]):
         out["scouts"][h["id"]] = (right + SCOUT_STEP * i, PIER - 2, "stand", SKIFF_UPTO)
+    out["dock_x"] = right
     out["crates_x"] = right + SCOUT_STEP * max(1, len(sb["dock"])) + 10
     widest = max([1] + [len(v) for v in sb.values()] + [len(sb["back"]) + 2])
     out["width"] = max(640, right + SCOUT_STEP * widest + 9 * ((min(len(sc["crates"]), MAX_CRATES) + 2) // 3) + 70)
@@ -3176,6 +3303,35 @@ SIT = ([(x, 15, "p") for x in range(3, 11)] + [(x, 16, "p") for x in range(3, 12
        + [(11, 17, "p"), (12, 17, "p"), (11, 18, "b"), (12, 18, "b"), (13, 18, "b"), (14, 18, "b")]
        + [(x, y, "O") for x in range(1, 8) for y in (17, 18)])
 UPPER = STAND[:16]
+# a crate held in front with both hands, carried off the ship to the pile on the pier
+CRATE_HELD = ([(x, y, "O") for x in range(7, 15) for y in (10, 16)] + [(x, y, "O") for x in (7, 14) for y in range(10, 17)]
+              + [(x, y, "M") for x in range(8, 14) for y in range(11, 16)] + [(x, 13, "o") for x in range(8, 14)]
+              + [(8, 11, "o"), (13, 15, "o"), (6, 13, "s"), (15, 13, "s")])
+
+
+def long_tool(top, bottom, head):
+    """A long-handled tool held in the right hand at (13, 13): the arm reaching down and forward,
+    the handle from `top` to `bottom`, then the head's pixels."""
+    px = [(11, 11, "c"), (12, 12, "c"), (13, 13, "s")]
+    px += [(x, y, "o") for x, y in line_points(top[0], top[1], bottom[0], bottom[1]) if (x, y) != (13, 13)]
+    return px + head
+
+
+def broom_head(x):
+    """Straw bristles splayed on the deck, bound with a dark cord."""
+    return ([(x + i, 17, "T") for i in (-1, 0, 1)] + [(x + i, 18, "g") for i in range(-2, 3)]
+            + [(x + i, 19, "g") for i in range(-3, 4)] + [(x + i, 20, "T") for i in (-3, -1, 1, 3)]
+            + [(x + i, 20, "g") for i in (-2, 0, 2)])
+
+
+def mop_head(x, lean):
+    """Grey cotton strands dragged along the deck."""
+    return ([(x + i, 18, "G") for i in (-1, 0, 1)] + [(x + i, 19, "l") for i in range(-2, 3)]
+            + [(x + i + lean, 20, c) for i, c in ((-3, "l"), (-2, "G"), (-1, "l"), (0, "l"), (1, "G"), (2, "l"), (3, "l"))])
+
+
+MOP_BUCKET = [(x, 17, "G") for x in range(0, 6)] + [(0, 18, "G"), (5, 18, "G")] + [(x, 18, "u") for x in range(1, 5)] \
+    + [(0, 19, "G"), (5, 19, "G")] + [(x, 19, "o") for x in range(1, 5)] + [(x, 20, "G") for x in range(1, 5)]
 
 
 def seated(w, sets=(), clear=()):
@@ -3221,11 +3377,28 @@ POSES = {
     "wave": build_pose(14, 21, 0, 0, [(11, 11, "c"), (12, 10, "c"), (12, 9, "c"), (13, 8, "s"), (13, 7, "s")], clear=ARM_R),
     "reel": build_pose(26, 21, 0, 0, [(11, 13, "s"), (12, 13, "s")] + [(x, y, "o") for x, y in line_points(13, 13, 22, 4)]
                        + [(x, y, "o") for x, y in line_points(22, 4, 25, 6)], clear=[(11, 14), (11, 15)]),
+    # a delivery: the crate carried down the gangplank and along the pier to the pile (ship_events)
+    "carry": build_pose(16, 21, 0, 0, STRIDE + CRATE_HELD, clear=LEGS + ARM_L + ARM_R),
+    "carry2": build_pose(16, 21, 0, 0, CRATE_HELD, clear=ARM_L + ARM_R),
+    # the deck's tools (DECK_TOOLS), each with its second frame: the blow that throws chips, the
+    # mop's stroke that leaves the deck wet behind it, the broom's sweep that raises dust
+    "hammer2": build_pose(22, 26, 0, 5, [(11, 11, "c"), (12, 12, "c"), (13, 13, "s")]
+                          + [(x, y, "o") for x, y in line_points(14, 14, 16, 17)]
+                          + [(x, y, "G") for x in range(15, 19) for y in (18, 19)] + [(15, 20, "G"), (18, 20, "G")]
+                          + [(20, 16, "t"), (21, 14, "t"), (19, 13, "t")], clear=ARM_R),
+    "mop": build_pose(30, 21, 6, 0, long_tool((9, 7), (19, 18), mop_head(19, 1))
+                      + [(x - 6, y, c) for x, y, c in MOP_BUCKET], clear=ARM_R),
+    "mop2": build_pose(30, 21, 6, 0, long_tool((12, 7), (15, 18), mop_head(15, -1) + [(x, 20, "l") for x in range(19, 24)])
+                       + [(x - 6, y, c) for x, y, c in MOP_BUCKET], clear=ARM_R),
+    "broom": build_pose(24, 21, 0, 0, long_tool((9, 7), (19, 17), broom_head(19)), clear=ARM_R),
+    "broom2": build_pose(24, 21, 0, 0, long_tool((12, 7), (15, 17), broom_head(15))
+                         + [(19, 18, "m"), (21, 16, "m"), (22, 18, "m"), (20, 14, "m")], clear=ARM_R),
 }
 # the same poses facing left, for the line in the captain's cabin and across a card table
 POSES.update({k + "-l": [r[::-1] for r in v] for k, v in list(POSES.items())})
 # where each pose puts STAND's top left corner, so the hat, the name tag and the flag find the head
 POSE_HEAD = {"walk": (0, 0), "climb": (0, 0), "climb2": (0, 0), "wave": (0, 0), "reel": (0, 0),
+             "carry": (0, 0), "carry2": (0, 0), "hammer2": (0, 5), "mop": (6, 0), "mop2": (6, 0), "broom": (0, 0), "broom2": (0, 0),
              "stand": (0, 0), "spy": (0, 0), "hammer": (0, 5), "signal": (5, 5), "fish": (0, 0), "pack": (4, 0),
              "scroll": (0, 0), "rest": (0, 2), "cards": (0, 2), "drink": (0, 2), "talk": (0, 0)}
 ROD_TIP = (25, 0)     # the fishing rod's tip in the fish pose, where the line hangs from
@@ -3327,6 +3500,7 @@ ZZZ = ["www...", "..w...", ".w.www", "www..w", "....w.", "...www"]
 WHEEL = ["..o.o..", ".ooooo.", "oo.O.oo", ".oOOOo.", "oo.O.oo", ".ooooo.", "..o.o.."]
 BARREL = ["..OOOOO..", ".OoooooO.", "OGGGGGGGO", "OoooooooO", "OoooooooO", "OoooooooO", "OGGGGGGGO",
           "OoooooooO", "OoooooooO", "OGGGGGGGO", ".OoooooO.", "..OOOOO.."]
+BELL = ["..g..", ".ggg.", ".ggg.", "ggggg", "..T.."]
 CRATE = ["OOOOOOOO", "OoMMMMoO", "OMoMMoMO", "OMMooMMO", "OMMooMMO", "OMoMMoMO", "OoMMMMoO", "OOOOOOOO"]
 BOAT = ["O..............O", "OoooooooooooooOO", ".OooooooooooooO.", "..OOOOOOOOOOOO.."]
 MAP = ["MmmmmmmmM", "Mmmxmmmm.", "Mmmmmxmm.", "MmxmmmmmM"]
@@ -3624,7 +3798,8 @@ CHECKS_TEXT = {"pass": "every check passed", "fail": "a check failed", "pending"
 def hand_title(h):
     """What a hand's tooltip says: who, where and why, and its place in the captain's line."""
     state = tr("; off duty") if h["off"] else ""
-    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or tr("no project"), tr(PLACE_TEXT[h["place"]]), h["phase"], state,
+    where = TOOL_TEXT.get(h.get("tool")) if h["place"] == "deck" and h.get("tool") else PLACE_TEXT[h["place"]]
+    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or tr("no project"), tr(where), h["phase"], state,
                                        tr("; needs the captain: ") + "; ".join(h["why"]) if h["flag"] else "")
     if h.get("kind") == "queue":
         title += " · %s%s" % (", ".join(h["why"]), (" · " + h["title"]) if h.get("title") else "")
@@ -3683,12 +3858,21 @@ def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
         red_flag(f, cx - 8, head - 10)
         flag = f.svg(' class="sm-redflag"')
     tags.place(h.get("tag") or h["id"], cx, head - (10 if h["flag"] else 1), h["id"], hover=hover_tag)
+    # a tool on deck has a second frame (the blow, the stroke, the sweep): the stylesheet shows the
+    # two in turn at the hand's pace, and only the first while it rests or motion is off
+    tool = h.get("tool") if base == h.get("tool") else None
+    alt, cls = "", ""
+    if tool:
+        a = Pix()
+        hand_sprite(a, h, x, feet, tool + "2" + ("-l" if left else ""), upto)
+        alt, cls = a.svg(' class="sm-alt"'), " tool-%s pace-%s" % (tool, h.get("pace") or "still")
     title = hand_title(h)
     stage = h.get("stage") or ("scouts" if h.get("kind") == "scout" else h["place"])
-    return ('%s<g class="sm-hand pose-%s%s" data-id="%s" data-stage="%s" data-at="%d,%d"%s tabindex="0" role="button" aria-label="%s">'
-            '<title>%s</title>%s%s</g>'
-            % (shadow(cx, feet + 1, 16) if shadow_on else "", base, " has-flag" if h["flag"] else "", esc(h["id"]), stage,
-               x + pose_left(pose), feet, ' data-off="1"' if h["off"] else "", esc(tr("%s: details") % title), esc(title), p.svg(), flag))
+    return ('%s<g class="sm-hand pose-%s%s%s" data-id="%s" data-stage="%s" data-at="%d,%d"%s tabindex="0" role="button" aria-label="%s">'
+            '<title>%s</title>%s%s%s</g>'
+            % (shadow(cx, feet + 1, 16) if shadow_on else "", base, cls, " has-flag" if h["flag"] else "", esc(h["id"]), stage,
+               x + pose_left(pose), feet, ' data-off="1"' if h["off"] else "", esc(tr("%s: details") % title), esc(title), p.svg(),
+               alt, flag))
 
 
 def boat_pix(x, wl):
@@ -4264,25 +4448,34 @@ def render_ship(sc):
         pier.shaded(x, PIER - 4, ["OOO", "OoO", "OoO"], {"O": "#2a1a10", "o": "#4a3020"})
     ashore.append(pier.svg())
     ashore.append(draw_pier(sc, lay, tags, lights, night))
-    for i in range(min(len(sc["crates"]), MAX_CRATES)):
-        stuff.shaded(lay["crates_x"] + 9 * (i // 3), PIER + 2 - 8 * (i % 3 + 1), CRATE, CRATE_INK)
-    ashore.append('<g><title>%s</title>%s</g>'
+    # the newest MAX_CRATES crates, each its own drawing so the page can hold one back while its
+    # hand carries it there (ship_events)
+    crates = []
+    for i, c in enumerate(sc["crates"][-MAX_CRATES:]):
+        cx, cy = crate_spot(lay, i)
+        cp = Pix()
+        cp.shaded(cx, cy, CRATE, CRATE_INK)
+        crates.append(cp.svg(' class="sm-crate" data-for="%s" data-at="%d,%d"' % (esc(c["id"]), cx, cy)))
+    newest = [c["id"] for c in reversed(sc["crates"][-20:])]
+    ashore.append('<g><title>%s</title>%s%s</g>'
                   % (esc(tr("%d task delivered in the last %d days%s" if len(sc["crates"]) == 1 else "%d tasks delivered in the last %d days%s")
-                         % (len(sc["crates"]), DAYS, ": " + ", ".join(c["id"] for c in sc["crates"][:20]) if sc["crates"] else "")),
-                     stuff.svg()))
+                         % (len(sc["crates"]), DAYS, ": " + ", ".join(newest) if sc["crates"] else "")),
+                     stuff.svg(), "".join(crates)))
     if len(sc["crates"]) > MAX_CRATES:
         ashore.append('<text class="sm-ship__more" x="%d" y="%d">+%d</text>'
                       % (lay["crates_x"] + 9 * (MAX_CRATES // 3) + 2, PIER - 4, len(sc["crates"]) - MAX_CRATES))
+    bell = Pix()                                         # the ship's bell on the stern castle's rail
+    bell.rect(x0 + 62, 126, 1, 8, "#3e220f")
+    bell.rect(x0 + 62, 126, 9, 1, "#3e220f")
+    bell.shaded(x0 + 66, 127, BELL, {})
+    ship.append(bell.svg(' class="sm-bell"'))
     (px0, py0), (px1, py1) = lay["plank"]
     if hands_at("plank"):
-        plank = Pix()
-        for k in range(5):
-            plank.line(px0 + k, py0, px1 + k, py1, ("#e0aa72", "#d6a06a", "#b07a45", "#b07a45", "#6b3a1c")[k])
-        for t in (0.2, 0.4, 0.6, 0.8):
-            plank.rect(int(px0 + (px1 - px0) * t), int(py0 + (py1 - py0) * t), 5, 1, "#5a3418")
-        ashore.append(shadow(px1 + 10, py1, 24, 3, 0.25) + plank.svg())
+        ashore.append(shadow(px1 + 10, py1, 24, 3, 0.25) + plank_svg(lay["plank"]))
         for h in hands_at("plank"):
             ashore.append(hand_svg(h, spots[h["id"]], tags, shadow_on=False))
+    else:
+        ashore.append(plank_svg(lay["plank"], hidden=True))
     # the near layer: out of focus, dark and chunky, at the edges so it hides nobody
     fg = Pix()
     fg.rect(4, PIER + 13, 18, SHIP_H - PIER - 13, "#1c120a")      # below the pier's surface: the queue stands on it
@@ -4307,7 +4500,8 @@ def render_ship(sc):
     geo = {"ladder": [[main_x - 38, FAR], [main_x - 8, 46]], "walk": DECK_WALK, "deck_x": deck_x, "nest": nx,
            "door": lay["cabin"][1] - 8, "floor": CABIN_FLOOR - 2, "fc": [fc_x, BOW_WALK], "plank": [[px0, py0], [px1, py1]],
            "pier": PIER_FEET, "stern": x0, "wl": WL, "rod": list(ROD_TIP), "reel": list(REEL_TIP),
-           "hold": [hx0, hx1, hy1, room, thr], "pump": [pump_x, hy0]}
+           "hold": [hx0, hx1, hy1, room, thr], "pump": [pump_x, hy0],
+           "crates": lay["crates_x"], "dock": lay["dock_x"], "bell": [x0 + 66, 127], "edge": W}
     args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc(tr("The ship: %s") % ship_counts(sc)), W, SHIP_H)
             + tuple(lay["crew"])
             + (esc(json.dumps(ship_print(sc), separators=(",", ":"))), esc(json.dumps(geo, separators=(",", ":"))))
@@ -4320,6 +4514,23 @@ def render_ship(sc):
             '<rect x="-3000" y="-3000" width="7000" height="3010" fill="%s"/>'
             '<g class="sm-far">%s</g><g class="sm-mid">%s<g class="sm-bob">%s</g>%s</g>%s'
             '<g class="sm-near">%s</g><g class="sm-lights">%s</g><g class="sm-tags">%s</g></svg>' % args)
+
+
+def crate_spot(lay, i):
+    """Where the i-th crate of the pile on the pier stands: columns of three, from the left."""
+    return lay["crates_x"] + 9 * (i // 3), PIER + 2 - 8 * (i % 3 + 1)
+
+
+def plank_svg(plank, hidden=False):
+    """The gangplank from the ship down to the pier. It is out only while a hand stands on it; the
+    page puts it out again for a hand that walks down it (ship_events)."""
+    (px0, py0), (px1, py1) = plank
+    p = Pix()
+    for k in range(5):
+        p.line(px0 + k, py0, px1 + k, py1, ("#e0aa72", "#d6a06a", "#b07a45", "#b07a45", "#6b3a1c")[k])
+    for t in (0.2, 0.4, 0.6, 0.8):
+        p.rect(int(px0 + (px1 - px0) * t), int(py0 + (py1 - py0) * t), 5, 1, "#5a3418")
+    return p.svg(' class="sm-plank"' + (' visibility="hidden"' if hidden else ""))
 
 
 def sprite_icon(rows, pal, scale=2):
@@ -4359,7 +4570,7 @@ def flag_icon(scale=2):
 # the stages a chip lights: key, pose, name, and where a hand stands and what that means
 STAGES = [
     ("nest", "spy", "exploring", "in the crow's nest with a spyglass: reading the code and planning before it builds"),
-    ("deck", "hammer", "implementing", "on deck with a hammer: making the change"),
+    ("deck", "hammer", "implementing", "on deck with a hammer, a mop or a broom: making the change"),
     ("bow", "signal", "PR open", "at the bow with signal flags: the pull request is open"),
     ("rail", "fish", "waiting for CI", "fishing at the rail: the checks are running"),
     ("plank", "pack", "ready to merge", "on the gangplank with a pack: done, waiting to go ashore"),
@@ -4456,11 +4667,12 @@ def demo_snapshot(now=None, moved=False):
     Every name in it is invented; nothing is read from disk. `moved` is the same home a moment
     later, so the ship's animations have something to show: a lookout went down to the deck, a
     deck hand asked the captain, the blocked hand was answered, a ready task was dispatched, the
-    checks at the rail came back, and firstmate's context was compacted."""
+    checks at the rail came back, firstmate's context was compacted, a hand on the gangplank was
+    delivered, and a deck hand without a PR was delivered and handed its build slot to a card player."""
     now = time.time() if now is None else now
     h = 3600
 
-    def agent(tid, title, project, phase, crew="working", kind="ship", decisions=(), pr=None, ago=2 * h):
+    def agent(tid, title, project, phase, crew="working", kind="ship", decisions=(), pr=None, ago=2 * h, quiet=300):
         phases = SCOUT_PHASES if kind == "scout" else SHIP_PHASES
         spawn = now - ago
         times = [spawn + i * ago / 5.0 if phase is not None and i <= phase else None for i in range(len(phases))]
@@ -4472,12 +4684,13 @@ def demo_snapshot(now=None, moved=False):
                              if kind == "ship" and phase is not None and phase >= 2 else None),
                 "tokens": {"new": 40000 + len(tid) * 3100, "cache": 900000 + len(title) * 9000, "calls": 40, "model": None},
                 "cites": True, "sessions": 1, "context": 60000 + len(title) * 1500, "context_limit": 200000,
-                "context_how": "inferred", "last_activity": now - 300, "checks": None,
+                "context_how": "inferred", "last_activity": now - quiet, "checks": None,
                 "decisions": [{"state": st, "key": k, "at": int(now - age), "text": t} for st, k, t, age in decisions]}
 
     agents = [
         agent("DEMO-SEARCH", "Find where the search index drifts", "harbor-api", 1 if moved else 0),
-        agent("DEMO-AUTH", "Rotate session tokens on login", "harbor-api", 1),
+        agent("DEMO-AUTH", "Rotate session tokens on login", "harbor-api", 1, ago=3 * h, quiet=30),
+        agent("DEMO-SYNC", "Sync the tide tables offline", "tide-charts", 1, ago=h, quiet=20),
         agent("DEMO-RATE", "Rate limit the public endpoints", "harbor-api", 1, crew="parked",
               decisions=[("needs-decision", "limits", "per user or per key? A) per user B) per key", 50 * 60)]),
         agent("DEMO-CACHE", "Cache the tide tables", "harbor-api", 2),
@@ -4500,12 +4713,17 @@ def demo_snapshot(now=None, moved=False):
             a["checks"] = ({"DEMO-LOGS": "pass", "DEMO-FORMS": "fail"}[a["id"]] if moved else "pending")
     if moved:
         agents.append(agent("DEMO-Q-THEME", "Theme picker", "lighthouse-web", 0, ago=60))
+        # delivered: the hand on the gangplank, and the deck hand without a PR, whose build slot the
+        # first card player took
+        agents = [a for a in agents if a["id"] not in ("DEMO-I18N", "DEMO-AUTH")]
+        agents.append(agent("DEMO-Q-PUSH", "Push notifications", "harbor-api", 0, ago=60))
     day = dt.date.fromtimestamp(now)
-    slot = {"group": "harbor-api", "cap": 2, "taken": 2, "holders": ["DEMO-AUTH", "DEMO-RATE"]}
+    holders = ["DEMO-Q-PUSH", "DEMO-RATE"] if moved else ["DEMO-AUTH", "DEMO-RATE"]
+    slot = {"group": "harbor-api", "cap": 2, "taken": 2, "holders": holders}
 
     def queued(tid, title, repo, reason, kind="ship", hold="", deps=(), days=0):
         short, full = {
-            "slot": (tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % (repo, 2, 2, "DEMO-AUTH, DEMO-RATE")),
+            "slot": (tr("build slot %d/%d") % (2, 2), tr("build slots for %s: %d of %d taken (%s)") % (repo, 2, 2, ", ".join(holders))),
             "decision": (tr("captain's decision"), hold),
             "date": (tr("held until %s") % fmt_date_iso((day + dt.timedelta(days=3)).isoformat()), "held"),
             "task": (tr("waits for %s") % ", ".join(deps), tr("waits for %s") % ", ".join(deps)),
@@ -4518,10 +4736,10 @@ def demo_snapshot(now=None, moved=False):
 
     # every way to wait: for a build slot (cards today, the tavern since an earlier day), with nothing
     # holding it, for a hand aboard or for a queued task, for a date, and for the captain
-    queue = [
-        queued("DEMO-Q-PUSH", "Push notifications", "harbor-api", "slot"),
+    queue = ([] if moved else [queued("DEMO-Q-PUSH", "Push notifications", "harbor-api", "slot")]) + [
         queued("DEMO-Q-BILL", "New billing plan", "harbor-api", "decision", hold="which plan ships first"),
         queued("DEMO-Q-MAPS", "Offline maps", "lighthouse-web", "date"),
+        queued("DEMO-Q-AUDIT", "Audit log", "harbor-api", "ready") if moved else
         queued("DEMO-Q-AUDIT", "Audit log", "harbor-api", "task", deps=["DEMO-AUTH"]),
     ] + ([] if moved else [queued("DEMO-Q-THEME", "Theme picker", "lighthouse-web", "ready")]) + [
         queued("DEMO-Q-TILES", "Faster chart tiles", "tide-charts", "decision", kind="scout", hold="worth a scout?"),
@@ -4556,6 +4774,11 @@ def demo_snapshot(now=None, moved=False):
                                "sheet_total": 3000000, "split": {"new": 300000 + i * 20000, "cache": 2600000, "calls": 80,
                                                                  "model": None, "subagents": i % 2},
                                "pr": None, "pr_number": 100 + i if kind == "ship" else None, "partial": False})
+    closed = [{"id": r["id"], "kind": r["kind"], "repo": "harbor-api", "closed": (day - dt.timedelta(days=1 + i // 2)).isoformat()}
+              for i, r in enumerate(delivered_rows)]
+    closed.sort(key=lambda r: (r["closed"], r["id"]))
+    if moved:
+        closed += [{"id": tid, "kind": "ship", "repo": "harbor-api", "closed": day.isoformat()} for tid in ("DEMO-AUTH", "DEMO-I18N")]
     fm = {"session": "demo0000-session", "found_by": tr("the demo"), "model": "model-a", "context": 144000,
           "last_call": now - 60, "limit": 200000, "limit_how": "inferred", "percent": 72.0,
           "warn_at": DEFAULT_CONTEXT_WARN, "growth": 38000, "growth_since": now - GROWTH_HOURS * h,
@@ -4569,7 +4792,7 @@ def demo_snapshot(now=None, moved=False):
         "firstmate": fm,
         "agents": agents, "queue": queue, "backlog_error": None,
         "projects": ["harbor-api", "lighthouse-web", "tide-charts"], "accounts": ["account-a", "account-b", "ordinary"],
-        "daily": daily, "delivered": delivered_rows,
+        "daily": daily, "delivered": delivered_rows, "closed": closed,
         "quota": {"lanes": [lane("account-a", 8, 30, "projected_exhaustion", 5),
                             lane("account-b", 41, 50, "through_reset"),
                             lane("ordinary", 86, 90, "through_reset")], "at": None, "error": None},

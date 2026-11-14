@@ -323,7 +323,8 @@
         requestAnimationFrame(tick);
       });
     }
-    // hides one hand (its shadow and name tag too) until the animation ends or stops
+    // hides one hand (its shadow and name tag too) until the animation ends or stops; by opacity,
+    // which no frame inside can undo (a deck tool's frames take turns by visibility, see the stylesheet)
     function hide(svg, sel) {
       var els = [].slice.call(svg.querySelectorAll(sel));
       els.forEach(function (g) {
@@ -332,8 +333,8 @@
         var id = g.getAttribute("data-id");
         if (id) [].push.apply(els, svg.querySelectorAll('.sm-tag[data-for="' + id + '"]'));
       });
-      els.forEach(function (e) { e.style.visibility = "hidden"; });
-      var back = function () { els.forEach(function (e) { e.style.visibility = ""; }); };
+      els.forEach(function (e) { e.style.opacity = "0"; e.style.pointerEvents = "none"; });
+      var back = function () { els.forEach(function (e) { e.style.opacity = ""; e.style.pointerEvents = ""; }); };
       undo.push(back);
       return back;
     }
@@ -373,6 +374,7 @@
         if (l[0] - from[0] > 0.5) right = true; else if (l[0] - from[0] < -0.5) right = false;
         var step = Math.floor(want / 4) % 2, key;
         if (l[2] === "climb") key = step ? "climb" : "climb2";
+        else if (l[2] === "carry") key = (step ? "carry" : "carry2") + (right ? "" : "-l");
         else key = (l[2] === "ashore" ? "ashore-" : "") + (step ? "walk" : "stand") + (right ? "" : "-l");
         if (g._key !== key && f[key]) { g.innerHTML = f[key]; g._key = key; }
         put(g, px, py - (step && l[2] !== "climb" ? 1 : 0));
@@ -388,6 +390,7 @@
       else if (ashore) start = [geo.plank[1][0] - 4, geo.pier];
       if (!end || !f.stand || !start) { show(); return; }
       var g = sprite(f[ashore ? "ashore-stand" : "stand"], start[0], start[1], ctx.layer);
+      var plank = ashore ? plankOut(ctx) : null;
       if (f.alarm) {                                    // the red flag goes up before the walk to the cabin
         g.innerHTML = f.alarm;
         for (var i = 0; i < 6; i++) { put(g, start[0] + (i % 2), start[1]); await sleep(200); }
@@ -400,8 +403,122 @@
       var legs = route(fz, start, tz, end, geo);
       var len = legs.reduce(function (a, l, j) { var p = j ? legs[j - 1] : start; return a + Math.hypot(l[0] - p[0], l[1] - p[1]); }, 0);
       await walk(g, start, legs, f, Math.min(ashore ? 7 : 5, Math.max(1.5, len / 90)));
+      if (plank) plank();
       g.remove();
       show();
+    }
+
+    // the gangplank is out only while a hand stands on it: it is put out for whoever walks it, and
+    // taken in again when the last of them is off it
+    function plankOut(ctx) {
+      var p = ctx.svg.querySelector(".sm-plank");
+      if (!p || p.getAttribute("visibility") !== "hidden") return function () {};
+      ctx.planks = (ctx.planks || 0) + 1;
+      p.setAttribute("visibility", "visible");
+      var back = function () { p.setAttribute("visibility", "hidden"); };
+      undo.push(back);
+      var done = false;
+      return function () { if (!done && --ctx.planks === 0) back(); done = true; };
+    }
+    function length(start, legs) {
+      return legs.reduce(function (a, l, j) { var p = j ? legs[j - 1] : start; return a + Math.hypot(l[0] - p[0], l[1] - p[1]); }, 0);
+    }
+    function go(g, legs, f, speed) {
+      var start = [g._x, g._y];
+      return walk(g, start, legs, f, Math.max(0.6, length(start, legs) / speed));
+    }
+
+    // -- a hand leaves the ship (kind leave): down the gangplank, with its crate to the pile on the
+    // pier when firstmate closed its task as done, empty-handed off the pier when not
+    async function ringBell(ctx, f) {
+      var bell = ctx.svg.querySelector(".sm-bell");
+      if (!bell || !f.ring) return;
+      undo.push(function () { bell.removeAttribute("transform"); });
+      for (var i = 0; i < 6; i++) {
+        bell.setAttribute("transform", "translate(" + (i % 2 ? 1 : -1) + " 0)");
+        var r = sprite(f.ring, ctx.geo.bell[0] - 1, ctx.geo.bell[1] + 1, ctx.layer);
+        await sleep(200);
+        r.remove();
+        await sleep(80);
+      }
+      bell.removeAttribute("transform");
+    }
+    // meet, for a handover: called at the foot of the gangplank, and the walk goes on when it settles
+    async function playLeave(ev, ctx, meet) {
+      var svg = ctx.svg, geo = ctx.geo, f = ev.frames, pl = geo.plank, carry = ev.delivered ? "carry" : "walk";
+      var old = ctx.before.at[ev.id], was = ctx.before.geo || geo, showCrate = ctx.hidden["crate " + ev.id];
+      if (!old || !f.stand) { if (showCrate) showCrate(); if (meet) await meet(null); return; }
+      var fz = ev.from === "dock" ? "dock" : zone(ev.from);
+      var start = [old[0] + (fz === "dock" ? geo.dock - (was.dock || geo.dock) : origin(fz, geo) - origin(fz, was)), old[1]];
+      var foot = [pl[1][0] - 4, geo.pier], top = [pl[0][0] - 4, pl[0][1]], legs;
+      if (fz === "dock") legs = [[start[0], geo.pier, carry]];            // from the skiff up onto the pier
+      else if (fz === "plank") legs = [[foot[0], foot[1], carry]];        // straight down from where it stands
+      else legs = route(fz, start, "plank", top, geo).map(function (l) { return [l[0], l[1], l[2] === "walk" ? carry : l[2]]; })
+        .concat([[foot[0], foot[1], carry]]);
+      var g = sprite(f[ev.delivered ? "carry2" : "stand"], start[0], start[1], ctx.layer);
+      var plank = fz === "dock" ? null : plankOut(ctx);
+      if (ev.delivered) ringBell(ctx, f).catch(function () {});
+      await sleep(400);
+      await go(g, legs, f, 55);
+      if (plank) plank();
+      if (meet) await meet(g);
+      if (!ev.delivered) {                                               // nothing to deliver: off the pier, the near end
+        await go(g, [[-16, geo.pier, "walk"]], f, 70);
+        g.remove();
+        return;
+      }
+      var crate = svg.querySelector('.sm-crate[data-for="' + ev.id + '"]'), spot = crate ? at(crate) : null;
+      await go(g, [[geo.crates - 15, geo.pier, "carry"]], f, 100);
+      g.innerHTML = f.stand; g._key = "stand";
+      if (spot) {                                                        // it sets the crate on its place in the pile
+        var from = [g._x + 6, g._y - 16], c = sprite(f.crate, from[0], from[1], ctx.layer);
+        await frames(function (t) {
+          var k = Math.min(1, t / 0.45);
+          put(c, from[0] + (spot[0] - from[0]) * k, from[1] + (spot[1] - from[1]) * k - 24 * k * (1 - k));
+          return k < 1;
+        });
+        c.remove();
+      }
+      if (showCrate) showCrate();
+      g.innerHTML = f.wave; g._key = "wave";
+      await sleep(700);
+      await go(g, [[geo.edge + 16, geo.pier, "walk"]], f, 100);
+      g.remove();
+    }
+
+    // -- a build slot handed over (kind handover): the card player who waited for the slot gets up as
+    // the bell rings and waits at the foot of the gangplank; the one leaving comes down, the two nod,
+    // and each goes on: the one to the pile, the other up the gangplank to its place
+    async function playHandover(ev, ctx) {
+      var b = ev.board, f = b.frames, svg = ctx.svg, geo = ctx.geo, pl = geo.plank, was = ctx.before.geo || geo;
+      var hand = svg.querySelector('.sm-hand[data-id="' + b.id + '"]'), end = at(hand), show = ctx.hidden[b.id];
+      var old = ctx.before.at[b.id];
+      if (!end || !f["ashore-stand"] || !old) { if (show) show(); return playLeave(ev.leave, ctx); }
+      var start = [old[0] + pl[1][0] - was.plank[1][0], old[1]];          // the tavern stands at the gangplank's foot
+      var wait = [pl[1][0] + 14, geo.pier];
+      var q = sprite(f["ashore-stand"], start[0], start[1], ctx.layer);
+      var arrived, greeted, there = new Promise(function (ok) { arrived = ok; }), nodded = new Promise(function (ok) { greeted = ok; });
+      var leaving = playLeave(ev.leave, ctx, function (g) { arrived(g); return nodded; });
+      await sleep(600);
+      await go(q, [[wait[0], wait[1], "ashore"]], f, 60);
+      q.innerHTML = f["ashore-stand-l"] || f["ashore-stand"];
+      var g = await there;
+      for (var i = 0; i < 2; i++) {
+        if (g) put(g, g._x, g._y + 1);
+        put(q, q._x, q._y + 1);
+        await sleep(220);
+        if (g) put(g, g._x, g._y - 1);
+        put(q, q._x, q._y - 1);
+        await sleep(220);
+      }
+      greeted();
+      await sleep(600);                                                  // the one leaving steps off first
+      var plank = plankOut(ctx), legs = route("pier", wait, zone(b.to), end, geo);
+      await go(q, legs, f, 80);
+      if (plank) plank();
+      q.remove();
+      if (show) show();
+      await leaving;
     }
 
     // -- a bite at the rail: a fish for the bucket when every check passed, an old boot when one failed
@@ -475,7 +592,8 @@
       for (var i = 0; i < lamps.length; i++) { await sleep(180); lamps[i].style.visibility = ""; }
     }
 
-    var PLAYERS = { board: playWalk, move: playWalk, checks: playChecks, pump: playPump, lights: playLights };
+    var PLAYERS = { board: playWalk, move: playWalk, checks: playChecks, pump: playPump, lights: playLights,
+                    leave: playLeave, handover: playHandover };
 
     // what the drawing on screen says, kept before the next one replaces it
     function capture(svg) {
@@ -498,6 +616,10 @@
       events.forEach(function (ev) {
         if (ev.kind === "move" || ev.kind === "board") ctx.hidden[ev.id] = hide(svg, '.sm-hand[data-id="' + ev.id + '"]');
         if (ev.kind === "checks") ctx.hidden[ev.id] = hide(svg, '.sm-bucket[data-for="' + ev.id + '"]');
+        // a crate on its way to the pile is not there yet, and whoever boards in a handover is not aboard
+        var lv = ev.kind === "handover" ? ev.leave : ev.kind === "leave" ? ev : null;
+        if (lv && lv.delivered) ctx.hidden["crate " + lv.id] = hide(svg, '.sm-crate[data-for="' + lv.id + '"]');
+        if (ev.kind === "handover") ctx.hidden[ev.board.id] = hide(svg, '.sm-hand[data-id="' + ev.board.id + '"]');
       });
       events.forEach(function (ev, i) {
         var p = PLAYERS[ev.kind];

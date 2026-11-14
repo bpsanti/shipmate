@@ -308,7 +308,16 @@ body.sm-locked { overflow: hidden; }
 .motion-all .sm-drift { animation: sm-drift 90s linear infinite alternate; }
 .motion-all .sm-pennant { animation: sm-pennant 1.6s steps(2) infinite; transform-box: fill-box; transform-origin: right center; }
 .motion-all .sm-redflag { animation: sm-blink 1.1s steps(1) infinite; }
-.motion-all .pose-hammer > g:first-of-type { animation: sm-hammer 0.9s steps(2) infinite; }
+/* on deck each tool's two frames take turns: every beat while the transcript moved in the last two
+   minutes, one beat in three after that, and none for a hand that is done or paused (shipmate.py,
+   deck_tools); with motion off, or still, the first frame stays. They swap by visibility, which
+   both frames take in the same style pass, so the two never show together */
+.sm-hand > .sm-alt { visibility: hidden; }
+.motion-all .pace-busy > g:first-of-type { animation: sm-frame-a 0.9s steps(1) infinite; }
+.motion-all .pace-busy > .sm-alt { animation: sm-frame-b 0.9s steps(1) infinite; }
+.motion-all .pace-busy.tool-mop > g { animation-duration: 1.2s; }
+.motion-all .pace-slow > g:first-of-type { animation: sm-frame-a-slow 2.7s steps(1) infinite; }
+.motion-all .pace-slow > .sm-alt { animation: sm-frame-b-slow 2.7s steps(1) infinite; }
 .motion-all .pose-signal > g:first-of-type { animation: sm-signal 1.4s steps(2) infinite; }
 .motion-all .pose-rest > g:first-of-type { animation: sm-breathe 3s steps(2) infinite; }
 /* the queue on the pier passes the time; none of it looks like work */
@@ -327,7 +336,10 @@ body.sm-locked { overflow: hidden; }
 @keyframes sm-drift { from { transform: translateX(-24px); } to { transform: translateX(24px); } }
 @keyframes sm-pennant { 0% { transform: scaleY(1); } 50% { transform: scaleY(0.75); } }
 @keyframes sm-blink { 0% { opacity: 1; } 50% { opacity: 0.25; } }
-@keyframes sm-hammer { 0% { transform: translateY(0); } 50% { transform: translateY(1px); } }
+@keyframes sm-frame-a { 0%, 49.9% { visibility: visible; } 50%, 100% { visibility: hidden; } }
+@keyframes sm-frame-b { 0%, 49.9% { visibility: hidden; } 50%, 100% { visibility: visible; } }
+@keyframes sm-frame-a-slow { 0%, 83.2% { visibility: visible; } 83.3%, 100% { visibility: hidden; } }
+@keyframes sm-frame-b-slow { 0%, 83.2% { visibility: hidden; } 83.3%, 100% { visibility: visible; } }
 @keyframes sm-signal { 0% { transform: translateX(0); } 50% { transform: translateX(1px); } }
 @keyframes sm-sip { 0%, 70% { transform: translateY(0); } 80% { transform: translateY(-0.5px); } }
 @keyframes sm-talk { 0%, 60% { opacity: 1; } 75% { opacity: 0; } }

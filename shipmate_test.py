@@ -1591,6 +1591,47 @@ class TestShip(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+class TestDeckTools(unittest.TestCase):
+    """On deck the tools take turns by when each hand reached the deck (deck_tools)."""
+
+    def hand(self, hid, arrived, last=T0 - 10, crew="working", place="deck", off=False, line=0):
+        return {"id": hid, "place": place, "arrived": arrived, "last": last, "crew": crew, "off": off, "line": line}
+
+    def test_first_hammer_then_mop_then_broom_by_arrival(self):
+        hands = [self.hand("D", T0 - 100), self.hand("A", T0 - 400), self.hand("C", T0 - 200), self.hand("B", T0 - 300),
+                 self.hand("X", None), self.hand("N", T0 - 900, place="nest"), self.hand("L", T0 - 999, line=1)]
+        shipmate.deck_tools(hands, T0)
+        tools = {h["id"]: h.get("tool") for h in hands}
+        self.assertEqual(tools, {"A": "hammer", "B": "mop", "C": "broom", "D": "hammer", "X": "mop", "N": None, "L": None})
+        # a later arrival takes the next tool and leaves the others theirs
+        hands.append(self.hand("E", T0 - 50))
+        shipmate.deck_tools(hands, T0)
+        self.assertEqual({h["id"]: h.get("tool") for h in hands if h["id"] in "ABCDE"},
+                         {"A": "hammer", "B": "mop", "C": "broom", "D": "hammer", "E": "mop"})
+
+    def test_the_pace_follows_the_transcript_and_stops_when_done(self):
+        hands = [self.hand("A", 1, last=T0 - 30), self.hand("B", 2, last=T0 - 600), self.hand("C", 3, crew="done"),
+                 self.hand("D", 4, crew="paused"), self.hand("E", 5, off=True), self.hand("F", 6, last=None)]
+        shipmate.deck_tools(hands, T0)
+        self.assertEqual([h["pace"] for h in hands], ["busy", "slow", "still", "still", "still", "slow"])
+
+    def test_a_tool_on_deck_is_drawn_with_its_second_frame(self):
+        snap = shipmate.demo_snapshot(T0)
+        sc = shipmate.ship_scene(snap)
+        tools = {h["id"]: (h["tool"], h["pace"]) for h in sc["hands"] if h.get("tool")}
+        self.assertEqual(tools, {"DEMO-AUTH": ("hammer", "busy"), "DEMO-NAV": ("mop", "slow"), "DEMO-SYNC": ("broom", "busy")})
+        svg = shipmate.render_ship(sc)
+        for hid, (tool, pace) in tools.items():
+            at = svg.find('<g class="sm-hand pose-%s tool-%s pace-%s" data-id="%s"' % (tool, tool, pace, hid))
+            self.assertGreaterEqual(at, 0, hid)
+            nxt = svg.find('class="sm-hand ', at + 10)
+            self.assertIn('<g class="sm-alt">', svg[at:nxt if nxt > 0 else len(svg)], hid)
+        self.assertEqual(shipmate.PT_BR.get("on deck with a mop"), "no convés com o esfregão")
+        lay = shipmate.ship_layout(sc)
+        bodies = sorted((x + shipmate.pose_left(p), f) for hid, (x, f, p, _u) in lay["hands"].items() if hid in tools)
+        self.assertEqual(len({b for b in bodies}), 3)                                 # each body on its own spot
+
+
 class TestMotion(unittest.TestCase):
     """What changed between two readings of the ship, which the page plays once (ship_events)."""
 
@@ -1639,7 +1680,8 @@ class TestMotion(unittest.TestCase):
         self.assertEqual([(e["kind"], e.get("id"), e.get("result")) for e in shipmate.ship_events(prev, cur)],
                          [("move", "D", None), ("checks", "A", "pass"), ("checks", "B", "fail")])
         # still running, or no answer from gh: nothing
-        self.assertEqual(shipmate.ship_events(prev, self.print_(hands={"A": "rail"}, checks={"A": "pending"})), [])
+        still = self.print_(hands={"A": "rail", "B": "rail", "C": "rail", "D": "deck"}, checks={"A": "pending", "C": "pass"})
+        self.assertEqual(shipmate.ship_events(prev, still), [])
 
     def test_the_pump_works_only_for_a_new_compaction(self):
         prev = self.print_(at=T0 - 30, context=72.0, compaction=T0 - 7 * 3600)
@@ -1683,9 +1725,16 @@ class TestMotion(unittest.TestCase):
         b = shipmate.ship_scene(b_snap)
         ev = shipmate.block_ship(b_snap, shipmate.ship_print(a))["events"]
         self.assertEqual([(e["kind"], e.get("id")) for e in ev],
-                         [("board", "DEMO-Q-THEME"), ("move", "DEMO-EXPORT"), ("move", "DEMO-NAV"), ("move", "DEMO-SEARCH"),
+                         [("handover", "DEMO-AUTH"), ("leave", "DEMO-I18N"),
+                          ("board", "DEMO-Q-THEME"), ("move", "DEMO-EXPORT"), ("move", "DEMO-NAV"), ("move", "DEMO-SEARCH"),
                           ("checks", "DEMO-FORMS"), ("checks", "DEMO-LOGS"), ("pump", None)])
-        frames = {(e["kind"], e.get("id")): e["frames"] for e in ev}
+        hand = ev[0]
+        self.assertEqual((hand["leave"]["id"], hand["leave"]["delivered"], hand["board"]["id"]), ("DEMO-AUTH", True, "DEMO-Q-PUSH"))
+        frames = {(e["kind"], e.get("id")): e["frames"] for e in ev if e["kind"] != "handover"}
+        frames[("handover-leave", "DEMO-AUTH")] = hand["leave"]["frames"]
+        frames[("handover-board", "DEMO-Q-PUSH")] = hand["board"]["frames"]
+        self.assertTrue(set(shipmate.CARRY_POSES) | {"crate", "ring", "walk", "stand"} <= set(frames[("leave", "DEMO-I18N")]))
+        self.assertTrue({"ashore-walk", "ashore-stand", "walk"} <= set(frames[("handover-board", "DEMO-Q-PUSH")]))
         self.assertTrue(set(shipmate.WALK_POSES) | {"ashore-stand", "ashore-walk"} <= set(frames[("board", "DEMO-Q-THEME")]))
         self.assertIn("alarm", frames[("move", "DEMO-NAV")])                            # the red flag on the way to the cabin
         self.assertIn("answered", frames[("move", "DEMO-EXPORT")])                      # the answer on the way out
@@ -1707,10 +1756,66 @@ class TestMotion(unittest.TestCase):
         self.assertEqual(printed, json.loads(json.dumps(shipmate.ship_print(b))))
         geo = json.loads(html.unescape(re.search(r'data-geo="([^"]*)"', drawn).group(1)))
         self.assertEqual(set(geo), {"ladder", "walk", "deck_x", "nest", "door", "floor", "fc", "plank", "pier", "stern", "wl",
-                                    "rod", "reel", "hold", "pump"})
+                                    "rod", "reel", "hold", "pump", "crates", "dock", "bell", "edge"})
+        # the delivered crates are drawn one by one, so the page can hold back the one on its way
+        for cid in ("DEMO-AUTH", "DEMO-I18N"):
+            self.assertRegex(drawn, r'<g class="sm-crate" data-for="%s" data-at="\d+,\d+">' % cid)
         # and back: the changes the other way walk too, but nobody boards and no pump works
         back = shipmate.ship_events(shipmate.ship_print(b), dict(shipmate.ship_print(a), at=now + 60))
         self.assertEqual([e["kind"] for e in back], ["move", "move", "move"])
+
+    def test_a_hand_that_leaves_carries_its_crate_only_when_delivered(self):
+        prev = dict(self.print_(at=T0 - 30, hands={"A": "plank", "B": "deck", "C": "nest", "D": "cabin"}),
+                    scouts={"S": "dock", "T": "out"}, looks={"A": "#16a4a4 #f6f1e3", "B": "#9150dc", "S": "#f2a114"})
+        cur = dict(self.print_(hands={"D": "cabin"}, queue=["C"]), scouts={}, crates=["OLD", "A", "S"])
+        self.assertEqual(shipmate.ship_events(prev, cur),
+                         [{"kind": "leave", "id": "A", "from": "plank", "delivered": True, "look": "#16a4a4 #f6f1e3"},
+                          {"kind": "leave", "id": "B", "from": "deck", "delivered": False, "look": "#9150dc"}])
+        # a scout leaves only from its skiff at the pier (one at sea just goes), past the hands, two at most a refresh
+        cur = dict(cur, hands={"A": "plank", "B": "deck", "D": "cabin"})
+        self.assertEqual(self.kinds(prev, cur), [("leave", "S")])
+        many = dict(self.print_(at=T0 - 30, hands={"H%d" % i: "deck" for i in range(5)}), looks={})
+        self.assertEqual(len(shipmate.ship_events(many, dict(self.print_(), scouts={}, crates=[]))), shipmate.EVENT_LIMITS["leave"])
+        # an older print without the new fields, or an id that is not one, plays no departure
+        self.assertEqual(self.kinds(self.print_(at=T0 - 30, hands={"../x": "deck", "A": "deck"}), self.print_()),
+                         [("leave", "A")])
+
+    def test_a_slot_is_handed_over_only_by_the_hand_that_held_it(self):
+        def prev(holds):
+            return dict(self.print_(at=T0 - 30, hands={"B": "deck", "P": "plank"}, queue={"Q": "pier", "H": "cabin"}),
+                        holds=holds, looks={})
+        cur = dict(self.print_(hands={"Q": "nest"}), scouts={}, crates=["B", "P"])
+        ev = shipmate.ship_events(prev({"Q": "B R"}), cur)
+        self.assertEqual([(e["kind"], e["id"]) for e in ev], [("handover", "B"), ("leave", "P"), ])
+        self.assertEqual((ev[0]["leave"]["id"], ev[0]["leave"]["delivered"], ev[0]["board"]),
+                         ("B", True, {"kind": "board", "id": "Q", "from": "pier", "to": "nest"}))
+        # the hand with a PR gave its slot up at the bow: it leaves, and the other boards, each on its own
+        self.assertEqual(self.kinds(prev({"Q": "R"}), cur), [("leave", "B"), ("leave", "P"), ("board", "Q")])
+        # one held for the captain walks out of the cabin, not up from the pier: no handover
+        held = dict(self.print_(hands={"H": "nest"}), scouts={}, crates=[])
+        self.assertEqual(self.kinds(prev({"H": "B"}), held), [("leave", "B"), ("leave", "P"), ("board", "H")])
+
+    def test_a_departure_is_drawn_from_the_colours_its_print_kept(self):
+        sc = shipmate.ship_scene(shipmate.demo_snapshot(T0))
+        ev = shipmate.event_sprites({"kind": "leave", "id": "GONE", "from": "plank", "delivered": True,
+                                     "look": "#16a4a4 #f6f1e3"}, sc)
+        self.assertTrue(set(shipmate.CARRY_POSES) | set(shipmate.WALK_POSES) | {"wave", "crate", "ring"} <= set(ev["frames"]))
+        self.assertIn('fill="#16a4a4"', ev["frames"]["carry"])
+        empty = shipmate.event_sprites({"kind": "leave", "id": "GONE", "from": "deck", "delivered": False,
+                                        "look": '"/><script>x</script> #zzz'}, sc)
+        self.assertNotIn("carry", empty["frames"])
+        self.assertFalse(any("script" in f for f in empty["frames"].values()))       # a colour that is not one is dropped
+
+    def test_the_crates_count_what_firstmate_closed_as_done(self):
+        backlog = [{"id": "OLD", "state": "done", "closed": "2026-11-01"},
+                   {"id": "B", "state": "done", "closed": "2026-11-13", "kind": "ship", "repo": "r"},
+                   {"id": "A", "state": "done", "closed": "2026-11-13T09:00Z", "kind": "scout", "repo": "r"},
+                   {"id": "C", "state": "done", "closed": "2026-11-08"},
+                   {"id": "Q", "state": "queued"}, {"id": "N", "state": "done", "closed": ""}]
+        now = time.mktime((2026, 11, 14, 12, 0, 0, 0, 0, -1))
+        self.assertEqual([r["id"] for r in shipmate.closed_rows(backlog, now)], ["C", "A", "B"])
+        snap = dict(shipmate.demo_snapshot(T0), closed=[{"id": "X", "kind": "ship"}], delivered=[{"id": "SHEET"}])
+        self.assertEqual([c["id"] for c in shipmate.ship_scene(snap)["crates"]], ["X"])
 
     def test_a_pose_puts_the_body_where_the_frames_expect_it(self):
         self.assertEqual([shipmate.pose_left(p) for p in ("stand", "hammer", "hammer-l", "signal", "signal-l", "pack", "walk-l")],
