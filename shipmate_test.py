@@ -1430,6 +1430,100 @@ class TestShip(unittest.TestCase):
         self.assertLessEqual(lays[3]["width"], lays[15]["width"])
         self.assertLessEqual(lays[15]["width"] - w0, 2 * shipmate.TABLE_W * shipmate.MAX_TABLES)
 
+    def tavern_scene(self, now, holders=("H1", "H2")):
+        today = dt.date.fromtimestamp(now).isoformat()
+        slot = {"group": "demo-app", "cap": 2, "taken": 2, "holders": list(holders)}
+        lanes = {"group": "", "cap": 6, "taken": 6, "holders": []}
+        queue = ([self.queue_item("C%d" % i, "slot", today, slot=slot) for i in range(4)]
+                 + [self.queue_item("L%d" % i, "lane", today, slot=lanes) for i in range(2)])
+        agents = [self.hand("H1", 1), self.hand("H2", 1)]
+        return shipmate.ship_scene(self.snap(agents, queue=queue, projects=["demo-app"], now=now))
+
+    def test_the_tavern_is_a_building_in_the_colour_of_what_it_waits_for(self):
+        self.assertEqual(shipmate.awning_colors({"group": "demo-app"}, {"demo-app": "#16a4a4"}), ("#16a4a4", "#f6f1e3"))
+        self.assertEqual(shipmate.awning_colors({"group": ""}, {"demo-app": "#16a4a4"})[0], "#22345e")   # the home's lanes: navy
+        noon = time.mktime((2026, 11, 13, 12, 0, 0, 0, 0, -1))
+        for now, night in ((noon, False), (noon + 10 * 3600, True)):
+            sc = self.tavern_scene(now)
+            lay = shipmate.ship_layout(sc)
+            self.assertEqual([u["slot"]["group"] for _a, _b, u in lay["rooms"]], ["demo-app", ""])
+            lights = []
+            drawn = shipmate.draw_tavern(sc, lay, lights, night)
+            self.assertIn('fill="%s"' % sc["colors"]["demo-app"], drawn)
+            self.assertIn('fill="#22345e"', drawn)
+            windows = sum(len(range(a + 2 + 14, b - 16, 70)) for a, b, _u in lay["rooms"])
+            self.assertGreater(windows, 1)
+            self.assertEqual(len(lights), windows if night else 0)                 # lit from dusk to dawn
+            # it stands under the waterline, so the hull and the hold above it stay in view
+            ys = [int(m) for m in re.findall(r"M\d+ (\d+)h", drawn)]
+            self.assertGreater(min(ys), shipmate.WL - 6)
+
+    def test_the_key_board_hangs_a_hook_per_place_and_names_who_has_the_keys(self):
+        sc = self.tavern_scene(T0)
+        lay = shipmate.ship_layout(sc)
+        (_a, x1, slot_u), (_c, y1, lane_u) = lay["rooms"]
+        board = shipmate.key_board(x1, slot_u)
+        hooks = re.search(r'<path fill="#e0b552" d="([^"]*)"', board).group(1)
+        self.assertEqual(hooks.count("h1v1h-1z"), 2)                                  # one hook per build slot
+        self.assertIn('data-ids="H1 H2 C0 C1 C2 C3"', board)                           # who holds a key, then who waits
+        self.assertIn("build slots for demo-app: 2 of 2 keys are out, with H1, H2; 4 wait for any of them to come back", board)
+        lanes = shipmate.key_board(y1, lane_u)
+        hooks = re.search(r'<path fill="#e0b552" d="([^"]*)"', lanes).group(1)
+        self.assertEqual(hooks.count("h1v1h-1z"), 6)
+        self.assertIn("home lanes: 6 of 6 in use; 2 wait for any lane to come free", lanes)
+        self.assertIn('data-ids="L0 L1"', lanes)
+        drawn = shipmate.render_ship(sc)
+        self.assertEqual(drawn.count('class="sm-keys"'), 2)
+        self.assertIn('tabindex="0" role="img" aria-label="build slots for demo-app', drawn)
+
+    def test_the_pier_lamps_keep_clear_and_light_only_at_night(self):
+        noon = time.mktime((2026, 11, 13, 12, 0, 0, 0, 0, -1))
+        sc = self.tavern_scene(noon)
+        lay = shipmate.ship_layout(sc)
+        xs = shipmate.pier_lamp_xs(lay)
+        self.assertTrue(xs)
+        for x in xs:
+            for a, b, _u in lay["rooms"]:
+                self.assertFalse(a - shipmate.LAMP_CLEAR <= x <= b + shipmate.LAMP_CLEAR, x)   # the tavern has its own lantern
+            self.assertFalse(lay["x0"] + 10 <= x <= lay["x0"] + 100, x)                         # the gangplank's foot
+            self.assertLess(x, lay["dock_x"] - shipmate.LAMP_CLEAR)                             # the skiffs and the crates
+        for now, lit in ((noon, 0), (noon + 10 * 3600, len(xs))):
+            mid, lights = [], []
+            posts = shipmate.draw_pier_lamps(lay, mid, lights, shipmate.is_night(now))
+            self.assertEqual(sum('r="16"' in x for x in lights), lit)
+            self.assertEqual(len(mid), 1 if lit else 0)                               # their reflection between the piles
+            self.assertIn('fill="#f2c35a"' if lit else 'fill="#4a5a6a"', posts)
+
+    def test_the_scenery_lives_without_saying_anything_about_the_work(self):
+        noon = time.mktime((2026, 11, 13, 12, 0, 0, 0, 0, -1))
+        day = shipmate.render_ship(self.tavern_scene(noon))
+        night = shipmate.render_ship(self.tavern_scene(noon + 10 * 3600))
+        for drawn in (day, night):
+            self.assertNotIn("sm-drift", drawn)                                        # the clouds step, they no longer slide
+            self.assertEqual(drawn.count('class="sm-cloud"'), len(shipmate.CLOUD_LAYERS))
+            self.assertEqual(drawn.count('class="sm-ripple '), 3)
+        self.assertEqual(day.count('class="sm-gull"'), len(shipmate.GULLS))             # gulls by day only
+        self.assertNotIn("sm-gull", night)
+        self.assertEqual(night.count('class="sm-twinkle"'), len(shipmate.TWINKLE))     # the stars twinkle at night only
+        self.assertNotIn("sm-twinkle", day)
+        # foam, the hull's reflection and the glitter by day; the pier lamps' reflection too at night
+        self.assertEqual(day.count('class="sm-amb"'), 3)
+        self.assertEqual(night.count('class="sm-amb"'), 4)
+        # the sea's state still says the load, and the little waves follow it
+        sizes = [len("".join(shipmate.ripples(998, sea, 0))) for sea in ("calm", "choppy", "rough")]
+        self.assertLess(sizes[0], sizes[1])
+        self.assertLess(sizes[1], sizes[2])
+        # a loop longer than the refresh goes on from the clock, so a new drawing does not restart it
+        for period, _y, _east in shipmate.GULLS:
+            self.assertGreater(period, shipmate.REFRESH_SECONDS)
+            a = re.findall(r"--round:%ds;[^\"]*--late:-([\d.]+)s" % period, shipmate.gulls(998, noon)[0] + shipmate.gulls(998, noon)[1])
+            b = re.findall(r"--round:%ds;[^\"]*--late:-([\d.]+)s" % period, "".join(shipmate.gulls(998, noon + 30)))
+            self.assertAlmostEqual((float(b[0]) - float(a[0])) % period, 30 % period, places=0)
+        for c in shipmate.sky_clouds(998, 0, noon):
+            span = int(re.search(r"--span:-(\d+)px", c).group(1))
+            self.assertEqual(span, 998 + shipmate.CLOUD_SPAN)
+            self.assertIn("--px:%d;" % span, c)                                       # one art pixel a step
+
     def test_the_pier_gives_every_queued_hand_its_own_spot(self):
         today = dt.date.fromtimestamp(T0).isoformat()
         slot = {"group": "demo-app", "cap": 2, "taken": 2, "holders": ["H1", "H2"]}
@@ -1765,7 +1859,7 @@ class TestMotion(unittest.TestCase):
         self.assertEqual([(e["kind"], e.get("id")) for e in ev],
                          [("handover", "DEMO-AUTH"), ("leave", "DEMO-I18N"),
                           ("board", "DEMO-Q-THEME"), ("move", "DEMO-EXPORT"), ("move", "DEMO-NAV"), ("move", "DEMO-SEARCH"),
-                          ("checks", "DEMO-FORMS"), ("checks", "DEMO-LOGS"), ("pump", None)])
+                          ("arrive", "DEMO-Q-CSV"), ("checks", "DEMO-FORMS"), ("checks", "DEMO-LOGS"), ("pump", None)])
         hand = ev[0]
         self.assertEqual((hand["leave"]["id"], hand["leave"]["delivered"], hand["board"]["id"]), ("DEMO-AUTH", True, "DEMO-Q-PUSH"))
         frames = {(e["kind"], e.get("id")): e["frames"] for e in ev if e["kind"] != "handover"}
@@ -1778,6 +1872,7 @@ class TestMotion(unittest.TestCase):
         self.assertIn("answered", frames[("move", "DEMO-EXPORT")])                      # the answer on the way out
         self.assertEqual(set(frames[("checks", "DEMO-LOGS")]), {"fish", "reel", "catch"})
         self.assertIn("jet", frames[("pump", None)])
+        self.assertEqual(set(frames[("arrive", "DEMO-Q-CSV")]), {"walk", "stand"})
         for f in frames.values():
             for svg in f.values():
                 self.assertTrue(svg.startswith("<g>") and "<path" in svg)
@@ -1801,6 +1896,22 @@ class TestMotion(unittest.TestCase):
         # and back: the changes the other way walk too, but nobody boards and no pump works
         back = shipmate.ship_events(shipmate.ship_print(b), dict(shipmate.ship_print(a), at=now + 60))
         self.assertEqual([e["kind"] for e in back], ["move", "move", "move"])
+
+    def test_a_task_that_joins_the_queue_for_a_slot_walks_into_the_tavern(self):
+        prev = dict(self.print_(at=T0 - 30, hands={"A": "deck"}, queue={"Q": "pier"}), scouts={"S": "dock"})
+        cur = dict(self.print_(hands={}, queue=["Q", "N", "A", "S", "M", "P"]), scouts={}, crates=[],
+                   tavern=["A", "M", "N", "Q", "S"])
+        # new to the queue only: Q was queued already, A came back from the deck, S from its skiff, P is not in the tavern
+        self.assertEqual([(e["kind"], e["id"]) for e in shipmate.ship_events(prev, cur) if e["kind"] == "arrive"],
+                         [("arrive", "M"), ("arrive", "N")])
+        many = dict(cur, tavern=["N%d" % i for i in range(5)])
+        self.assertEqual(sum(e["kind"] == "arrive" for e in shipmate.ship_events(prev, many)), shipmate.EVENT_LIMITS["arrive"])
+        self.assertEqual(shipmate.ship_events(None, cur), [])                          # nothing plays when the page just opened
+        self.assertEqual([e for e in shipmate.ship_events(prev, dict(cur, tavern=["../x"]))if e["kind"] == "arrive"], [])
+        sc = shipmate.ship_scene(shipmate.demo_snapshot(T0, moved=True))
+        ev = shipmate.event_sprites({"kind": "arrive", "id": "DEMO-Q-CSV"}, sc)
+        self.assertEqual(set(ev["frames"]), {"walk", "stand"})
+        self.assertIn("#e6c46a", ev["frames"]["walk"])                                 # still ashore: the straw hat
 
     def test_a_hand_that_leaves_carries_its_crate_only_when_delivered(self):
         prev = dict(self.print_(at=T0 - 30, hands={"A": "plank", "B": "deck", "C": "nest", "D": "cabin"}),

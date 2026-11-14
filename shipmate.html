@@ -73,10 +73,12 @@
           {{t:Water in the hold: firstmate's context, the white line its warning threshold; the pump works when the context is compacted.}}
           {{t:Scouts row out to the horizon, back with the map, and moor at the pier with it.}}
           {{t:On the pier, the queue: cards or a mug at the tavern while it waits for a free slot, a sea bag at the gangplank when nothing holds it, talking up to the hand it waits for.}}
+          {{t:The tavern's awning has the colour of the project whose slot it waits for, navy for the home's lanes; its key board has a hook per place, each key out with the task that holds it (point at it to light them).}}
           {{t:Hammocks in the quarters below deck: queued tasks held until a date sleep there, the date over each.}}
           {{t:Crates: tasks delivered in the last 7 days.}}
           {{t:A bucket with a fish beside a hand at the rail: every check on its PR passed.}}
           {{t:The sky follows the local time, darkening over the hour around 18:00 and lightening around 06:00, and the sea the machine's load.}}
+          {{t:Clouds, gulls, little waves and the lamps along the pier are only scenery.}}
           {{t:When a hand changes place between two refreshes, it walks there; the motion button sets how much moves.}}</p></section>
       </div>
     </section>
@@ -592,8 +594,20 @@
       for (var i = 0; i < lamps.length; i++) { await sleep(180); lamps[i].style.visibility = ""; }
     }
 
+    // -- a task joins the queue to wait for a slot (kind arrive): it walks in from the near end of the
+    // pier to its seat in the tavern
+    async function playArrive(ev, ctx) {
+      var f = ev.frames, end = at(ctx.svg.querySelector('.sm-hand[data-id="' + ev.id + '"]')), show = ctx.hidden[ev.id];
+      if (!end || !f.stand) { show(); return; }
+      var start = [-16, ctx.geo.pier], g = sprite(f.stand, start[0], start[1], ctx.layer);
+      var legs = [[end[0], ctx.geo.pier, "walk"], [end[0], end[1], "walk"]];
+      await walk(g, start, legs, f, Math.min(7, Math.max(2, length(start, legs) / 40)));
+      g.remove();
+      show();
+    }
+
     var PLAYERS = { board: playWalk, move: playWalk, checks: playChecks, pump: playPump, lights: playLights,
-                    leave: playLeave, handover: playHandover };
+                    leave: playLeave, handover: playHandover, arrive: playArrive };
 
     // what the drawing on screen says, kept before the next one replaces it
     function capture(svg) {
@@ -614,7 +628,7 @@
       var ctx = { svg: svg, geo: geo, layer: layer, before: before || { at: {} }, hidden: {} }, runs = [];
       // whoever walks is out of its new place at once, and a new bucket waits for its fish
       events.forEach(function (ev) {
-        if (ev.kind === "move" || ev.kind === "board") ctx.hidden[ev.id] = hide(svg, '.sm-hand[data-id="' + ev.id + '"]');
+        if (ev.kind === "move" || ev.kind === "board" || ev.kind === "arrive") ctx.hidden[ev.id] = hide(svg, '.sm-hand[data-id="' + ev.id + '"]');
         if (ev.kind === "checks") ctx.hidden[ev.id] = hide(svg, '.sm-bucket[data-for="' + ev.id + '"]');
         // a crate on its way to the pile is not there yet, and whoever boards in a handover is not aboard
         var lv = ev.kind === "handover" ? ev.leave : ev.kind === "leave" ? ev : null;
@@ -705,6 +719,24 @@
     if (!g) g = [].filter.call(s.querySelectorAll(".sm-crowd"), function (x) { return x.getAttribute("data-crowd").split(" ").indexOf(id) >= 0; })[0];
     if (g) g.classList.toggle("is-hl", on);
   }
+  // the tavern's key board lights, while pointed at or focused, the hands that hold its keys (or the
+  // crowd at the cabin door one is in) and the hands that wait for them
+  function keysLight(e, on) {
+    var k = e.target.closest && e.target.closest(".sm-keys"), s = document.querySelector("#b-ship svg");
+    if (!k || !s) return;
+    var crowds = [].slice.call(s.querySelectorAll(".sm-crowd"));
+    k.getAttribute("data-ids").split(" ").forEach(function (id) {
+      if (!id) return;
+      var g = s.querySelector('.sm-hand[data-id="' + CSS.escape(id) + '"]');
+      if (!g) g = crowds.filter(function (x) { return x.getAttribute("data-crowd").split(" ").indexOf(id) >= 0; })[0];
+      if (g) g.classList.toggle("is-hl", on);
+    });
+  }
+  var shipEl = document.getElementById("sm-ship");
+  shipEl.addEventListener("pointerover", function (e) { keysLight(e, true); });
+  shipEl.addEventListener("pointerout", function (e) { keysLight(e, false); });
+  shipEl.addEventListener("focusin", function (e) { keysLight(e, true); });
+  shipEl.addEventListener("focusout", function (e) { keysLight(e, false); });
   var logEl = document.getElementById("b-shiplog");
   logEl.addEventListener("pointerover", function (e) { logLight(e, true); });
   logEl.addEventListener("pointerout", function (e) { logLight(e, false); });

@@ -1799,6 +1799,11 @@ PT_BR.update({
     "Hammocks in the quarters below deck: queued tasks held until a date sleep there, the date over each.":
         "Redes no alojamento abaixo do convés: ali dormem as tarefas da fila seguras até uma data, com a data sobre cada uma.",
     "Crates: tasks delivered in the last 7 days.": "Caixotes: tarefas entregues nos últimos 7 dias.",
+    "The tavern's awning has the colour of the project whose slot it waits for, navy for the home's lanes; its key board has a hook per place, each key out with the task that holds it (point at it to light them).":
+        "O toldo da taverna tem a cor do projeto cuja vaga ela espera, azul-marinho para as raias da home; o quadro de chaves "
+        "tem um gancho por vaga, cada chave fora com a tarefa que a ocupa (aponte para ele para acendê-las).",
+    "Clouds, gulls, little waves and the lamps along the pier are only scenery.":
+        "Nuvens, gaivotas, ondinhas e os lampiões do cais são só cenário.",
     "The sky follows the local time, darkening over the hour around 18:00 and lightening around 06:00, and the sea the machine's load.":
         "O céu segue a hora local, escurecendo ao longo da hora em volta das 18:00 e clareando em volta das 06:00, e o mar a "
         "carga da máquina.",
@@ -1842,6 +1847,10 @@ PT_BR.update({
     "Saved, but firstmate was not woken; wake it from the answer below.":
         "Gravado, mas o firstmate não foi acordado; acorde-o pela resposta abaixo.",
     "Firstmate already has this answer.": "O firstmate já tem esta resposta.",
+    "build slots for %s: %d of %d keys are out, with %s; %d wait for any of them to come back":
+        "vagas de build de %s: %d de %d chaves estão fora, com %s; %d esperam qualquer uma voltar",
+    "home lanes: %d of %d in use; %d wait for any lane to come free":
+        "raias da home: %d de %d em uso; %d esperam qualquer raia ficar livre",
     "Sending…": "Enviando…", "Not sent: %s": "Não enviado: %s", "Waking firstmate…": "Acordando o firstmate…",
     "Not sent: shipmate could not be reached. Try again: the same answer is never sent twice.":
         "Não enviado: o shipmate não respondeu. Tente de novo: a mesma resposta nunca vai duas vezes.",
@@ -2762,8 +2771,9 @@ def ship_print(sc):
     """What the next reading is compared with: each hand aboard by its place (the cabin when it
     waits there) and its colours, so it can be drawn again once it has left; each scout by its
     place; each queued task by where it waits (the cabin or the pier) and, when it waits for a build
-    slot, the tasks that hold that slot; the tasks delivered (the crates on the pier); the rail's
-    checks, firstmate's context and last compaction, and whether the lamps are lit."""
+    slot, the tasks that hold that slot, and who sits in the tavern; the tasks delivered (the crates
+    on the pier); the rail's checks, firstmate's context and last compaction, and whether the lamps
+    are lit."""
     fm = sc["firstmate"]
     return {"at": int(sc["now"]), "hands": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["hands"]},
             "scouts": {h["id"]: "cabin" if h["line"] else h["place"] for h in sc["scouts"]},
@@ -2771,6 +2781,7 @@ def ship_print(sc):
             "queue": {q["id"]: "cabin" if q["line"] else "pier" for q in sc["queue"]},
             "holds": {q["id"]: " ".join(q["slot"]["holders"]) for q in sc["queue"]
                       if q["reason"] == "slot" and (q.get("slot") or {}).get("group") and q["slot"].get("holders")},
+            "tavern": sorted(q["id"] for q in sc["pier"] if q["act"] in ("cards", "drink")),
             "crates": [c["id"] for c in sc["crates"]],
             "checks": {h["id"]: h["checks"] for h in sc["hands"] if h.get("checks")},
             "context": fm["context"], "compaction": fm["compaction"], "night": sc["night"]}
@@ -2858,6 +2869,14 @@ def handover_events(prev, cur):
     return _handovers(prev, cur)
 
 
+def arrive_events(prev, cur):
+    """A task that has just joined the queue to wait for a build slot or a lane: it walks in from
+    the near end of the pier to its seat in the tavern. One that was already queued, aboard or out
+    in a skiff in the last reading did not arrive; it only changed places."""
+    known = set(_strings(prev, "queue", dict)) | set(_strings(prev, "hands", dict)) | set(_strings(prev, "scouts", dict))
+    return [{"kind": "arrive", "id": i} for i in cur.get("tavern") or () if i not in known and valid_id(i)]
+
+
 def move_events(prev, cur):
     """A hand whose place changed: a new phase, a red flag that takes it to the cabin, or the
     decision answered that brings it back."""
@@ -2892,8 +2911,9 @@ def lights_events(prev, cur):
 # each detector with the group it counts in; past a group's limit the rest of a refresh's changes
 # just show in their new places, so a busy refresh never fills the ship with walkers
 EVENT_DETECTORS = ((handover_events, "leave"), (leave_events, "leave"), (board_events, "walk"), (move_events, "walk"),
+                   (arrive_events, "arrive"),
                    (checks_events, "checks"), (pump_events, "pump"), (lights_events, "lights"))
-EVENT_LIMITS = {"leave": 2, "walk": 4, "checks": 3, "pump": 1, "lights": 1}
+EVENT_LIMITS = {"leave": 2, "walk": 4, "arrive": 2, "checks": 3, "pump": 1, "lights": 1}
 
 
 def ship_events(prev, cur):
@@ -2951,6 +2971,9 @@ def event_sprites(ev, sc):
         return leave_sprites(ev)
     if ev["kind"] == "handover":
         return dict(ev, leave=leave_sprites(ev["leave"]), board=event_sprites(ev["board"], sc))
+    if ev["kind"] == "arrive":
+        q = next((q for q in sc["pier"] if q["id"] == ev["id"]), None)
+        return dict(ev, frames={k: hand_frame(q, k) for k in ("walk", "stand")} if q else {})
     hand = next((h for h in sc["hands"] if h["id"] == ev.get("id")), None)
     f = {}
     if ev["kind"] in ("move", "board") and hand:
@@ -3068,6 +3091,7 @@ def pier_layout(sc, lay, x0):
     that would land on another moves toward the bow to the first gap wide enough. Returns the
     spots, the props, the signs, the counted overflow and where it ends."""
     spots, props, signs, more = {}, [], [], []
+    lay["rooms"] = []
     # the tavern is anchored at the foot of the gangplank, on its right, and grows to the right: a
     # short queue adds a short stretch, and nothing is reserved west of the ship
     x = x0 + TAVERN_FROM
@@ -3093,6 +3117,7 @@ def pier_layout(sc, lay, x0):
         hidden = u["cards"][TABLE_SEATS * MAX_TABLES:] + u["drink"][MAX_ROW:]
         if hidden:
             more.append((tx, hidden))
+        lay["rooms"].append((x, x + u["w"], u))             # its building: draw_tavern
         x += u["w"] + 14
     tavern_end = x - 14 if lay["tavern"] else x0 + TAVERN_FROM
     # from the gangplank toward the bow
@@ -3953,9 +3978,9 @@ DAY_SKY = ["#6fb3e0", "#78b9e4", "#83c0e8", "#8fc8ec", "#9dd0ee", "#b3dcf2"]
 NIGHT_SKY = ["#0d1631", "#111c3b", "#152244", "#1a294d", "#203157", "#283a60"]
 
 
-def sky_and_sea(w, dusk, night, sea, rnd):
+def sky_and_sea(w, dusk, night, sea, rnd, now):
     """The sky, the hills and the sea behind the ship, `dusk` of the way from day (0) to night (1);
-    the stars and the moon come out with the night (is_night)."""
+    the stars and the moon come out with the night (is_night), and the gulls fly only by day."""
     def tint(day, nite):
         return mix(day, nite, dusk)
     far, mid = [], []
@@ -3974,13 +3999,6 @@ def sky_and_sea(w, dusk, night, sea, rnd):
             for x in range(-8, 9):
                 if x * x + y * y <= 64:
                     deco.dot(w - 90 + x, 22 + y, tint("#fff1b8", "#f2a35a") if x * x + y * y < 40 else tint("#ffe58a", "#d9783a"))
-    clouds = Pix()
-    for cx, cy in ((40, 14), (250, 30), (470, 10), (690, 26), (910, 16), (1130, 30)):
-        if cx > w + 100:
-            break
-        for dx, dy, ww in ((6, 0, 14), (0, 4, 30), (3, 8, 26)):
-            clouds.rect(cx + dx, cy + dy, ww, 4, tint("#fbfdff", "#3a4a72"))
-        clouds.rect(cx + 3, cy + 12, 26, 1, tint("#dfeef7", "#2c3a5e"))
     hills = Pix()
     hc = [tint(d, n) for d, n in zip(("#8fb7c9", "#9ec2d2", "#7aa6bb"), ("#2a3b5c", "#304466", "#22314f"))]
     for x in range(-300, w + 300):
@@ -3988,7 +4006,9 @@ def sky_and_sea(w, dusk, night, sea, rnd):
         hills.rect(x, HOR - hgt, 1, hgt, hc[0] if x % 210 < 130 else hc[1])
         hgt = int(4 + 4 * abs(((x * 5 + 40) % 100) - 50) / 50.0)
         hills.rect(x, HOR - hgt, 1, hgt, hc[2])
-    far += [deco.svg(), '<g class="sm-drift">%s</g>' % clouds.svg(), hills.svg()]
+    far += [deco.svg()] + (twinkling_stars(w) if night else []) + sky_clouds(w, dusk, now) + [hills.svg()]
+    if not night:
+        far += gulls(w, now)
     near_c, far_c = tint("#2c6f9f", "#0c2440"), tint("#5aa6cf", "#1d3d64")
     for i in range(6):
         mid.append(band(-300, HOR + (SHIP_H - HOR) * i // 6, w + 600, HOR + (SHIP_H - HOR) * (i + 1) // 6,
@@ -4004,7 +4024,168 @@ def sky_and_sea(w, dusk, night, sea, rnd):
         if t > 0.5 and sea != "calm":
             caps.rect(x + 1, y - 1, max(1, size - 2), 1, tint("#f6fbfd", "#8aa6cc"))
     mid.append('<g class="sm-waves">%s</g>' % caps.svg())
+    mid += ripples(w, sea, dusk) + [glitter(w, night)]
     return far, mid
+
+
+# -- the scenery's own life: it says nothing about the work. Each loop below moves only while the
+# motion switch says "all" and stops where it is in a hidden tab (shipmate.css). A loop longer than
+# the page's refresh takes its phase from the clock (--late), so a new drawing goes on where the
+# last one was instead of starting it over.
+
+CLOUD_LAYERS = ((5, 1, 6, 40, 0.5), (3, 2, 18, 56, 0.28))   # clouds, size, highest and lowest row, seconds per art pixel
+CLOUD_SPAN = 600                                            # the sky reaches this much past the scene, for the parallax
+
+
+def clock_phase(now, period):
+    """How far into a loop of `period` seconds the clock is, as a CSS animation delay."""
+    return "-%.1fs" % (now % period)
+
+
+def sky_clouds(w, dusk, now):
+    """Two layers of clouds that cross the whole sky a pixel at a time and wrap around: the far
+    layer small and slow, the near one larger and quicker. Each is drawn twice, one sky's width
+    apart, so the loop never shows a seam."""
+    span = w + CLOUD_SPAN
+    out = []
+    for k, (n, size, y0, y1, slow) in enumerate(CLOUD_LAYERS):
+        rnd = random.Random(40 + k)                      # the same clouds on every refresh
+        body = mix("#eef6fb" if k == 0 else "#fbfdff", "#2f3f66" if k == 0 else "#3a4a72", dusk)
+        edge = mix("#d3e6f1", "#26355a", dusk)
+        p = Pix()
+        for i in range(n):
+            cx, cy = -CLOUD_SPAN // 2 + int(span * (i + rnd.random() * 0.6) / n), rnd.randrange(y0, y1)
+            for off in (0, span):
+                for dx, dy, ww in ((6 * size, 0, 14 * size), (0, 4, 30 * size), (3 * size, 8, 26 * size)):
+                    p.rect(cx + off + dx, cy + dy, ww, 4, body)
+                p.rect(cx + off + 3 * size, cy + 12, 26 * size, 1, edge)
+        period = int(span * slow)
+        out.append(p.svg(' class="sm-cloud" style="--round:%ds;--px:%d;--span:-%dpx;--late:%s"'
+                         % (period, span, span, clock_phase(now, period))))
+    return out
+
+
+TWINKLE = ((11, 6), (17, 6))     # each set of stars: the seconds between its dips, and how many stars
+
+
+def twinkling_stars(w):
+    """A few brighter stars that dip now and then, each set on its own beat; few, because every dip
+    repaints the night sky under its tint."""
+    rnd = random.Random(5)
+    out = []
+    for beat, n in TWINKLE:
+        p = Pix()
+        for _ in range(n):
+            x, y = rnd.randrange(0, w), rnd.randrange(4, HOR - 30)
+            p.dot(x, y, "#fffbe8")
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                p.dot(x + dx, y + dy, "#c9d3f0")
+        out.append(p.svg(' class="sm-twinkle" style="--beat:%ds"' % beat))
+    return out
+
+
+GULL_UP = ["kw.........wk", ".ww.......ww.", "..owwwwwwwg..", "....ggggg....", "............."]   # as wide as a hand
+GULL_DOWN = [".............", ".............", "..owwwwwwwg..", ".ww.ggggg.ww.", "kw.........wk"]
+GULL_INK = {"w": "#f7f7f2", "g": "#b9c0c8", "k": "#2a2a30", "o": "#e8a33a"}
+GULLS = ((60, 46, False), (97, 74, True))    # seconds per round, the row it flies along, whether it flies east
+GULL_OFF = 60                                # it starts and ends this far out of the scene
+
+
+def gulls(w, now):
+    """By day, a gull now and then: each crosses the sky in the first 40% of its round (shipmate.css,
+    sm-fly) and is out of sight the rest, on rounds of different lengths so they rarely cross together."""
+    out = []
+    for period, y, east in GULLS:
+        frames = []
+        for k, rows in enumerate((GULL_UP, GULL_DOWN)):
+            p = Pix()
+            p.sprite(0, y, [r[::-1] for r in rows] if east else rows, GULL_INK)
+            frames.append(p.svg(' class="sm-wing-%s"' % "ab"[k]))
+        a, b = (-GULL_OFF, w + GULL_OFF) if east else (w + GULL_OFF, -GULL_OFF)
+        out.append('<g class="sm-gull" style="--round:%ds;--from:%dpx;--to:%dpx;--late:%s">%s</g>'
+                   % (period, a, b, clock_phase(now, period), "".join(frames)))
+    return out
+
+
+RIPPLES = {"calm": 14, "choppy": 9, "rough": 6}     # one little wave for this many art pixels of sea width
+
+
+def ripples(w, sea, dusk):
+    """Little waves that rise, roll a pixel or two and sink, in three sets a beat apart; as many as
+    the sea already says (sea_state)."""
+    rnd = random.Random(7)
+    sets = [Pix(), Pix(), Pix()]
+    for i in range(w // RIPPLES[sea]):
+        y = rnd.randrange(HOR + 4, SHIP_H - 2)
+        t = (y - HOR) / float(SHIP_H - HOR)
+        x = rnd.randrange(-120, w + 120)
+        c = mix(mix("#e6f3fa", "#b9dcef", t), mix("#6a8ab6", "#4a6a98", t), dusk)
+        big = 1 if t > 0.45 else 0
+        p = sets[i % 3]
+        p.rect(x + 1, y, 2 + big, 1, c)                 # a crest ...
+        p.dot(x, y + 1, c)                              # ... and its curl
+        p.dot(x + 3 + big, y + 1, c)
+    return [s.svg(' class="sm-ripple sm-ripple%d"' % k) for k, s in enumerate(sets)]
+
+
+def two_frames(a, b, beat):
+    """Two frames that take turns on a beat of `beat` seconds; with motion off the first stays."""
+    return ('<g class="sm-amb" style="--beat:%.1fs">%s%s</g>'
+            % (beat, a.svg(' class="sm-amb-a"'), b.svg(' class="sm-amb-b"')))
+
+
+def glitter(w, night):
+    """The sun's glitter on the sea under it, or the moon's at night."""
+    sx = w - 90
+    rnd = random.Random(11)
+    col = ("#dfe6f2", "#aab6d8") if night else ("#fff6c8", "#ffe58a")
+    a, b = Pix(), Pix()
+    for y in range(HOR + 3, PIER - 1, 2):
+        spread = 3 + (y - HOR) // 14
+        for p in (a, b):
+            if rnd.random() < 0.7:
+                p.rect(sx + rnd.randrange(-spread, spread + 1), y, rnd.randrange(1, 4), 1, col[rnd.random() < 0.4])
+    return '<g opacity="%s">%s</g>' % ("0.6" if night else "0.8", two_frames(a, b, 2.2))
+
+
+def hull_rows(x0, length, d):
+    """The hull's left and right edge on the row d pixels under the main deck's near edge."""
+    left = x0 + max(0, d - 34) // 2
+    right = x0 + length - int(((max(0, d) / float(WL - NEAR)) ** 1.7) * 70)
+    return left, right
+
+
+def hull_reflection(x0, length, dusk):
+    """The hull mirrored in the water under it, broken into dashes by the waves."""
+    a, b = Pix(), Pix()
+    span = WL - NEAR
+    for k in range(1, 15):
+        d = span - k
+        left, right = hull_rows(x0, length, d)
+        c = mix(mix(mix("#8a5530", "#3e200d", d / float(span)), "#2c6f9f", 0.45 + k * 0.03), "#0c2440", dusk * 0.6)
+        for p, off in ((a, 0), (b, 2)):
+            for x in range(left + (k % 3) * 2 + off, right - 2, 7):
+                p.rect(x, WL + k, 4 if k < 8 else 3, 1, c)
+    return '<g opacity="0.55">%s</g>' % two_frames(a, b, 2.2)
+
+
+def hull_foam(x0, length):
+    """Foam where the hull meets the water, with a curl at the stem and at the stern."""
+    left, right = hull_rows(x0, length, WL - 1 - NEAR)
+    rnd = random.Random(3)
+    a, b = Pix(), Pix()
+    for x in range(left - 3, right + 4):
+        for p, k in ((a, 0), (b, 1)):
+            r = rnd.random()
+            if r < 0.34:
+                p.dot(x, WL - 1 + k, "#eef7fb")
+            elif r < 0.5:
+                p.dot(x, WL + 1, "#cfe6f2")
+    for p, k in ((a, 0), (b, 1)):
+        for dx, dy in ((0, 0), (1, -1), (2, -1), (3, 0), (4, 1)):
+            p.dot(right + 1 + dx + k, WL - 1 + dy, "#f6fbfd")
+            p.dot(left - 6 + dx - k, WL - 1 + dy, "#f6fbfd")
+    return two_frames(a, b, 1.4)
 
 
 def sign(tags, text, cx, y, cls=""):
@@ -4242,11 +4423,141 @@ def talk_bubble(x, y):
     return p.svg(' class="sm-talk"')
 
 
+LAMP_STEP = 150      # between the lamp posts along the pier
+LAMP_CLEAR = 8       # a lamp post keeps this far from the tavern and the other stretches it would crowd
+
+
+def pier_lamp_xs(lay):
+    """Where the lamp posts stand along the pier: every LAMP_STEP, but not in the tavern (it has
+    its own lantern), at the foot of the gangplank, by the moored skiffs and the crates, or behind
+    the near layer's lamp at the scene's edge."""
+    x0, W = lay["x0"], lay["width"]
+    busy = [(a - LAMP_CLEAR, b + LAMP_CLEAR) for a, b, _u in lay["rooms"]]
+    busy += [(x0 + 10, x0 + 100), (lay["dock_x"] - LAMP_CLEAR, W)]
+    return [x for x in range(46, W - 40, LAMP_STEP) if not any(a <= x <= b for a, b in busy)]
+
+
+def draw_pier_lamps(lay, mid, lights, night):
+    """Lamp posts along the pier: dark by day; from dusk to dawn (is_night, like the ship's lamps)
+    lit, with a pool of light on the planks and their reflection in the water between the piles."""
+    posts, ra, rb = Pix(), Pix(), Pix()
+    for x in pier_lamp_xs(lay):
+        posts.rect(x, PIER - 22, 2, 23, "#3e220f")
+        posts.rect(x, PIER - 22, 1, 23, "#5a3418")
+        posts.rect(x - 2, PIER - 29, 6, 7, "#24170d")
+        posts.rect(x - 3, PIER - 30, 8, 1, "#24170d")
+        posts.rect(x - 1, PIER - 28, 4, 5, "#f2c35a" if night else "#4a5a6a")
+        posts.rect(x - 1, PIER - 28, 2, 2, "#fff0b0" if night else "#6a7d8e")
+        if not night:
+            continue
+        lights.append('<circle class="sm-glow" cx="%d" cy="%d" r="16" fill="#ffd77a" opacity="0.24"/>' % (x + 1, PIER - 26))
+        lights.append('<ellipse cx="%d" cy="%d" rx="16" ry="3" fill="#ffd77a" opacity="0.16"/>' % (x + 1, PIER + 4))
+        rnd = random.Random(x)
+        for y in range(PIER + 20, SHIP_H, 3):
+            n = rnd.randrange(2, 5)
+            ra.rect(x - 1 + rnd.randrange(-2, 3), y, n, 1, "#f2c35a")
+            rb.rect(x - 1 + rnd.randrange(-2, 3), y + 1, n, 1, "#ffe08a")
+    if night:
+        mid.append(two_frames(ra, rb, 1.8))
+    return posts.svg()
+
+
+def awning_colors(slot, colors):
+    """A tavern's awning: stripes in the colour of the project whose build slot it waits for, or
+    navy for the home's lanes, on white canvas."""
+    group = (slot or {}).get("group", "")
+    return (colors.get(group, "#8a8a8a") if group else "#22345e"), "#f6f1e3"
+
+
+ANCHOR = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (-1, 1), (1, 1), (-2, 4), (2, 4), (-1, 5), (1, 5)]
+
+
+def draw_tavern(sc, lay, lights, night):
+    """Each tavern as a building behind its tables: an awning striped in its project's colour (navy
+    with an anchor for the home's lanes), a plank wall with windows lit at night, a shelf of
+    bottles, and two posts. It stands below the waterline, so it hides nothing of the hull."""
+    p = Pix()
+    for x0, x1, u in lay["rooms"]:
+        a, b = x0 + 2, x1
+        stripe, cloth = awning_colors(u["slot"], sc["colors"])
+        for x in range(a, b):                                       # the wall, vertical planks
+            p.rect(x, 266, 1, PIER - 266, "#3e220f" if (x - a) % 6 == 0 else "#5a3418")
+        p.rect(a, 266, b - a, 1, "#2a170b")
+        p.rect(a, 283, b - a, 2, "#7a4a24")                          # the shelf
+        p.rect(a, 283, b - a, 1, "#a06a32")
+        rnd = random.Random(x0)
+        for x in range(a + 30, b - key_board_w(u["slot"]) - 14, 9):  # bottles, clear of the key board
+            c = rnd.choice(["#3f7a3a", "#7a2e1a", "#2f5a8a", "#a5743f"])
+            p.rect(x, 278, 3, 5, c)
+            p.rect(x + 1, 276, 1, 2, c)
+            p.dot(x, 279, lit(c, 0.4))
+        for wx in range(a + 14, b - 16, 70):                         # windows
+            p.rect(wx, 269, 12, 9, "#2a170b")
+            if night:
+                p.rect(wx + 1, 270, 10, 7, "#f2c35a")
+                p.rect(wx + 1, 270, 4, 3, "#fff0b0")
+                lights.append('<circle class="sm-glow" cx="%d" cy="274" r="13" fill="#ffd77a" opacity="0.22"/>' % (wx + 6))
+            else:
+                p.rect(wx + 1, 270, 10, 7, "#7fa9c4")
+                p.rect(wx + 2, 271, 3, 1, "#d8ebf5")
+            p.rect(wx + 6, 270, 1, 7, "#2a170b")
+        if not (u["slot"] or {}).get("group"):                     # the home's anchor
+            for dx, dy in ANCHOR:
+                p.dot(a + 8 + dx, 269 + dy, "#e0b552")
+        for y in range(258, 266):                                    # the awning, and its scalloped hem
+            for x in range(a - 3, b + 3):
+                c = stripe if ((x - a) // 4) % 2 == 0 else cloth
+                p.dot(x, y, dark(c, 0.18) if y == 258 else c)
+        for x in range(a - 3, b + 3):
+            if (x - a) % 4 in (1, 2):
+                p.dot(x, 266, stripe if ((x - a) // 4) % 2 == 0 else cloth)
+        for px in (a - 2, b + 1):                                    # posts
+            p.rect(px, 266, 2, PIER - 266, "#3e220f")
+            p.rect(px, 266, 1, PIER - 266, "#5a3418")
+    return p.svg()
+
+
+def key_board_w(slot):
+    cap = max(1, int((slot or {}).get("cap") or 1))
+    return 4 + (5 if cap <= 6 else 4) * min(cap, 12)
+
+
+def key_board(x1, u):
+    """The tavern's key board, one hook per place it waits for: each key is out with the task that
+    holds that place, so whoever waits here waits for any key to come back, where a hand talking
+    up to the ship waits for that one hand. Pointing at it lights who holds the keys and who waits
+    (the page script); the names are in its title."""
+    slot = u["slot"] or {}
+    cap = max(1, int(slot.get("cap") or 1))
+    step = 5 if cap <= 6 else 4
+    bw = key_board_w(slot)
+    bx, by = x1 - bw - 6, 268
+    p = Pix()
+    p.rect(bx + bw // 2, by + 10, 2, PIER - by - 10, "#3e220f")    # its post
+    p.rect(bx - 1, by - 1, bw + 2, 12, "#24170d")
+    p.rect(bx, by, bw, 10, "#7a4a24")
+    p.rect(bx, by, bw, 1, "#a06a32")
+    for i in range(min(cap, 12)):
+        hx = bx + 3 + step * i
+        p.dot(hx, by + 2, "#e0b552")                                # the hook ...
+        for dx, dy in ((0, 4), (-1, 5), (1, 5), (0, 6), (0, 7), (0, 8), (1, 8)):
+            p.dot(hx + dx, by + dy, "#4e2c14")                      # ... and the shape of its key, gone
+    holders = slot.get("holders") or []
+    waiting = [q["id"] for q in u["cards"] + u["drink"]]
+    if slot.get("group"):
+        title = (tr("build slots for %s: %d of %d keys are out, with %s; %d wait for any of them to come back")
+                 % (slot["group"], slot.get("taken", 0), cap, ", ".join(holders) or "?", len(waiting)))
+    else:
+        title = tr("home lanes: %d of %d in use; %d wait for any lane to come free") % (slot.get("taken", 0), cap, len(waiting))
+    return ('<g class="sm-keys" data-ids="%s" tabindex="0" role="img" aria-label="%s"><title>%s</title>%s</g>'
+            % (esc(" ".join(holders + waiting)), esc(title), esc(title), p.svg()))
+
+
 def draw_pier(sc, lay, tags, lights, night):
     """The queue on the pier: the tavern's tables, bench and keg, the lines, the talkers with their
     balloons and a dotted line up to the hand they wait for, the dozing bench, and the counts of
     those with no room left."""
-    spots, out = lay["pier"], []
+    spots, out = lay["pier"], [draw_tavern(sc, lay, lights, night)] + [key_board(x1, u) for _x0, x1, u in lay["rooms"]]
     props, cards = Pix(), Pix()
     for kind, x, *rest in lay["pier_props"]:
         pier_prop(props, kind, x, *(rest or [None]))
@@ -4285,7 +4596,7 @@ def render_ship(sc):
     tags = Tags()
     paint_signs(sc, lay, tags)
     colors = list(sc["colors"].values())
-    far, mid = sky_and_sea(W, dusk, night, sc["sea"], rnd)
+    far, mid = sky_and_sea(W, dusk, night, sc["sea"], rnd, sc["now"])
     ship, ashore, near, lights = [], [], [], []
     spots = lay["hands"]
     by_id = {h["id"]: h for h in sc["hands"]}
@@ -4302,6 +4613,7 @@ def render_ship(sc):
             mid.append(hand_svg(h, (x + 3, wl - 3, pose, upto), tags, shadow_on=False) + boat_pix(x, wl).svg())
     mid.append(polygon([(x0 + 10, WL), (x0 + L - 60, WL), (x0 + L - 80, WL + 12), (x0 + 20, WL + 12)],
                        mix("#1d4f73", "#0a2238", dusk), ' opacity="0.45"'))
+    mid.append(hull_reflection(x0, L, dusk))
     # masts, stays and sails
     deck_x, fc_x, main_x = lay["deck_x"], lay["fc_x"], lay["main_x"]
     masts = [(x0 + 60, 36, (x0 + 24, x0 + 100, 50, 124)), (main_x, 6, (main_x - 54, main_x + 56, 56, 150)),
@@ -4406,14 +4718,14 @@ def render_ship(sc):
     hull = Pix()
     for y in range(NEAR, WL):
         d = y - NEAR
-        left = x0 + max(0, d - 34) // 2
-        right = x0 + L - int(((max(0, d) / float(WL - NEAR)) ** 1.7) * 70)
+        left, right = hull_rows(x0, L, d)
         c = mix("#8a5530", "#3e200d", d / float(WL - NEAR))
         hull.rect(left, y, right - left, 1, dark(c, 0.25) if d % 7 == 6 else c)
     hull.rect(x0, NEAR, L, 1, "#e9c06a")
     hull.rect(x0, NEAR + 1, L, 3, "#9a6233")
     hull.rect(x0, NEAR + 6, L - 2, 3, "#22345e")
     ship.append(hull.svg())
+    ship.append(hull_foam(x0, L))
     ship.append(numbers)
     hx0, hx1 = lay["hold"]
     hy0, hy1 = NEAR + 14, WL - 6
@@ -4492,6 +4804,7 @@ def render_ship(sc):
     for x in range(40, W, 64):
         pier.shaded(x, PIER - 4, ["OOO", "OoO", "OoO"], {"O": "#2a1a10", "o": "#4a3020"})
     ashore.append(pier.svg())
+    ashore.append(draw_pier_lamps(lay, mid, lights, night))
     ashore.append(draw_pier(sc, lay, tags, lights, night))
     # the newest MAX_CRATES crates, each its own drawing so the page can hold one back while its
     # hand carries it there (ship_events)
@@ -4713,7 +5026,8 @@ def demo_snapshot(now=None, moved=False):
     later, so the ship's animations have something to show: a lookout went down to the deck, a
     deck hand asked the captain, the blocked hand was answered, a ready task was dispatched, the
     checks at the rail came back, firstmate's context was compacted, a hand on the gangplank was
-    delivered, and a deck hand without a PR was delivered and handed its build slot to a card player."""
+    delivered, a deck hand without a PR was delivered and handed its build slot to a card player,
+    and a new task joined the tavern to wait for that slot."""
     now = time.time() if now is None else now
     h = 3600
 
@@ -4797,7 +5111,7 @@ def demo_snapshot(now=None, moved=False):
         queued("DEMO-Q-QUOTAS", "Per-team quotas", "harbor-api", "slot", days=2),
         queued("DEMO-Q-EXPORT2", "Export to spreadsheets", "tide-charts", "task", deps=["DEMO-EXPORT"]),
         queued("DEMO-Q-AUDITUI", "Audit log page", "lighthouse-web", "task", deps=["DEMO-Q-AUDIT"]),
-    ]
+    ] + ([queued("DEMO-Q-CSV", "CSV import", "harbor-api", "slot")] if moved else [])     # it walks into the tavern
 
     def lane(label, rem, reset_h, runway, exhaust_h=None):
         return {"label": label, "plan": "max", "status": "ok", "remaining": rem, "limit_label": "weekly",

@@ -176,8 +176,11 @@ Each element stands for one thing:
 | Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks firstmate closed as done in the last 7 days: the backlog's `closed` date, read with the rest of the backlog (`bin/fm-tasks-axi.sh list`), so a task pruned from the backlog leaves the pile. The session sheets are written later and in batches, so they feed only the usage block |
 | The bell on the mizzen mast | it rings when a task is delivered (see [Motion](#motion)) |
-| Day or night | the local hour: the lamps are lit from 18:00 to 06:00; the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
-| Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
+| Day or night | the local hour: the lamps are lit from 18:00 to 06:00 (on the ship, along the pier and in the tavern's windows); the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
+| Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above; the little waves are as many as the sea says |
+| The tavern's awning | the build slot its hands wait for: striped in that project's colour, or navy with an anchor for the home's lanes |
+| The key board on the tavern's wall | one hook per place the tavern waits for (the project's build slots, or the home's lanes); each key is out with the task that holds that place. Pointing at it, or focusing it, lights the hands that hold the keys (or the crowd at the cabin door one is in) and the hands that wait for them, and its title names them |
+| Clouds, gulls, little waves, foam at the hull, the hull's reflection, the sun's or the moon's glitter on the sea, twinkling stars, lamp posts along the pier | nothing: the scenery says nothing about the work (see [Scenery](#scenery)) |
 
 The scene is larger than its frame and grows with the crew so no hand stands on another.
 The cabin is the exception: it has one size, so the ship never grows with the captain's line.
@@ -189,6 +192,23 @@ Clicking a hand, on board, in the cabin, in a hammock or on the pier, opens the 
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand (or the crowd at the cabin door it is in), and clicking it opens its drawer.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, the tools on deck and the flags move, and lamps flicker, all only while the motion switch says "all" (see below).
+
+### Scenery
+
+Around the ship the harbour lives on its own, and none of it stands for anything:
+
+| What | How it moves |
+| --- | --- |
+| Clouds | two layers cross the whole sky and come round again, one art pixel a step: the far one small and slow, the near one larger and quicker |
+| Gulls | by day only, a gull crosses the sky now and then: two of them, on rounds of 60 and 97 seconds, each in flight for the first 40% of its round and out of sight the rest, so they rarely cross together |
+| Little waves | they rise, roll a pixel or two and sink, in three sets a beat apart |
+| Foam at the hull, the hull's reflection, the glitter under the sun or the moon | two frames that take turns |
+| Stars | at night a few brighter ones dip now and then, on two beats |
+| Lamp posts along the pier | dark by day; at night lit, with a pool of light on the planks and their reflection in the water between the piles. They keep clear of the tavern (it has its own lantern), the foot of the gangplank, and the moored skiffs and crates |
+
+All of it moves only while the motion switch says "all", stands with "changes only" or "off" (the gulls are then gone and the clouds stand), and stops where it is in a hidden tab.
+A loop longer than the page's refresh (a cloud's crossing, a gull's round) starts where the local clock says, so a new drawing goes on where the last one was instead of starting it over.
+Things move a step at a time and never slide, so the scene is not redrawn every frame (see the cost below).
 
 ### Work on deck
 
@@ -220,6 +240,7 @@ When the scene changes between two refreshes, the change plays once on the new d
 | The rod bends, an old boot comes up and falls back | a check failed |
 | The pump works six strokes, water spouts out of the stern, and the water drops from the old level to the new | firstmate's last compaction is newer than the previous reading's |
 | The lamps light one at a time, from the stern | night fell since the previous reading |
+| A new hand walks in from the near end of the pier to its seat in the tavern, in its straw hat | a task joined the queue to wait for a build slot or a lane: it was neither queued, aboard nor in a skiff in the earlier reading |
 | The bell rings; the hand walks down the gangplank with a crate in its arms, from wherever it stood (a task without a PR leaves from the deck, through the cabin), along the pier to the pile of delivered crates, sets the crate on it, waves and walks off the end of the pier; a scout steps from its skiff onto the pier with its crate | the agent is gone and firstmate closed its task as done (its crate is on the pile now) |
 | The hand walks down the gangplank empty-handed, without the bell, and off the near end of the pier | the agent is gone and its task was not closed as done |
 | The card player gets up as the bell rings and waits at the foot of the gangplank; the one leaving comes down with its crate, the two nod, and each goes on: one to the pile, the other up the gangplank to its place | in the same reading, a hand that held a build slot left and a task that waited for that slot was dispatched |
@@ -228,7 +249,7 @@ The page sends the print of the drawing on screen (`data-print`: where each hand
 Nothing plays when the page has just opened, when the earlier print is more than 90 s old (a tab left in the background, or the board shown meanwhile), or for a change no reading saw happen: a hand that appears aboard without having been queued, a scout's boat at sea.
 A task that goes back to the queue does not leave the ship; a scout walks off only from its skiff moored at the pier.
 The slot is handed over only when the one leaving held it: like firstmate, shipmate counts as the slot's holder a task with no recorded PR, so a hand that opened a PR gave its slot up when it went to the bow, and its departure plays on its own.
-At most two hands leave, four walk and three catches come up after one refresh; the rest of that refresh's changes just show in their new places.
+At most two hands leave, four walk, two arrive at the tavern and three catches come up after one refresh; the rest of that refresh's changes just show in their new places.
 The gangplank is out only while a hand stands on it; it is put out for whoever walks down or up it, and taken in again behind them.
 Each kind has one detector in `shipmate.py` (`EVENT_DETECTORS`) and one player in the page script (`PLAYERS`), so a new animation is added in those two places.
 The frames it needs (a stride, two holds on the ladder, the arm with the flag, the bent rod, the catch, the jet, the crate carried and the bell's ring) are drawn by `hand_sprite` and the server like every other sprite, and arrive with the change; a hand that has left is drawn from the colours its last print kept.
@@ -244,15 +265,18 @@ The "motion" button in the scene's corner cycles through:
 It starts at "off" when the browser asks for reduced motion and at "all" otherwise, and the browser remembers the choice.
 The drawing is the same in every setting; only the way there differs.
 
-The cost per frame was measured with a Chrome performance trace of the `--demo` ship view at 1440 x 900, framed on the crew, on one Apple Silicon Mac, 14 Nov 2026: the busy time of the page's renderer main thread, its compositor, the GPU process and the viz compositor, per frame drawn.
+The cost was measured with a Chrome performance trace of the `--demo` ship view at 1440 x 900, with motion on "all" and the ship at rest (8 s away from the demo's flip and the page's refresh), on one Apple Silicon Mac, 14 Nov 2026: the busy time of the page's renderer main thread, its compositor, the GPU process and the viz compositor, per second and per frame drawn.
 
-| | Frames drawn per second | Main thread per frame | All four per frame |
+| Three runs each | Frames drawn per second | All four, per second | All four, per frame |
 | --- | --- | --- | --- |
-| Before (main `028ec27`), the ship at rest, three runs | 10.7 to 10.8 | 0.02 to 0.23 ms | 2.7 to 3.3 ms |
-| After, the ship at rest, three runs | 10.6 to 10.8 | 0.03 to 0.30 ms | 3.1 to 3.6 ms |
-| After, a refresh of the demo that plays a boarding, three walks, a fish, a boot and the pump, two runs | 28 | 2.3 to 2.5 ms | 4.7 to 5.0 ms |
+| Before (main `4d86797`), framed on the crew | 60 | 227 to 246 ms | 3.8 to 4.1 ms |
+| Before, fitting the whole scene | 60 | 229 to 268 ms | 3.8 to 4.5 ms |
+| Before, framed on the crew, with only the clouds' drift paused | 10.8 to 11.3 | 76 to 84 ms | 7.0 to 7.7 ms |
+| After (the scenery and the tavern), framed on the crew | 19 to 28 | 126 to 153 ms | 5.6 to 6.5 ms |
+| After, fitting the whole scene | 19 to 31 | 101 to 148 ms | 4.6 to 5.5 ms |
 
-At rest the cost stays within the runs' spread: the loops are the same CSS `steps()` animations as before.
+The clouds used to slide back and forth, and whenever some sky was in view that alone redrew the scene every frame; they now step a pixel at a time, and the whole scenery, gulls included, costs less than that drift did.
+The spread after depends on whether a gull is crossing: its flight is the one loop that steps many times a second.
 While changes play, the walkers redraw at most 30 times a second, and the extra work stops when the last one arrives; a refresh that comes meanwhile waits for them before it draws.
 
 ### The queue on the pier and below deck
@@ -269,6 +293,9 @@ Every queued task that is not held for the captain's decision (those wait in the
 | Asleep in a hammock in the quarters below deck, its date over it | held until a date that has not come (`hold_until`) |
 
 Each tavern has its sign with the slot it waits for (`SLOT <project> · 2/2 taken · 13 waiting`, or the home's lanes), and the other groups have theirs (ready, waiting for a task, and the quarters below deck).
+Each tavern is a building behind its tables: an awning striped in the colour of the project whose slot it waits for (navy with an anchor for the home's lanes), a plank wall with windows that light up at night, a shelf of bottles, and a key board with one hook per place, each key out with the task that holds it.
+So whoever waits in the tavern waits for any key to come back, where a hand talking up to the ship waits for that one hand.
+The building stands below the waterline, so it hides nothing of the hull.
 The tavern takes four tables and one bench of eight; the rest are counted (`+N`, with their ids on hover), and so are lines past eight.
 The tavern is anchored at the foot of the gangplank, on its right, and grows to the right, so a short queue adds only a short stretch and nothing is reserved west of the ship.
 The tavern's names show only on hover or focus, so a full table stays readable; the others keep their names on.
