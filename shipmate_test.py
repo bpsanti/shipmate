@@ -5,6 +5,7 @@ import html
 import http.client
 import json
 import os
+import random
 import re
 import shutil
 import stat
@@ -1316,6 +1317,25 @@ class TestShip(unittest.TestCase):
         quiet = shipmate.stage_chips(shipmate.ship_scene(self.snap([self.hand("A", 1)])))
         for key in shipmate.PIER_STAGES:                                  # an empty pier stage is left out
             self.assertNotIn('data-stage="%s"' % key, quiet)
+
+    def test_the_tavern_stands_the_same_whatever_order_the_backlog_lists_the_queue_in(self):
+        today = dt.date.fromtimestamp(T0).isoformat()
+        one = {"group": "demo-app", "cap": 2, "taken": 2, "holders": []}
+        two = {"group": "alpha-app", "cap": 1, "taken": 1, "holders": []}
+        home = {"group": "", "cap": 3, "taken": 3, "holders": []}
+        queue = ([self.queue_item("A%d" % i, "slot", today, slot=one) for i in range(4)]
+                 + [self.queue_item("B%d" % i, "slot", "2000-01-01", slot=two) for i in range(3)]
+                 + [self.queue_item("L%d" % i, "lane", today, slot=home) for i in range(2)])
+        agents = [self.hand("H1", 1)]
+        def where(q):
+            lay = shipmate.ship_layout(shipmate.ship_scene(self.snap(agents, queue=q)))
+            return lay["x0"], lay["pier"], [u["sign"] for u in lay["tavern"]]
+        want = where(queue)
+        self.assertTrue(want[2][0].startswith("SLOT alpha-app") and want[2][-1].startswith("HOME LANES"), want[2])
+        for seed in range(6):
+            shuffled = list(queue)
+            random.Random(seed).shuffle(shuffled)
+            self.assertEqual(where(shuffled), want, seed)
 
     def test_the_pier_gives_every_queued_hand_its_own_spot(self):
         today = dt.date.fromtimestamp(T0).isoformat()

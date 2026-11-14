@@ -2605,15 +2605,16 @@ def sign_w(text):
 
 def tavern_units(sc):
     """The card tables and tavern bench of each group that waits for a slot (one per project, and
-    one for the home's lanes), in queue order, with the width each takes on the pier."""
+    one for the home's lanes), in a fixed order, with the width each takes on the pier."""
     units = {}
-    for q in sc["pier"]:
+    # the order the backlog lists them in must not decide who sits where: oldest first, then by id
+    for q in sorted(sc["pier"], key=lambda q: (q.get("created") or "", q["id"])):
         if q["act"] in ("cards", "drink"):
             slot = q.get("slot") or {}
             u = units.setdefault(slot.get("group", ""), {"slot": slot, "cards": [], "drink": []})
             u[q["act"]].append(q)
     out = []
-    for g, u in units.items():
+    for g, u in sorted(units.items(), key=lambda kv: (kv[0] == "", kv[0])):   # projects by name, the home's lanes last
         n = len(u["cards"]) + len(u["drink"])
         sl = u["slot"]
         u["sign"] = (tr("SLOT %s · %d/%d taken · %d waiting") % (g, sl.get("taken", 0), sl.get("cap", 0), n) if g else
