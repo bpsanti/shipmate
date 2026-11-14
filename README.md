@@ -171,8 +171,9 @@ Each element stands for one thing:
 | Water in the hold | firstmate's context; the white line is the warning threshold |
 | The pump on the orlop | it works when firstmate's context is compacted, and the water goes down (see [Motion](#motion)) |
 | A bucket with a fish beside a hand at the rail | every check on that agent's PR passed (read in the background, see the table above) |
+| Hammocks in the quarters, cut open in the hull forward of the hold | queued tasks held until a date, one asleep in each hammock under a blanket in its project's colour, the date over it (see below) |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
-| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task, asleep); the "signs" button puts them away, and the browser remembers it |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away, and the browser remembers it |
 | Crates on the pier | tasks delivered in the last 7 days (the session sheets) |
 | Day or night | the local hour: the lamps are lit from 18:00 to 06:00; the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
 | Calm, choppy or rough sea | the machine's one-minute load per CPU: under 0.6, under 1.0, above |
@@ -183,7 +184,7 @@ Three wait inside, 20 art pixels apart between the desk and the door; a fourth w
 When wide props leave no room for the third, two wait inside, and the line keeps its order: everyone after the first who does not fit is in the crowd at the door.
 It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the buttons zoom in and out, frame the crew again, or fit everything.
 Names show from a readable zoom up, never overlap, and come back on hover or focus when zoomed out.
-Clicking a hand, on board, in the cabin or on the pier, opens the same drawer as its card.
+Clicking a hand, on board, in the cabin, in a hammock or on the pier, opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand (or the crowd at the cabin door it is in), and clicking it opens its drawer.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, hammers and flags move, and lamps flicker, all only while the motion switch says "all" (see below).
@@ -231,27 +232,32 @@ The cost per frame was measured with a Chrome performance trace of the `--demo` 
 At rest the cost stays within the runs' spread: the loops are the same CSS `steps()` animations as before.
 While changes play, the walkers redraw at most 30 times a second, and the extra work stops when the last one arrives; a refresh that comes meanwhile waits for them before it draws.
 
-### The queue on the pier
+### The queue on the pier and below deck
 
-Every queued task that is not held for the captain's decision is a hand on the pier (those wait in the captain's cabin), and what it does there is decided by the first reason the queue gives for it, nothing else:
+Every queued task that is not held for the captain's decision (those wait in the captain's cabin) is a hand on the pier, or asleep below deck when it is held until a date, and what it does there is decided by the first reason the queue gives for it, nothing else:
 
-| On the pier | Reason in the queue |
+| Where, doing what | Reason in the queue |
 | --- | --- |
 | Playing cards at a table at the tavern, at the foot of the gangplank, to its right (three to a table: one each side, one standing behind) | waits for a build slot (`config/project-capacity`) or a home lane (`bin/fm-capacity.sh`), and was created today |
 | Drinking from a mug on the tavern bench, by the keg | the same wait, created on an earlier day: it has waited longer |
 | Standing at the foot of the gangplank with a sea bag | nothing holds it: firstmate can dispatch it |
 | Standing under a hand aboard, talking up to it, with a balloon and a dotted line to that hand | it waits for that task (`blocked-by`), and that task is aboard; it stands as close below it as the others allow |
 | Standing apart, its tag naming what it waits for | it waits for a task that is not aboard (still queued, or gone) |
-| Asleep on the bench under the forecastle, with its date | held until a date that has not come |
+| Asleep in a hammock in the quarters below deck, its date over it | held until a date that has not come (`hold_until`) |
 
-Each tavern has its sign with the slot it waits for (`SLOT <project> · 2/2 taken · 13 waiting`, or the home's lanes), and the other groups have theirs (ready, waiting for a task, asleep).
+Each tavern has its sign with the slot it waits for (`SLOT <project> · 2/2 taken · 13 waiting`, or the home's lanes), and the other groups have theirs (ready, waiting for a task, and the quarters below deck).
 The tavern takes four tables and one bench of eight; the rest are counted (`+N`, with their ids on hover), and so are lines past eight.
 The tavern is anchored at the foot of the gangplank, on its right, and grows to the right, so a short queue adds only a short stretch and nothing is reserved west of the ship.
 The tavern's names show only on hover or focus, so a full table stays readable; the others keep their names on.
 The ship moves over to make room for the tavern, and the moored scouts and crates move toward the bow past the queue.
-The four stage chips for the pier (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
-A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a sleeper breathes; nothing there looks like progress, and none of it moves unless the motion switch says "all".
-Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` (with `POSE_HEAD`, where each pose puts the head), the hats in `HATS` and the colours in `hand_palette`, so a new art style replaces those and nothing else.
+The quarters open only while a queued task is held until a date, cut in the hull forward of the hold: the hammocks hang from the beams in two tiers, the second half a hammock on so no rope crosses a sleeper, the earliest date aft.
+Each hammock keeps its date over it (`16 Nov`), and its task's id shows on hover or focus.
+They take twelve hammocks; the rest are counted (`+N`, with their ids on hover).
+The hold gives the quarters the room it does not need for its barrels and chart table, and the forecastle grows only when that is still short; with nobody asleep the hold is as wide as before.
+A hand fishing at the rail stands over the quarters, and its line hangs in front of them, down to the water.
+The four stage chips for the queue (waiting for a slot, ready to board, waiting for a task, held until a date) light their hands like the others and are left out when empty.
+A queued hand never takes a working pose: the cards on a table blink, a drinker lifts the mug now and then, a talker's balloon comes and goes, a hammock sways; nothing there looks like progress, and none of it moves unless the motion switch says "all".
+Every hand, on board or on the pier, and every hand in a chip is painted by one function, `hand_sprite`, from the poses in `POSES` (with `POSE_HEAD`, where each pose puts the head), the hats in `HATS` and the colours in `hand_palette`, so a new art style replaces those and nothing else; a hand asleep in a hammock, which lies down, is painted by `hammock_sprite`, from the same `hand_palette`.
 A hand is drawn on a grid 13 pixels wide and 21 tall at the ship's own pixel size, seen three-quarters so both eyes show; its skin stays one flat colour, so the face reads at any zoom, and its props (a spyglass, a hammer, flags, a rod, a pack, a map, cards, a mug) make some poses wider.
 The captain and firstmate at the helm are drawn on the same scale.
 

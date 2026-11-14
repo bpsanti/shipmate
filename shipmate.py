@@ -871,6 +871,7 @@ def queue_rows(cfg, backlog, lanes=None):
         out.append({"id": r["id"], "title": r.get("title", ""), "repo": repo, "kind": r.get("kind", ""),
                     "created": r.get("created", ""), "reasons": reasons,
                     "hold_reason": (r.get("hold_reason") or "")[:240], "deps": deps, "slot": slot,
+                    "hold_until": r["hold_until"] if any(x[0] == "date" for x in reasons) else "",
                     # how long it has waited for the captain, when it does: since the hold was set,
                     # or since the day it was created when the hold carries no stamp
                     "waiting_since": since if any(x[0] == "decision" for x in reasons) else None,
@@ -1637,7 +1638,7 @@ PT_BR = {
     "SLOT %s · %d/%d taken · %d waiting": "VAGA %s · %d/%d ocupadas · %d esperando",
     "HOME LANES · %d/%d in use · %d waiting": "VAGAS DA CASA · %d/%d em uso · %d esperando",
     "READY · boards next": "PRONTAS · embarcam em seguida",
-    "WAITS FOR A TASK": "ESPERAM UMA TAREFA", "ASLEEP · held until a date": "DORMINDO · seguras até uma data",
+    "WAITS FOR A TASK": "ESPERAM UMA TAREFA", "QUARTERS · asleep until a date": "ALOJAMENTO · dormem até a data",
     "%s waits for %s": "%s espera %s",
     "playing cards on the pier: queued today, waits for a free build slot or lane":
         "jogando cartas no cais: entrou na fila hoje, espera uma vaga de build ou da casa",
@@ -1647,7 +1648,9 @@ PT_BR = {
         "ao pé da prancha com a bolsa: nada a segura, pronta para embarcar",
     "on the pier, talking up to the hand it waits for": "no cais, conversando com o marujo que ela espera",
     "on the pier: waits for a task that is not aboard": "no cais: espera uma tarefa que não está a bordo",
-    "asleep on the bench: held until its date": "dormindo no banco: segura até a data",
+    "asleep in a hammock in the quarters below deck: held until its date": "dormindo numa rede no alojamento abaixo do convés: segura até a data",
+    "the quarters below deck: queued tasks held until a date sleep here, the earliest date aft":
+        "o alojamento abaixo do convés: aqui dormem as tarefas da fila seguras até uma data, a data mais próxima mais à popa",
     "in the captain's cabin with a sea bag: queued, waits for your decision":
         "na cabine do capitão com a bolsa: na fila, espera a sua decisão",
     "context %d%% of the window%s": "contexto em %d%% da janela%s", ", past the %d%% warning": ", acima do aviso de %d%%",
@@ -1677,7 +1680,8 @@ PT_BR = {
     "at the foot of the gangplank with a sea bag: queued, and nothing holds it": "ao pé da prancha com a bolsa: na fila, e nada a segura",
     "on the pier talking up to the hand it waits for, or standing apart when that task is not aboard":
         "no cais conversando com o marujo que ela espera, ou de pé à parte quando essa tarefa não está a bordo",
-    "asleep on the bench: queued and held until its date": "dormindo no banco: na fila e segura até a data",
+    "asleep in a hammock in the quarters below deck: queued and held until its date":
+        "dormindo numa rede no alojamento abaixo do convés: na fila e segura até a data",
     "a red flag: needs your decision; hands and queued tasks wait in your cabin, longest wait first, the rest crowd "
     "the door, and the log below lists them all":
         "uma bandeira vermelha: precisa da sua decisão; marujos e tarefas da fila esperam na sua cabine, quem espera há "
@@ -1730,9 +1734,11 @@ PT_BR.update({
     "motion: all": "movimento: tudo", "motion: changes only": "movimento: só mudanças", "motion: off": "movimento: parado",
     "Scouts row out to the horizon, back with the map, and moor at the pier with it.":
         "Os batedores remam até o horizonte, voltam com o mapa e atracam no cais com ele.",
-    "On the pier, the queue: cards or a mug at the tavern while it waits for a free slot, a sea bag at the gangplank when nothing holds it, talking up to the hand it waits for, asleep until its date.":
+    "On the pier, the queue: cards or a mug at the tavern while it waits for a free slot, a sea bag at the gangplank when nothing holds it, talking up to the hand it waits for.":
         "No cais, a fila: cartas ou uma caneca na taverna enquanto espera uma vaga livre, a bolsa ao pé da prancha quando "
-        "nada a segura, conversando com o marujo que ela espera, dormindo até a data.",
+        "nada a segura, conversando com o marujo que ela espera.",
+    "Hammocks in the quarters below deck: queued tasks held until a date sleep there, the date over each.":
+        "Redes no alojamento abaixo do convés: ali dormem as tarefas da fila seguras até uma data, com a data sobre cada uma.",
     "Crates: tasks delivered in the last 7 days.": "Caixotes: tarefas entregues nos últimos 7 dias.",
     "The sky follows the local time, darkening over the hour around 18:00 and lightening around 06:00, and the sea the machine's load.":
         "O céu segue a hora local, escurecendo ao longo da hora em volta das 18:00 e clareando em volta das 06:00, e o mar a "
@@ -1826,6 +1832,15 @@ def fmt_when(ts, now=None):
     if w.date() == dt.date.fromtimestamp(now or time.time()):
         return tr("today %s") % w.strftime("%H:%M")
     return "%s %s" % (fmt_day(w.date()), w.strftime("%H:%M"))
+
+
+def fmt_day_short(s):
+    """A YYYY-MM-DD date as day and month, short enough to hang over a hammock: 16 Nov."""
+    try:
+        d = dt.date.fromisoformat(s)
+    except (TypeError, ValueError):
+        return ""
+    return "%02d %s" % (d.day, MONTHS[LANG][d.month - 1])
 
 
 def fmt_date_iso(s):
@@ -2404,13 +2419,14 @@ PIER_ACTS = {
     "board": "at the foot of the gangplank with a sea bag: nothing holds it, ready to board",
     "talk": "on the pier, talking up to the hand it waits for",
     "wait": "on the pier: waits for a task that is not aboard",
-    "doze": "asleep on the bench: held until its date",
 }
 PLACE_TEXT.update({"pier-" + k: v for k, v in PIER_ACTS.items()})
+# a queued task held until a date is not on the pier either: it sleeps in a hammock in the quarters below deck
+PLACE_TEXT["quarters"] = "asleep in a hammock in the quarters below deck: held until its date"
 # a queued task held for the captain's decision is not on the pier: it waits in the captain's line
 PLACE_TEXT["cabin"] = "in the captain's cabin with a sea bag: queued, waits for your decision"
-PIER_POSE = {"cards": "cards", "drink": "drink", "board": "stand", "talk": "talk", "wait": "stand", "doze": "doze"}
-PIER_STAGE = {"cards": "slot", "drink": "slot", "board": "board", "talk": "task", "wait": "task", "doze": "date"}
+PIER_POSE = {"cards": "cards", "drink": "drink", "board": "stand", "talk": "talk", "wait": "stand"}
+PIER_STAGE = {"cards": "slot", "drink": "slot", "board": "board", "talk": "task", "wait": "task"}
 CAPTAIN_STATES = {"parked", "blocked", "failed"}   # fm-crew-state.sh reports a needs-decision crew as parked
 SEA_LOAD = (0.6, 1.0)                              # load per CPU where the sea turns choppy, then rough
 OFF_DUTY_AFTER = 20 * 60                           # seconds without activity before an idle hand rests
@@ -2529,14 +2545,15 @@ def project_colors(s):
 
 
 def pier_activity(q, aboard, today):
-    """What a queued task does on the pier, and the hand aboard it talks to: a slot or lane wait
+    """What a queued task does while it waits, and the hand aboard it talks to: a slot or lane wait
     plays cards when queued today and drinks at the tavern when queued on an earlier day, a task
     with nothing holding it waits to board, one that waits for a hand aboard talks up to it (or
-    stands apart when what it waits for is not aboard), and a dated hold dozes. The captain's
-    decisions never come here: they wait in the captain's line. `today` is the local date as YYYY-MM-DD."""
+    stands apart when what it waits for is not aboard), all on the pier; a dated hold goes below
+    deck to sleep in a hammock ("hammock"). The captain's decisions never come here: they wait in
+    the captain's line. `today` is the local date as YYYY-MM-DD."""
     k = q.get("reason")
     if k == "date":
-        return "doze", None
+        return "hammock", None
     if k == "task":
         partner = next((d for d in q.get("deps") or [] if d in aboard), None)
         return ("talk", partner) if partner else ("wait", None)
@@ -2583,6 +2600,7 @@ def ship_scene(s):
               "reason": (q.get("reasons") or [("ready",)])[0][0], "deps": list(q.get("deps") or []),
               "slot": q.get("slot"), "created": q.get("created") or "",
               "until": next((r[1] for r in q.get("reasons") or [] if r[0] == "date"), ""),
+              "until_day": q.get("hold_until") or "",
               "since": q.get("waiting_since"), "exact": q.get("waiting_exact", True)} for q in s.get("queue") or []]
     for q in queue:
         q.update(project=q["repo"], phase=tr("queued"), off=False, color=colors.get(q["repo"], "#8a8a8a"))
@@ -2604,20 +2622,26 @@ def ship_scene(s):
             q.update(place="cabin", stage="flag")
     aboard = {h["id"] for h in hands + scouts}
     today = dt.date.fromtimestamp(now).isoformat()
-    pier = [q for q in queue if not q["line"]]
-    for q in pier:
+    pier, quarters = [], []
+    for q in (q for q in queue if not q["line"]):
         q["act"], q["partner"] = pier_activity(q, aboard, today)
+        if q["act"] == "hammock":
+            # below deck, the earliest date first; the date alone hangs over the hammock
+            q.update(place="quarters", stage="date", date=fmt_day_short(q["until_day"]) or q["until"])
+            q["tag"] = "%s · %s" % (q["id"], q["date"])
+            quarters.append(q)
+            continue
         q.update(place="pier-" + q["act"], stage=PIER_STAGE[q["act"]])
         if q["act"] == "talk":
             q["tag"] = "%s → %s" % (q["id"], q["partner"])
         elif q["act"] == "wait":
             q["tag"] = tr("%s waits for %s") % (q["id"], ", ".join(q["deps"]) or "?")
-        elif q["act"] == "doze":
-            q["tag"] = "%s · %s" % (q["id"], q["until"])
+        pier.append(q)
+    quarters.sort(key=lambda q: (q["until_day"] or "9999", q["id"]))
     return {
         "now": now,
         "line": line, "captain": {"busy": bool(line), "waiting": len(line), "oldest": line[0] if line else None},
-        "hands": hands, "scouts": scouts, "queue": queue, "pier": pier, "crates": crates, "barrels": barrels,
+        "hands": hands, "scouts": scouts, "queue": queue, "pier": pier, "quarters": quarters, "crates": crates, "barrels": barrels,
         "firstmate": {"context": pct, "warn_at": warn, "over": pct is not None and pct >= warn,
                       "tokens": fm.get("context"), "limit": fm.get("limit"), "known": bool(fm),
                       "compaction": (fm.get("last_compaction") or {}).get("at")},
@@ -2820,13 +2844,22 @@ MAX_TABLES = 4        # card tables per group waiting for a slot; the rest are c
 MAX_ROW = 8           # hands on one bench or in one line on the pier; the rest are counted
 BENCH_STEP = 20
 LINE_STEP = 22
-DOZE_STEP = 26
 TALK_W = 22           # a hand talking up to the one it waits for
 PIER_FEET = PIER + 8  # where a hand on the pier stands
 TAVERN_FROM = 42      # from the stern post to the first lantern of the tavern: just right of the gangplank's foot
 DECK_WALK = 190       # the feet of a hand walking along the main deck from one place to another
 BOW_WALK = 168        # and along the forecastle
 PUMP_FROM_END = 84    # the bilge pump stands this far from the hold's forward end, clear of the chart table
+# The quarters, cut open in the hull forward of the hold: the dated holds sleep there in hammocks
+# slung from the beams, in two tiers, the second half a hammock on so no rope crosses a sleeper.
+QUARTERS_TOP = NEAR + 11      # under the deck planks and the hull's blue strake
+QUARTERS_FLOOR = WL - 6
+HAMMOCK_W = 28                # between hammocks in one tier
+HAMMOCK_LOW = (21, 42)        # each tier's lowest point, below the quarters' top
+MAX_HAMMOCKS = 12             # the rest are counted
+QUARTERS_PAD = 14             # from the quarters' aft wall to the first hammock's hook
+QUARTERS_BOW = 92             # the quarters keep this far from the stem, clear of the bow's curve and the ship's name
+HOLD_KEEPS = 104              # the hold's chart table, and its first column, past the barrels
 
 
 def sign_w(text):
@@ -2861,8 +2894,8 @@ def tavern_units(sc):
 def pier_layout(sc, lay, x0):
     """Where the queue stands on the pier. The tavern is anchored first, at the foot of the
     gangplank on its right, and grows to the right; then, toward the bow, the talkers, each under
-    the hand it talks to, the lines in the gaps they leave, and the dozing bench under the
-    forecastle. Nothing overlaps: the tavern and the talkers claim their places first, and a group
+    the hand it talks to, and the lines in the gaps they leave (the dated holds sleep below deck,
+    see quarters_layout). Nothing overlaps: the tavern and the talkers claim their places first, and a group
     that would land on another moves toward the bow to the first gap wide enough. Returns the
     spots, the props, the signs, the counted overflow and where it ends."""
     spots, props, signs, more = {}, [], [], []
@@ -2905,14 +2938,8 @@ def pier_layout(sc, lay, x0):
         if q["act"] == "talk":
             spot = lay["hands"].get(q["partner"]) or lay["scouts"].get(q["partner"])
             groups.append({"act": "talk", "who": [q], "pref": (spot[0] - 2) if spot else x0 + 92, "sign": None, "w": TALK_W})
-    dozing = [q for q in sc["pier"] if q["act"] == "doze"]
-    if dozing:
-        n = min(len(dozing), MAX_ROW)
-        label = tr("ASLEEP · held until a date")
-        groups.append({"act": "doze", "who": dozing, "pref": lay["fc_x"] + 6, "sign": (label, ""),
-                       "w": max(DOZE_STEP * n + 8 + (12 if len(dozing) > n else 0), sign_w(label) + 4)})
     taken, end = ([(x0 + TAVERN_FROM, tavern_end + 8)] if lay["tavern"] else []), max(x0 + 92, tavern_end)
-    order = {"talk": 0, "board": 1, "wait": 2, "doze": 3}
+    order = {"talk": 0, "board": 1, "wait": 2}
     for g in sorted(groups, key=lambda g: (order[g["act"]], g["pref"])):
         gx = max(g["pref"], x0 + 92)
         for a, b in sorted(taken):                         # the first gap at or after gx that fits it
@@ -2926,18 +2953,47 @@ def pier_layout(sc, lay, x0):
         shown = g["who"][:MAX_ROW]
         if g["act"] == "talk":
             spots[g["who"][0]["id"]] = (gx + 2, PIER_FEET, "talk", None)
-        elif g["act"] == "doze":
-            props.append(("bench", gx, gx + DOZE_STEP * len(shown) + 4))
-            for i, q in enumerate(shown):
-                spots[q["id"]] = (gx + 4 + DOZE_STEP * i, PIER_FEET, "doze", None)
         else:
             for i, q in enumerate(shown):
                 spots[q["id"]] = (gx + LINE_STEP * i, PIER_FEET, "stand", None)
                 if g["act"] == "board":
                     props.append(("bag", gx + LINE_STEP * i + 14))
         if len(g["who"]) > len(shown):
-            more.append((gx + (DOZE_STEP if g["act"] == "doze" else LINE_STEP) * len(shown) + 4, g["who"][len(shown):]))
+            more.append((gx + LINE_STEP * len(shown) + 4, g["who"][len(shown):]))
     return spots, props, signs, more, end
+
+
+def quarters_layout(sc, out):
+    """Where the quarters go and who sleeps where, when a queued task is held until a date. They
+    take the hull forward of the hold, up to QUARTERS_BOW from the stem: the hold gives up the room
+    it does not need for its barrels and chart table, and when that is still short the forecastle
+    grows. Hammocks hang in date order from aft, alternating tiers. Sets out["quarters"] (None
+    when nobody sleeps) and may change out["hold"], out["fc_len"] and out["length"]."""
+    who = sc["quarters"]
+    if not who:
+        out["quarters"] = None
+        return
+    shown = who[:MAX_HAMMOCKS]
+    cols = (len(shown) + 1) // 2
+    label = tr("QUARTERS · asleep until a date")
+    w = max(2 * QUARTERS_PAD + HAMMOCK_W * cols + HAMMOCK_W // 2 + (14 if len(who) > len(shown) else 0), sign_w(label) + 10)
+    hx0, hx1 = out["hold"]
+    bow = out["x0"] + out["length"] - QUARTERS_BOW
+    keep = hx0 + max(150, 14 * len(sc["barrels"]) + HOLD_KEEPS)
+    hold_end = min(hx1, max(keep, bow - w - 14))
+    short = hold_end + 14 + w - bow
+    if short > 0:
+        out["fc_len"] += short
+        out["length"] += short
+    out["hold"] = (hx0, hold_end)
+    qx = hold_end + 14
+    beds = {}
+    for i, q in enumerate(shown):
+        tier = i % 2
+        beds[q["id"]] = (qx + QUARTERS_PAD + HAMMOCK_W * (i // 2) + (HAMMOCK_W // 2 if tier else 0), QUARTERS_TOP + HAMMOCK_LOW[tier])
+    out["quarters"] = {"box": (qx, qx + w), "beds": beds, "label": label, "more": who[len(shown):],
+                       "more_x": qx + QUARTERS_PAD + HAMMOCK_W * cols + HAMMOCK_W // 2 + 2,
+                       "chests": [qx + QUARTERS_PAD + HAMMOCK_W * i + 18 for i in range(cols)]}
 
 
 def cabin_pose(x):
@@ -2987,6 +3043,8 @@ def ship_layout(sc):
     out = {"x0": x0, "length": length, "castle": castle, "cabin": (x0 + CABIN_X, x0 + CABIN_X + CABIN_W), "deck_x": deck_x, "deck_len": deck_len, "fc_x": fc_x, "fc_len": fc_len,
            "hatch_x": hatch_x, "rail_x": rail_x, "main_x": main_x, "nest": (main_x + 2 - nest_w // 2, nest_w),
            "hold": (x0 + 98, deck_x + deck_zone + hatch_zone - 8), "hands": {}, "tavern": tavern}
+    quarters_layout(sc, out)
+    length, fc_len = out["length"], out["fc_len"]
     put = out["hands"]
     ladder = ((main_x - 38, FAR), (main_x - 8, 46))
     for i, h in enumerate(by["nest"]):
@@ -3153,8 +3211,6 @@ POSES = {
     # standing, looking up at the hand it waits for, one arm up
     "talk": build_pose(15, 21, 0, 0, [(11, 11, "c"), (12, 10, "c"), (13, 9, "s"), (13, 8, "s"),
                                       (6, 5, "E"), (9, 5, "E"), (6, 4, "E"), (9, 4, "E"), (6, 6, "s"), (9, 6, "s")], clear=ARM_R),
-    # asleep sitting up, eyes shut
-    "doze": seated(15, [(6, 5, "s"), (9, 5, "s"), (5, 6, "E"), (6, 6, "E"), (9, 6, "E"), (10, 6, "E")]),
     # on the move between places (ship_events): a stride, the two holds of climbing the ladder, an
     # arm waving the red flag on the way to the cabin, and the rod bent by a bite at the rail
     "walk": build_pose(15, 21, 0, 0, STRIDE, clear=LEGS),
@@ -3171,7 +3227,7 @@ POSES.update({k + "-l": [r[::-1] for r in v] for k, v in list(POSES.items())})
 # where each pose puts STAND's top left corner, so the hat, the name tag and the flag find the head
 POSE_HEAD = {"walk": (0, 0), "climb": (0, 0), "climb2": (0, 0), "wave": (0, 0), "reel": (0, 0),
              "stand": (0, 0), "spy": (0, 0), "hammer": (0, 5), "signal": (5, 5), "fish": (0, 0), "pack": (4, 0),
-             "scroll": (0, 0), "rest": (0, 2), "cards": (0, 2), "drink": (0, 2), "talk": (0, 0), "doze": (0, 2)}
+             "scroll": (0, 0), "rest": (0, 2), "cards": (0, 2), "drink": (0, 2), "talk": (0, 0)}
 ROD_TIP = (25, 0)     # the fishing rod's tip in the fish pose, where the line hangs from
 REEL_TIP = (25, 6)    # and in the reel pose, bent by a bite
 
@@ -3565,6 +3621,49 @@ def draw_pump(x, floor, top, bottom, stern):
 CHECKS_TEXT = {"pass": "every check passed", "fail": "a check failed", "pending": "checks running"}
 
 
+def hand_title(h):
+    """What a hand's tooltip says: who, where and why, and its place in the captain's line."""
+    state = tr("; off duty") if h["off"] else ""
+    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or tr("no project"), tr(PLACE_TEXT[h["place"]]), h["phase"], state,
+                                       tr("; needs the captain: ") + "; ".join(h["why"]) if h["flag"] else "")
+    if h.get("kind") == "queue":
+        title += " · %s%s" % (", ".join(h["why"]), (" · " + h["title"]) if h.get("title") else "")
+    if h.get("line"):
+        title += tr("; number %d in line for the captain, waiting %s") % (h["line"], h["wait"])
+    if h.get("checks"):
+        title += "; " + tr(CHECKS_TEXT[h["checks"]])
+    return title
+
+
+def hammock_sprite(p, h, x, low, top):
+    """A hammock slung from the beams at row `top`, its lowest point at row `low` and its aft hook
+    at x, with a hand of the queue asleep in it: the head aft, eyes shut, under a blanket in its
+    project's colour, its feet fore. It is painted from hand_palette, like every hand."""
+    pal = hand_palette(h)
+    w = HAMMOCK_W - 2
+    p.line(x, top, x + 3, low - 4, "#8a6a3a")
+    p.line(x + w, top, x + w - 3, low - 4, "#8a6a3a")
+    p.rect(x - 1, top, 3, 1, "#3e220f")
+    p.rect(x + w - 1, top, 3, 1, "#3e220f")
+
+    def sag(i):
+        return round(2.6 * math.sin(math.pi * (i - 2) / float(w - 4)))
+    for i in range(2, w - 1):                      # the blanket over the sleeper
+        p.rect(x + i, low - 6 + sag(i), 1, 3, pal["c"])
+        p.dot(x + i, low - 6 + sag(i), lit(pal["c"]))
+    for i in range(1, w):                          # the canvas, wrapped round it
+        p.rect(x + i, low - 3 + sag(i), 1, 3, "#e9dcb8")
+        p.dot(x + i, low - 1 + sag(i), "#b8a77a")
+    p.rect(x + 1, low - 5, 2, 2, "#e9dcb8")
+    p.rect(x + w - 2, low - 5, 2, 2, "#e9dcb8")
+    p.rect(x + 3, low - 11, 6, 2, pal["h"])        # the head, eyes shut
+    p.rect(x + 3, low - 9, 6, 4, pal["s"])
+    p.rect(x + 3, low - 9, 1, 3, pal["h"])
+    p.rect(x + 6, low - 7, 2, 1, "#5a3418")
+    p.rect(x + w - 6, low - 8 + sag(w - 6), 3, 2, dark(pal["c"]))   # the feet under the blanket
+    p.sprite(x + 11, low - 14, ZZZ, {})
+
+
 def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
     """One clickable hand at its spot, with its flag, its rest marks, and its name tag (shown only
     on hover or focus with hover_tag)."""
@@ -3576,7 +3675,7 @@ def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
         extra(p, top)
     if h["place"] == "hatch":
         p.sprite(cx - 2, head - 8, QMARK, {})
-    if base in ("rest", "doze"):
+    if base == "rest":
         p.sprite(cx - 14 if left else cx + 8, head - 3, ZZZ, {})       # beside the face, clear of the name tag
     flag = ""
     if h["flag"]:
@@ -3584,15 +3683,7 @@ def hand_svg(h, spot, tags, extra=None, shadow_on=True, hover_tag=False):
         red_flag(f, cx - 8, head - 10)
         flag = f.svg(' class="sm-redflag"')
     tags.place(h.get("tag") or h["id"], cx, head - (10 if h["flag"] else 1), h["id"], hover=hover_tag)
-    state = tr("; off duty") if h["off"] else ""
-    title = "%s · %s · %s (%s%s)%s" % (h["id"], h["project"] or tr("no project"), tr(PLACE_TEXT[h["place"]]), h["phase"], state,
-                                       tr("; needs the captain: ") + "; ".join(h["why"]) if h["flag"] else "")
-    if h.get("kind") == "queue":
-        title += " · %s%s" % (", ".join(h["why"]), (" · " + h["title"]) if h.get("title") else "")
-    if h.get("line"):
-        title += tr("; number %d in line for the captain, waiting %s") % (h["line"], h["wait"])
-    if h.get("checks"):
-        title += "; " + tr(CHECKS_TEXT[h["checks"]])
+    title = hand_title(h)
     stage = h.get("stage") or ("scouts" if h.get("kind") == "scout" else h["place"])
     return ('%s<g class="sm-hand pose-%s%s" data-id="%s" data-stage="%s" data-at="%d,%d"%s tabindex="0" role="button" aria-label="%s">'
             '<title>%s</title>%s%s</g>'
@@ -3816,6 +3907,50 @@ def door_crowd(crowd, cx1):
     return ('<g class="sm-crowd" data-action="crowd" data-crowd="%s" tabindex="0" role="button" aria-label="%s"><title>%s</title>%s'
             '<g class="sm-num"><rect x="%d" y="%d" width="%d" height="7" rx="3.5"/><text x="%.1f" y="%.1f">%s</text></g></g>'
             % (esc(" ".join(x["id"] for x in crowd)), esc(title), esc(title), p.svg(), bx, by, w, bx + w / 2.0, by + 5.3, label))
+
+
+def draw_quarters(sc, lay, tags, lights, night):
+    """The quarters, cut open in the hull forward of the hold, when a queued task is held until a
+    date: sea chests, a lantern, and a hammock for each, its date over it; the id shows on hover."""
+    qr = lay["quarters"]
+    if not qr:
+        return ""
+    qx0, qx1 = qr["box"]
+    top, floor = QUARTERS_TOP, QUARTERS_FLOOR
+    p = Pix()
+    p.rect(qx0 - 2, top - 2, qx1 - qx0 + 4, floor - top + 4, "#e0b552")
+    for y in range(top, floor):
+        p.rect(qx0, y, qx1 - qx0, 1, mix("#2a1a10", "#4a2e18", (y - top) / float(floor - top)))
+    for x in range(qx0 + 12, qx1, 26):
+        p.rect(x, top, 1, floor - top - 3, "#1d1009")
+    p.rect(qx0, floor - 3, qx1 - qx0, 3, "#9a6233")
+    p.rect(qx0, floor - 3, qx1 - qx0, 1, "#c08a55")
+    for x in qr["chests"]:                              # a sea chest under each pair of hammocks
+        p.rect(x, floor - 8, 10, 6, "#7a4a24")
+        p.rect(x, floor - 8, 10, 1, "#a06a32")
+        p.rect(x + 4, floor - 6, 2, 2, "#e0b552")
+    lx = qx1 - 10                                       # a lantern, forward
+    p.rect(lx, top, 1, 5, "#2a170b")
+    p.rect(lx - 2, top + 5, 5, 5, "#f2c35a")
+    p.rect(lx - 1, top + 6, 2, 2, "#fff0b0")
+    lights.append('<circle class="sm-glow" cx="%d" cy="%d" r="%d" fill="#ffd77a" opacity="0.22"/>' % (lx, top + 8, 16 if night else 10))
+    out = ['<g><title>%s</title>%s</g>' % (esc(tr("the quarters below deck: queued tasks held until a date sleep here, the earliest date aft")), p.svg())]
+    who = {q["id"]: q for q in sc["quarters"]}
+    for qid, (x, low) in qr["beds"].items():
+        q = who[qid]
+        h = Pix()
+        hammock_sprite(h, q, x, low, top + 1)
+        title = hand_title(q)
+        out.append('<g class="sm-hand pose-hammock" data-id="%s" data-stage="date" tabindex="0" role="button" aria-label="%s"><title>%s</title>%s</g>'
+                   % (esc(qid), esc(tr("%s: details") % title), esc(title), h.svg()))
+        cx = x + HAMMOCK_W // 2 - 1
+        tags.place(q["tag"], cx, low - 20, qid, hover=True)     # first, so a hover finds it
+        tags.place(q["date"], cx, low - 12, qid)
+    if qr["more"]:
+        out.append('<g><title>%s</title><text class="sm-ship__more" x="%d" y="%d">+%d</text></g>'
+                   % (esc(", ".join(q["id"] for q in qr["more"])), qr["more_x"], floor - 20, len(qr["more"])))
+    sign(tags, qr["label"], (qx0 + qx1) // 2, floor - 1)
+    return "".join(out)
 
 
 def paint_signs(sc, lay, tags):
@@ -4093,6 +4228,8 @@ def render_ship(sc):
     pump_x = hx1 - PUMP_FROM_END
     ship.append(draw_pump(pump_x, orlop, hy0, hy1, x0))
     ship += barrels
+    # the quarters go before the hands at the rail, so a fishing line hangs in front of them
+    ship.append(draw_quarters(sc, lay, tags, lights, night))
     ship.append('<text class="sm-ship__name" x="%d" y="%d">firstmate</text>' % (x0 + L - 60, WL - 12))
     for h in hands_at("rail"):
         x = spots[h["id"]][0]
@@ -4203,6 +4340,15 @@ def pose_icon(pose, scale=2, color=None):
             % (w, h, w * scale, h * scale, p.svg()))
 
 
+def hammock_icon(scale=2):
+    """A small inline picture of a hand asleep in a hammock, for the stage chip of the dated holds."""
+    p = Pix()
+    hammock_sprite(p, {"id": "key", "color": PROJECT_COLORS[0]}, 1, 16, 1)
+    w, h = HAMMOCK_W + 2, 19
+    return ('<svg class="sm-icon" viewBox="0 0 %d %d" width="%d" height="%d" shape-rendering="crispEdges" aria-hidden="true">%s</svg>'
+            % (w, h, w * scale, h * scale, p.svg()))
+
+
 def flag_icon(scale=2):
     p = Pix()
     red_flag(p, 7, 1)
@@ -4224,7 +4370,7 @@ STAGES = [
                                             "waits for a free build slot or lane"),
     ("board", "stand", "ready to board", "at the foot of the gangplank with a sea bag: queued, and nothing holds it"),
     ("task", "talk", "waiting for a task", "on the pier talking up to the hand it waits for, or standing apart when that task is not aboard"),
-    ("date", "doze", "held until a date", "asleep on the bench: queued and held until its date"),
+    ("date", "hammock", "held until a date", "asleep in a hammock in the quarters below deck: queued and held until its date"),
     ("flag", None, "waiting for you", "a red flag: needs your decision; hands and queued tasks wait in your cabin, longest wait "
                                       "first, the rest crowd the door, and the log below lists them all"),
 ]
@@ -4240,6 +4386,8 @@ def stage_members(sc, key):
         return [h for h in sc["hands"] if h["off"]]
     if key == "scouts":
         return sc["scouts"]
+    if key == "date":
+        return sc["quarters"]
     if key in PIER_STAGES:
         return [q for q in sc["pier"] if q["stage"] == key]
     return [h for h in sc["hands"] if h["place"] == key]
@@ -4257,7 +4405,7 @@ def stage_chips(sc):
                                (tr("Now: %s.") % ", ".join(x["id"] for x in who)) if who else tr("Nobody now."))
         out.append('<button type="button" class="sm-chip%s" data-stage="%s" data-desc="%s" aria-pressed="false"%s>%s<span>%s</span><b>%d</b></button>'
                    % (" sm-chip--red" if key == "flag" else "", key, esc(desc), "" if who else " disabled",
-                      flag_icon(1) if pose is None else pose_icon(pose, 1), esc(name), len(who)))
+                      flag_icon(1) if pose is None else hammock_icon(1) if pose == "hammock" else pose_icon(pose, 1), esc(name), len(who)))
     return "".join(out)
 
 
@@ -4365,6 +4513,7 @@ def demo_snapshot(now=None, moved=False):
         }[reason]
         return {"id": tid, "title": title, "repo": repo, "kind": kind, "created": (day - dt.timedelta(days=days)).isoformat(),
                 "reasons": [(reason, short, full)], "hold_reason": hold, "deps": list(deps),
+                "hold_until": (day + dt.timedelta(days=3)).isoformat() if reason == "date" else "",
                 "slot": slot if reason == "slot" else None}
 
     # every way to wait: for a build slot (cards today, the tavern since an earlier day), with nothing

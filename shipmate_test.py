@@ -1236,7 +1236,7 @@ class TestShip(unittest.TestCase):
         self.assertEqual(hat({"id": "a", "place": "hatch"}), "wool")
         self.assertEqual(hat({"id": "a", "place": "deck", "off": True, "flag": True}), "bare")
         self.assertEqual(hat({"id": "a", "place": "cabin", "kind": "queue", "flag": True}), "bare")
-        for pose in ("stand", "hammer", "signal", "doze", "cards-l"):
+        for pose in ("stand", "hammer", "signal", "drink", "cards-l"):
             base = pose.split("-")[0]
             ox, oy = shipmate.POSE_HEAD[base]
             work = shipmate.hand_rows({"id": "a", "place": "deck"}, pose)
@@ -1300,10 +1300,11 @@ class TestShip(unittest.TestCase):
         self.assertEqual(len(sc["colors"]), 3)
         self.assertEqual({q["act"] for q in sc["pier"]}, set(shipmate.PIER_ACTS))   # its decisions wait in the cabin
 
-    def queue_item(self, tid, reason, created="2030-01-01", deps=(), slot=None, until=""):
+    def queue_item(self, tid, reason, created="2030-01-01", deps=(), slot=None, until="", day=""):
         short = until or reason
         return {"id": tid, "title": "t " + tid, "repo": "demo-app", "created": created, "deps": list(deps), "slot": slot,
-                "reasons": [(reason, short, short)], "waiting_since": T0 - 60 if reason == "decision" else None}
+                "reasons": [(reason, short, short)], "waiting_since": T0 - 60 if reason == "decision" else None,
+                "hold_until": day}
 
     def test_what_a_queued_hand_does_on_the_pier(self):
         today = dt.date.fromtimestamp(T0).isoformat()
@@ -1312,25 +1313,28 @@ class TestShip(unittest.TestCase):
         self.assertEqual(act({"reason": "lane", "created": ""}, set(), today), ("cards", None))      # no date: not known to be old
         self.assertEqual(act({"reason": "slot", "created": "2000-01-01"}, set(), today), ("drink", None))
         self.assertEqual(act({"reason": "ready"}, set(), today), ("board", None))
-        self.assertEqual(act({"reason": "date"}, set(), today), ("doze", None))
+        self.assertEqual(act({"reason": "date"}, set(), today), ("hammock", None))
         self.assertEqual(act({"reason": "task", "deps": ["GONE", "LIVE"]}, {"LIVE"}, today), ("talk", "LIVE"))
         self.assertEqual(act({"reason": "task", "deps": ["GONE"]}, {"LIVE"}, today), ("wait", None))
         old = dt.date.fromtimestamp(T0 - 3 * 86400).isoformat()
         slot = {"group": "demo-app", "cap": 2, "taken": 2, "holders": ["LIVE", "OTHER"]}
         queue = [self.queue_item("CARD", "slot", today, slot=slot), self.queue_item("MUG", "slot", old, slot=slot),
                  self.queue_item("GO", "ready"), self.queue_item("TALK", "task", deps=["LIVE"]),
-                 self.queue_item("ALONE", "task", deps=["NOWHERE"]), self.queue_item("NAP", "date", until="held until Mon 2 Jan"),
+                 self.queue_item("ALONE", "task", deps=["NOWHERE"]),
+                 self.queue_item("NAP", "date", until="held until Mon 2 Jan", day="2040-01-02"),
                  self.queue_item("ASK", "decision")]
         sc = shipmate.ship_scene(self.snap([self.hand("LIVE", 1)], queue=queue))
         pier = {q["id"]: q for q in sc["pier"]}
         self.assertNotIn("ASK", pier)                                     # the captain's decision waits in the cabin, not on the pier
+        self.assertNotIn("NAP", pier)                                     # a dated hold sleeps below deck, not on the pier
+        self.assertEqual([(q["id"], q["place"], q["stage"], q["tag"]) for q in sc["quarters"]],
+                         [("NAP", "quarters", "date", "NAP · 02 Jan")])
         self.assertEqual([(x["id"], x["place"]) for x in sc["line"]], [("ASK", "cabin")])
         self.assertEqual({k: (q["act"], q["stage"]) for k, q in pier.items()},
                          {"CARD": ("cards", "slot"), "MUG": ("drink", "slot"), "GO": ("board", "board"), "TALK": ("talk", "task"),
-                          "ALONE": ("wait", "task"), "NAP": ("doze", "date")})
+                          "ALONE": ("wait", "task")})
         self.assertEqual(pier["TALK"]["partner"], "LIVE")
-        self.assertEqual((pier["TALK"]["tag"], pier["ALONE"]["tag"], pier["NAP"]["tag"]),
-                         ("TALK → LIVE", "ALONE waits for NOWHERE", "NAP · held until Mon 2 Jan"))
+        self.assertEqual((pier["TALK"]["tag"], pier["ALONE"]["tag"]), ("TALK → LIVE", "ALONE waits for NOWHERE"))
         self.assertEqual(pier["CARD"]["place"], "pier-cards")
         self.assertEqual(pier["CARD"]["color"], shipmate.PROJECT_COLORS[0])  # a queued hand wears its project's colour
         chips = shipmate.stage_chips(sc)
@@ -1430,29 +1434,98 @@ class TestShip(unittest.TestCase):
         self.assertEqual(svg.count('class="sm-deal"'), 1)
         self.assertIn('class="sm-tag is-hover" data-for="C00"', svg)      # the tavern's names show on hover only
         self.assertIn('<g class="sm-tag" data-for="T1"', svg)
-        self.assertIn('class="sm-hand pose-doze" data-id="N0" data-stage="date"', svg)
+        self.assertIn('class="sm-hand pose-hammock" data-id="N0" data-stage="date"', svg)
+        self.assertFalse(any(k[0] == "N" for k in spots))                 # the dated holds sleep below deck
         self.assertIn(">+%d</text>" % (16 - shipmate.TABLE_SEATS * shipmate.MAX_TABLES), svg)
         self.assertIn("SLOT demo-app · 2/2 taken · 19 waiting", svg)
         self.assertIn("READY · boards next", svg)
-        self.assertIn("ASLEEP · held until a date", svg)
+        self.assertIn("QUARTERS · asleep until a date", svg)
+
+    def test_the_dated_holds_sleep_in_hammocks_in_the_quarters_below_deck(self):
+        agents = [self.hand("H1", 1), self.hand("FISH", 3)]
+        dates = ["2040-01-05", "2040-01-02", "2040-01-09", "2040-01-02"]
+        queue = [self.queue_item("N%d" % i, "date", until="held until " + d, day=d) for i, d in enumerate(dates)]
+        sc = shipmate.ship_scene(self.snap(agents, queue=queue))
+        self.assertEqual([q["id"] for q in sc["quarters"]], ["N1", "N3", "N0", "N2"])      # the earliest date first, then by id
+        self.assertEqual(sc["pier"], [])
+        bare = shipmate.ship_layout(shipmate.ship_scene(self.snap(agents)))
+        self.assertIsNone(bare["quarters"])                               # nobody asleep: no quarters, the hold as it was
+        lay = shipmate.ship_layout(sc)
+        qx0, qx1 = lay["quarters"]["box"]
+        hx0, hx1 = lay["hold"]
+        self.assertEqual(hx0, bare["hold"][0])
+        self.assertLess(hx1, qx0)                                         # the quarters stand forward of the hold
+        self.assertGreaterEqual(hx1 - hx0, 14 * len(sc["barrels"]) + shipmate.HOLD_KEEPS)
+        self.assertLessEqual(qx1, lay["x0"] + lay["length"] - shipmate.QUARTERS_BOW)
+        self.assertEqual(lay["length"], bare["length"])                   # a few hammocks fit without a longer ship
+        beds = lay["quarters"]["beds"]
+        self.assertEqual(list(beds), ["N1", "N3", "N0", "N2"])
+        lows = sorted({low for _x, low in beds.values()})
+        self.assertEqual(len(lows), 2)                                    # two tiers
+        for low in lows:
+            xs = sorted(x for x, l in beds.values() if l == low)
+            self.assertTrue(all(b - a >= shipmate.HAMMOCK_W for a, b in zip(xs, xs[1:])), xs)
+        self.assertTrue(all(qx0 < x and x + shipmate.HAMMOCK_W <= qx1 for x, _l in beds.values()))
+        svg = shipmate.render_ship(sc)
+        self.assertEqual(svg.count('class="sm-hand pose-hammock"'), 4)
+        self.assertIn('<g class="sm-tag is-hover" data-for="N1"', svg)    # the id on hover, found first
+        self.assertIn('<text x="%d" y="' % (beds["N1"][0] + shipmate.HAMMOCK_W // 2 - 1), svg)
+        self.assertIn(">02 Jan</text>", svg)                              # the date stays on
+        self.assertIn("QUARTERS · asleep until a date", svg)
+        # the fishing line of a hand at the rail hangs in front of the quarters
+        self.assertLess(svg.index("pose-hammock"), svg.index('data-id="FISH"'))
+        self.assertRegex(shipmate.stage_chips(sc), r'data-stage="date"[^>]*><svg class="sm-icon" viewBox="0 0 %d 19"'
+                         r'.*?<b>4</b>' % (shipmate.HAMMOCK_W + 2))
+
+    def test_the_quarters_grow_the_forecastle_only_when_the_hold_cannot_spare_the_room(self):
+        agents = [self.hand("H1", 1)]
+        bare = shipmate.ship_layout(shipmate.ship_scene(self.snap(agents)))
+        queue = [self.queue_item("N%02d" % i, "date", day="2040-01-%02d" % (i + 1)) for i in range(20)]
+        sc = shipmate.ship_scene(self.snap(agents, queue=queue))
+        lay = shipmate.ship_layout(sc)
+        qr = lay["quarters"]
+        self.assertEqual(len(qr["beds"]), shipmate.MAX_HAMMOCKS)
+        self.assertEqual([q["id"] for q in qr["more"]], ["N%02d" % i for i in range(shipmate.MAX_HAMMOCKS, 20)])
+        self.assertGreater(lay["length"], bare["length"])
+        self.assertEqual(lay["fc_x"], bare["fc_x"])                       # the forecastle grows toward the bow
+        self.assertEqual(lay["hold"][1] - lay["hold"][0], max(150, 14 * len(sc["barrels"]) + shipmate.HOLD_KEEPS))
+        self.assertLessEqual(qr["box"][1], lay["x0"] + lay["length"] - shipmate.QUARTERS_BOW)
+        svg = shipmate.render_ship(sc)
+        self.assertIn(">+%d</text>" % (20 - shipmate.MAX_HAMMOCKS), svg)
+        shipmate.LANG = "pt-BR"
+        try:
+            sc = shipmate.ship_scene(self.snap(agents, queue=queue[:1]))
+            svg = shipmate.render_ship(sc)
+            self.assertIn("ALOJAMENTO · dormem até a data", svg)
+            self.assertIn(">01 jan</text>", svg)
+            self.assertIn("dormindo numa rede no alojamento abaixo do convés", svg)
+        finally:
+            shipmate.LANG = "en"
 
     def test_every_hand_is_painted_in_one_place(self):
-        calls = []
-        real = shipmate.hand_sprite
+        calls, sleepers = [], []
+        real, real_hammock = shipmate.hand_sprite, shipmate.hammock_sprite
 
         def spy(p, h, x, feet, pose, upto=None):
             calls.append(h["id"])
             return real(p, h, x, feet, pose, upto)
-        shipmate.hand_sprite = spy
+
+        def spy_hammock(p, h, x, low, top):
+            sleepers.append(h["id"])
+            return real_hammock(p, h, x, low, top)
+        shipmate.hand_sprite, shipmate.hammock_sprite = spy, spy_hammock
         try:
             snap = shipmate.demo_snapshot(T0)
             sc = shipmate.ship_scene(snap)
             shipmate.render_ship(sc)
         finally:
-            shipmate.hand_sprite = real
+            shipmate.hand_sprite, shipmate.hammock_sprite = real, real_hammock
         crowd = {x["id"] for x in shipmate.ship_layout(sc)["crowd"]}       # faces in the door, not hands
-        drawn = [x["id"] for x in sc["hands"] + sc["scouts"] + sc["queue"] if x["id"] not in crowd]
+        asleep = {x["id"] for x in sc["quarters"]}                         # in a hammock, painted by hammock_sprite
+        drawn = [x["id"] for x in sc["hands"] + sc["scouts"] + sc["queue"] if x["id"] not in crowd | asleep]
         self.assertEqual(sorted(set(calls)), sorted(drawn))
+        self.assertEqual(sorted(sleepers), sorted(asleep))
+        self.assertTrue(asleep)
 
     def test_motion_respects_reduced_motion(self):
         css = re.sub(r"/\*.*?\*/", "", shipmate.asset("shipmate.css"), flags=re.S)
