@@ -1350,6 +1350,8 @@ class TestShip(unittest.TestCase):
             self.assertEqual(lay["x0"], bare["x0"], n)                    # nothing is reserved west of the ship
             self.assertTrue(all(x > lay["plank"][1][0] for x, _f, _p, _u in lay["pier"].values()), n)
             self.assertEqual(len(lay["pier"]), min(n, shipmate.TABLE_SEATS * shipmate.MAX_TABLES), n)
+        for n, lay in lays.items():                                       # right next to the gangplank's foot, not far down the pier
+            self.assertLess(lay["pier"]["C00"][0] - lay["plank"][1][0], 40, n)
         # the same queue seats the same way: first in, first at the anchor
         firsts = {n: lay["pier"]["C00"][0] for n, lay in lays.items()}
         self.assertEqual(len(set(firsts.values())), 1, firsts)
@@ -1394,8 +1396,8 @@ class TestShip(unittest.TestCase):
             for (a0, a1, ka), (b0, b1, kb) in zip(row, row[1:]):
                 self.assertLessEqual(a1, b0 + 2, (ka, kb))              # a seat's edge may touch its table's neighbour
         # a talker stands under the hand it talks to, or as close as the others allow
-        self.assertLess(abs(spots["T3"][0] - lay["hands"]["H2"][0]), 4)
-        self.assertLess(abs(spots["T1"][0] - lay["hands"]["H1"][0]), 30)
+        self.assertLess(abs(spots["T3"][0] - lay["hands"]["H2"][0]), 160)     # the tavern, anchored first, may push it past itself
+        self.assertLess(abs(spots["T1"][0] - lay["hands"]["H1"][0]), 160)    # with a full tavern at the gangplank it moves past it
         for k, (x, feet, _p, _u) in spots.items():
             self.assertTrue(0 < x < lay["width"] and feet == shipmate.PIER_FEET - (3 if spots[k][2] == "stand" and k[0] == "C" else 0), k)
         self.assertGreater(min(v[0] for v in lay["scouts"].values()) if lay["scouts"] else lay["crates_x"],
