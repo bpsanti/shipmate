@@ -44,6 +44,9 @@ It listens on `127.0.0.1` only.
 Reloading the page, the page's own refresh and the ship view share one reading of the fleet for `--cache-seconds` seconds instead of reading it again each time.
 Sending an answer or a new task drops that reading, so what comes back right after is never stale.
 While a tab is hidden the page pauses every animation where it stands (it resumes from the same frame) and asks for fresh data ten times less often, then refreshes as soon as the tab is shown again.
+A refresh that brings the same drawing and no change to play leaves the scene as it is, so its loops go on from where they were instead of starting over.
+Switching the motion button to off in the middle of a change takes the scene straight to its final state: no figure is left on the deck and the next refresh draws as usual.
+The smooth scroll to a card in the captain's log follows the button too: it is instant when motion is off, and also when the browser asks for reduced motion.
 
 Transcripts are always read from `~/.claude` and from every directory the home lists in `config/claude-accounts`.
 

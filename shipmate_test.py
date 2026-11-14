@@ -1670,6 +1670,28 @@ class TestShip(unittest.TestCase):
         self.assertIn("data-motion", page)
         self.assertRegex(page, r'if \(mode === "off" \|\| document\.hidden')        # and then no change plays either
 
+    def test_stopping_the_motion_goes_straight_to_the_final_state(self):
+        page = shipmate.asset("shipmate.html")
+        stop = page.split("function stop() {")[1].split("\n    }")[0]
+        self.assertIn("undo.splice(0)", stop)
+        self.assertIn("release()", stop)                                        # the queue of changes is let go
+        self.assertIn('undo.push(function () { layer.remove(); });', page)     # no walker is left standing
+        self.assertIn("Promise.race([Promise.all(runs)", page)                 # a handover waiting on its partner cannot hold the ship
+        # the scroll to the log follows the switch and the browser's own request
+        self.assertNotIn('behavior: "smooth" }', page)
+        self.assertIn('motion.smooth() ? "smooth" : "auto"', page)
+        smooth = page.split("function smooth() {")[1].split("\n    }")[0]
+        self.assertIn("prefers-reduced-motion", smooth)
+        self.assertIn('mode !== "off"', smooth)
+
+    def test_a_refresh_with_nothing_new_keeps_the_drawing_and_its_loops(self):
+        page = shipmate.asset("shipmate.html")
+        self.assertIn("b.ship === shipDrawn", page)
+        self.assertIn("if (!same) document.getElementById(\"b-ship\").innerHTML = b.ship;", page)
+        self.assertIn("if (!same) motion.play(b.events, before);", page)
+        sc = shipmate.ship_scene(shipmate.demo_snapshot(1_700_000_000))
+        self.assertEqual(shipmate.render_ship(sc), shipmate.render_ship(sc))   # the same scene draws the same markup
+
     def test_demo_server_serves_the_page_ship_and_details(self):
         panel = shipmate.DemoPanel(0)
         srv = shipmate.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a: None)

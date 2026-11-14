@@ -290,7 +290,15 @@
 
     // stopping puts every hidden hand back and drops the walkers; a new drawing does it too
     var STOP = {};
-    function stop() { run++; undo.splice(0).forEach(function (f) { f(); }); }
+    // (the scene goes straight to its final state: whoever walked is back in its place, and the
+    // changes on screen count as finished, so the next drawing does not wait for them)
+    var release = null;
+    function stop() {
+      run++;
+      undo.splice(0).forEach(function (f) { f(); });
+      if (release) release();
+      release = null;
+    }
     function el(tag, attrs, parent) {
       var e = document.createElementNS(NS, tag);
       for (var k in attrs) e.setAttribute(k, attrs[k]);
@@ -501,6 +509,7 @@
       var q = sprite(f["ashore-stand"], start[0], start[1], ctx.layer);
       var arrived, greeted, there = new Promise(function (ok) { arrived = ok; }), nodded = new Promise(function (ok) { greeted = ok; });
       var leaving = playLeave(ev.leave, ctx, function (g) { arrived(g); return nodded; });
+      leaving.catch(function () {});                                      // a stop ends both walks; this one is awaited last
       await sleep(600);
       await go(q, [[wait[0], wait[1], "ashore"]], f, 60);
       q.innerHTML = f["ashore-stand-l"] || f["ashore-stand"];
@@ -625,6 +634,7 @@
       var geo;
       try { geo = JSON.parse(svg.getAttribute("data-geo")); } catch (e) { return; }
       var layer = el("g", { "class": "sm-walkers" }, svg.querySelector(".sm-mid"));
+      undo.push(function () { layer.remove(); });
       var ctx = { svg: svg, geo: geo, layer: layer, before: before || { at: {} }, hidden: {} }, runs = [];
       // whoever walks is out of its new place at once, and a new bucket waits for its fish
       events.forEach(function (ev) {
@@ -643,12 +653,18 @@
         var wait = ev.kind === "pump" || ev.kind === "lights" ? 0 : 250 * i;
         runs.push(sleep(wait).then(function () { return p(ev, ctx); }).catch(function (e) { if (e !== STOP && window.console) console.error(e); }));
       });
-      busy = Promise.all(runs);
+      busy = Promise.race([Promise.all(runs), new Promise(function (ok) { release = ok; })]);
     }
     // the next drawing waits for the changes on screen to finish playing, so none is cut short
     var busy = Promise.resolve();
     function idle() { return busy; }
-    return { capture: capture, play: play, idle: idle, mode: function () { return mode; } };
+    // a smooth scroll is movement too: it follows the switch and the browser's own request
+    function smooth() {
+      var reduced = false;
+      try { reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) {}
+      return mode !== "off" && !reduced;
+    }
+    return { capture: capture, play: play, idle: idle, mode: function () { return mode; }, smooth: smooth };
   })();
   window.shipMotion = motion;
 
@@ -746,7 +762,7 @@
   // the next drawing comes with what changed since the one on screen (its print), played by motion.
   // Only the latest request is drawn: two in flight carry the same print, and the later one would
   // replay the change over a drawing that already shows it.
-  var shipAsked = 0;
+  var shipAsked = 0, shipDrawn = null;
   function loadShip() {
     var mine = ++shipAsked;
     var old = document.querySelector("#b-ship svg"), print = old && old.getAttribute("data-print");
@@ -757,16 +773,20 @@
       return motion.idle().then(function () { return b; });
     }).then(function (b) {
       if (mine !== shipAsked) return;
-      var before = motion.capture(document.querySelector("#b-ship svg"));
-      document.getElementById("b-ship").innerHTML = b.ship;
+      // the same drawing with nothing to play stays as it is: swapping it would restart every loop
+      // of the scene (the clouds go back to their start) for no change at all
+      var same = b.ship === shipDrawn && !(b.events && b.events.length) && document.querySelector("#b-ship svg");
+      var before = same ? null : motion.capture(document.querySelector("#b-ship svg"));
+      if (!same) document.getElementById("b-ship").innerHTML = b.ship;
+      shipDrawn = b.ship;
       document.getElementById("b-shipcounts").textContent = b.counts;
       document.getElementById("b-shipprojects").innerHTML = b.projects;
       document.getElementById("b-shipaccounts").innerHTML = b.accounts;
       document.getElementById("b-shipstages").innerHTML = b.stages;
       document.getElementById("b-shiplog").innerHTML = b.log;
-      ship.bind();
+      if (!same) ship.bind();
       stages.light(stages.lit(), false);
-      motion.play(b.events, before);
+      if (!same) motion.play(b.events, before);
     }).catch(function () {});
   }
   function setView(v, fresh) {
@@ -925,7 +945,7 @@
       return document.querySelector('.sm-logcard[data-id="' + CSS.escape(id) + '"]');
     }).filter(Boolean);
     if (!cards.length) return;
-    cards[0].scrollIntoView({ block: "nearest", inline: "start", behavior: "smooth" });
+    cards[0].scrollIntoView({ block: "nearest", inline: "start", behavior: motion.smooth() ? "smooth" : "auto" });
     cards[0].focus({ preventScroll: true });
     cards.forEach(function (c) { c.classList.add("is-called"); });
     setTimeout(function () { cards.forEach(function (c) { c.classList.remove("is-called"); }); }, 2400);
