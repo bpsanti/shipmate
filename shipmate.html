@@ -918,6 +918,22 @@
       b.textContent = {{j:Not sent: %s}}.replace("%s", res.error || "?");
     }).catch(function () { b.disabled = false; });
   });
+  // "claude doctor" beside an account whose quota reading is stale or unknown: the server runs it for
+  // that account of the home's list, and the next refresh shows the result and the account read again
+  document.getElementById("sm-side").addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-doctor]");
+    if (!b || b.disabled) return;
+    var data = new FormData();
+    data.append("token", add.querySelector("input[name=token]").value);
+    data.append("account", b.getAttribute("data-doctor"));
+    b.disabled = true;
+    b.textContent = {{j:Running claude doctor…}};
+    post("/doctor", data).then(function (res) {
+      if (res.ok) { tick(); return; }
+      b.disabled = false;
+      b.textContent = {{j:claude doctor failed: %s}}.replace("%s", res.error || "?");
+    }).catch(function () { b.disabled = false; b.textContent = {{j:claude doctor}}; });
+  });
   // a ready option is a radio button that a second click lets go of
   detail.addEventListener("pointerdown", function (e) {
     var l = e.target.closest && e.target.closest(".sm-opt");

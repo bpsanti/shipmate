@@ -158,6 +158,8 @@ body.sm-locked { overflow: hidden; }
 .sm-acct__name { font-weight: 800; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sm-acct__pct { margin-left: auto; font-family: var(--font-mono); font-weight: 700; white-space: nowrap; }
 .sm-acct__sub { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-xs); color: var(--text-muted); }
+.sm-acct__doctor { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: var(--fs-xs); }
+.sm-acct__doctor .fm-btn { white-space: normal; text-align: left; }
 .sm-acct__win { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); }
 
 /* ---- strip (narrow screens) ---- */

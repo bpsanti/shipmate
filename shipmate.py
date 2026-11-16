@@ -52,6 +52,7 @@ import os
 import random
 import re
 import secrets
+import signal
 import struct
 import subprocess
 import sys
@@ -65,6 +66,7 @@ DEFAULT_PORT = 8737
 REFRESH_SECONDS = 30
 DEFAULT_CACHE_SECONDS = 5      # how long one reading of the fleet answers every request
 QUOTA_TTL = 60
+DOCTOR_TIMEOUT = 90                      # seconds `claude doctor` may take before it is stopped
 CREW_TTL = 20
 SPAWN_SLACK = 120          # seconds: a session's first line lands a little after the task record is written
 DAYS = 7
@@ -84,7 +86,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 class Config:
     def __init__(self, home, fm_root=None, claude_dirs=(), port=DEFAULT_PORT, quota_cmd="quota-axi",
                  context_limit=None, context_warn=DEFAULT_CONTEXT_WARN, gh_cmd="gh",
-                 cache_seconds=DEFAULT_CACHE_SECONDS):
+                 cache_seconds=DEFAULT_CACHE_SECONDS, claude_cmd="claude"):
         self.home = os.path.abspath(home)
         self.fm_root = os.path.abspath(fm_root or self.home)
         self.port = port
@@ -92,6 +94,7 @@ class Config:
         self.context_limit = context_limit      # tokens, or None to infer
         self.context_warn = context_warn        # percent
         self.gh_cmd = gh_cmd                    # only the detail view's PR checks use it
+        self.claude_cmd = claude_cmd            # only the accounts' "claude doctor" button runs it
         self.cache_seconds = cache_seconds      # seconds one snapshot is reused; 0 reads the fleet on every request
         self.accounts = read_accounts(os.path.join(self.home, "config"))
         dirs = [os.path.expanduser("~/.claude")] + [d for _, d in self.accounts]
@@ -929,6 +932,11 @@ class QuotaCache:
             self.at = time.time()
             return self.value
 
+    def forget(self):
+        """The next read asks quota-axi again, e.g. right after an account's token was renewed."""
+        with self.lock:
+            self.value = None
+
 
 def quota_lane(p):
     loc = (p.get("accountLocator") or {}).get("path")
@@ -937,12 +945,15 @@ def quota_lane(p):
     windows = {w.get("id"): w for w in p.get("windows", [])}
     lim = windows.get((eff.get("limitingWindowIds") or [None])[0]) or {}
     runway = eff.get("runway") or {}
-    status = (p.get("state") or {}).get("status")
+    state = p.get("state") or {}
+    status = state.get("status")
     return {
         # the account's own config directory names it; quota-axi's identity fields are not shown
         "label": account_label(loc) if loc else "account",
         "plan": p.get("plan"),
         "status": status,
+        "reason": state.get("reason"),          # credentials_expired: the short-lived token ran out
+        "auth": state.get("authStatus"),        # expired_refreshable: claude doctor can renew it
         "remaining": eff.get("effectivePercentRemaining"),
         "limit_label": lim.get("label"),
         "resets": parse_ts(lim.get("resetsAt")),
@@ -951,6 +962,63 @@ def quota_lane(p):
         "windows": [{"label": w.get("label"), "remaining": w.get("percentRemaining"), "resets": parse_ts(w.get("resetsAt"))}
                     for w in p.get("windows", []) if w.get("percentRemaining") is not None],
     }
+
+
+# ---------------------------------------------------------------- claude doctor
+
+
+def doctor_accounts(cfg):
+    """The accounts `claude doctor` may run for, by the label the page shows: only the home's own
+    config/claude-accounts, never a path from a request. A label two directories share names neither."""
+    seen = {}
+    for name, path in cfg.accounts:
+        seen.setdefault(account_label(path), []).append((name, path))
+    return {label: rows[0] for label, rows in seen.items() if len(rows) == 1}
+
+
+def needs_doctor(ln):
+    """A reading that a renewed token may bring back: stale, unknown, or expired by quota-axi's word."""
+    return (ln.get("status") in ("stale", "unavailable", "error") or ln.get("remaining") is None
+            or ln.get("reason") == "credentials_expired" or ln.get("auth") == "expired_refreshable")
+
+
+def doctor_command(cfg, name, path):
+    """`claude doctor` for one account, as an argument list (never a shell line), with its environment.
+    The ordinary account is Claude Code's default, which a CLAUDE_CONFIG_DIR would turn into another one."""
+    env = dict(os.environ)
+    if name == "ordinary":
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = path
+    return [cfg.claude_cmd, "doctor"], env
+
+
+def run_doctor(cfg, label, timeout=DOCTOR_TIMEOUT):
+    """Runs `claude doctor` for one listed account, with no terminal and a time limit. Its output is
+    thrown away unread: it can name the account, and nothing of it is shown or kept."""
+    target = doctor_accounts(cfg).get(label)
+    if target is None:
+        return {"ok": False, "error": tr("no account of this home is called %s") % label[:80]}
+    argv, env = doctor_command(cfg, *target)
+    # it reads the settings of the directory it runs in: the account's own, never the server's
+    cwd = next((d for d in (target[1], os.path.expanduser("~")) if os.path.isdir(d)), os.sep)
+    try:
+        proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        return {"ok": False, "error": tr("could not start %s: %s") % (argv[0], exc.strerror or exc)}
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)             # it and whatever it started
+        except OSError:
+            proc.kill()
+        proc.wait()
+        return {"ok": False, "error": tr("claude doctor did not finish in %d s and was stopped") % timeout}
+    if rc != 0:
+        return {"ok": False, "error": tr("claude doctor exited with status %d") % rc}
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- usage
@@ -1484,6 +1552,8 @@ class Panel:
         self.built_at = 0.0                      # monotonic time of the reading in self.last
         self.built_gen = -1                      # the generation that reading started under
         self.gen = 0                             # bumped by drop(); a reading from an older one is never reused
+        self.doctoring = threading.Lock()        # one `claude doctor` at a time
+        self.doctored = {}                       # account label -> the last doctor run's result, shown beside it
 
     def drop(self):
         """Forgets the cached reading: the next request reads the fleet again, even when a reading
@@ -1528,8 +1598,23 @@ class Panel:
                 phase_by_checks(a, self.checks.watch(self.cfg, a["pr"]) if with_pr else None)
             snap["answers"], snap["answers_error"] = self.inbox.get(self.cfg)
             snap["quota"] = quota.result()
+            snap["doctor"] = {"accounts": sorted(doctor_accounts(self.cfg)), "results": dict(self.doctored)}
             self.last = snap
             return snap
+
+    def doctor(self, label):
+        """`claude doctor` for one account of the home, then a fresh quota reading for the page."""
+        if not self.doctoring.acquire(blocking=False):
+            return {"ok": False, "error": tr("claude doctor is already running for an account; try again when it ends")}
+        try:
+            res = run_doctor(self.cfg, label)
+        finally:
+            self.doctoring.release()
+        if label in doctor_accounts(self.cfg):
+            self.doctored[label] = dict(res, at=time.time())
+            self.quota.forget()
+            self.drop()
+        return res
 
     def recent(self):
         snap = self.last
@@ -1877,6 +1962,21 @@ PT_BR.update({
 })
 # the captain's answers
 PT_BR.update({
+    "no account of this home is called %s": "nenhuma conta deste home se chama %s",
+    "could not start %s: %s": "não deu para iniciar %s: %s",
+    "claude doctor did not finish in %d s and was stopped": "o claude doctor não terminou em %d s e foi interrompido",
+    "claude doctor exited with status %d": "o claude doctor saiu com status %d",
+    "claude doctor is already running for an account; try again when it ends":
+        "o claude doctor já está rodando para uma conta; tente de novo quando terminar",
+    "Run claude doctor for this account so Claude Code renews its token, then read its quota again":
+        "Rodar o claude doctor para esta conta, para o Claude Code renovar o token, e ler a cota de novo",
+    "claude doctor": "claude doctor",
+    "this reading is stale or unknown; its token may have expired": "esta leitura está velha ou desconhecida; o token pode ter expirado",
+    "claude doctor ran %s": "claude doctor rodou %s",
+    "claude doctor failed %s: %s": "claude doctor falhou %s: %s",
+    "this is the demo: claude doctor was not run": "isto é a demo: o claude doctor não foi rodado",
+    "Running claude doctor…": "Rodando o claude doctor…",
+    "claude doctor failed: %s": "claude doctor falhou: %s",
     "this item is no longer on the board": "este item não está mais no quadro",
     "this decision is no longer open; reopen the drawer": "esta decisão não está mais aberta; reabra a gaveta",
     "that option is not on this decision": "essa opção não é desta decisão",
@@ -2028,7 +2128,37 @@ def lanes_by_urgency(q):
 # ---------------------------------------------------------------- blocks
 
 
-def block_accounts(q, now):
+DOCTOR_SHOWN = 15 * 60                   # seconds a doctor run's result stays beside its account
+
+
+def doctor_line(label, doctor, ln, now):
+    """The "claude doctor" button under an account whose reading is stale or unknown, and the last
+    run's result for a while after it; nothing for an account the home does not list."""
+    if label not in doctor.get("accounts", ()):
+        return ""
+    res = doctor.get("results", {}).get(label)
+    if res and now - res["at"] > DOCTOR_SHOWN:
+        res = None
+    if not res and not needs_doctor(ln):
+        return ""
+    out = ['<div class="sm-acct__doctor">']
+    if needs_doctor(ln):
+        out.append('<span class="sm-warn">%s</span>' % esc(tr("this reading is stale or unknown; its token may have expired")))
+    if not res or not res["ok"] or needs_doctor(ln):
+        out.append('<button class="fm-btn fm-btn--sm" type="button" data-doctor="%s" title="%s">%s</button>'
+                   % (esc(label), esc(tr("Run claude doctor for this account so Claude Code renews its token, then read its quota again")),
+                      esc(tr("claude doctor"))))
+    if res:
+        out.append('<span class="sm-%s">%s</span>' % (
+            "ok" if res["ok"] else "danger",
+            esc(tr("claude doctor ran %s") % fmt_when(res["at"], now) if res["ok"]
+                else tr("claude doctor failed %s: %s") % (fmt_when(res["at"], now), res["error"]))))
+    out.append("</div>")
+    return "".join(out)
+
+
+def block_accounts(q, now, doctor=None):
+    doctor = doctor or {}
     if q.get("error"):
         return '<div class="sm-empty">%s</div>' % esc(tr("Quota unavailable: %s") % q["error"])
     if not q["lanes"]:
@@ -2044,11 +2174,12 @@ def block_accounts(q, now):
             '<div class="sm-acct" title="%s">'
             '<div class="sm-acct__top"><span class="sm-acct__name">%s</span>%s<span class="sm-acct__pct sm-%s">%s</span></div>'
             '<div class="sm-bar"><div class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></div></div>'
-            '<div class="sm-acct__sub"><span>%s</span><span class="sm-%s">%s</span></div></div>'
+            '<div class="sm-acct__sub"><span>%s</span><span class="sm-%s">%s</span></div>%s</div>'
             % (esc(wins), esc(ln["label"]), badge(ln["plan"]) if ln["plan"] else "",
                tone, (tr("%d%% left") % rem) if rem is not None else tr("unknown"),
                tone, max(0, min(100, rem or 0)),
-               esc(tr("%s resets %s") % (ln["limit_label"] or tr("limit"), fmt_when(ln["resets"], now))), ptone, esc(proj)))
+               esc(tr("%s resets %s") % (ln["limit_label"] or tr("limit"), fmt_when(ln["resets"], now))), ptone, esc(proj),
+               doctor_line(ln["label"], doctor, ln, now)))
     return "".join(rows)
 
 
@@ -2465,7 +2596,7 @@ def render_blocks(s):
         "board": block_board(s["agents"], s["queue"], s["backlog_error"], s["now"], answer_marks(s)),
         "today": block_today(s["daily"]),
         "firstmate": block_firstmate(s.get("firstmate"), s["now"]),
-        "accounts": block_accounts(s["quota"], s["now"]),
+        "accounts": block_accounts(s["quota"], s["now"], s.get("doctor")),
         "strip": block_strip(s),
         "sumline": block_sumline(s),
         "usage": block_usage(s["daily"], s["delivered"]),
@@ -5323,7 +5454,7 @@ def demo_snapshot(now=None, moved=False):
     ] + ([queued("DEMO-Q-CSV", "CSV import", "harbor-api", "slot")] if moved else [])     # it walks into the tavern
 
     def lane(label, rem, reset_h, runway, exhaust_h=None):
-        return {"label": label, "plan": "max", "status": "ok", "remaining": rem, "limit_label": "weekly",
+        return {"label": label, "plan": "max", "status": "fresh", "remaining": rem, "limit_label": "weekly",
                 "resets": now + reset_h * h, "runway": runway, "exhausts": (now + exhaust_h * h) if exhaust_h else None,
                 "windows": [{"label": "weekly", "remaining": rem, "resets": now + reset_h * h}]}
 
@@ -5367,7 +5498,10 @@ def demo_snapshot(now=None, moved=False):
         "daily": daily, "delivered": delivered_rows, "closed": closed,
         "quota": {"lanes": [lane("account-a", 8, 30, "projected_exhaustion", 5),
                             lane("account-b", 41, 50, "through_reset"),
-                            lane("ordinary", 86, 90, "through_reset")], "at": None, "error": None},
+                            # its token ran out, so the reading is the last one taken: the doctor button shows
+                            dict(lane("ordinary", 86, 90, "through_reset"), status="stale", reason="credentials_expired",
+                                 auth="expired_refreshable")], "at": None, "error": None},
+        "doctor": {"accounts": ["account-a", "account-b", "ordinary"], "results": {}},
         "machine": {"load": 6.0, "cpus": 8},
         # the captain has answered two of the decisions: firstmate replied to one and has read the other
         "answers": {
@@ -5434,6 +5568,9 @@ class DemoPanel:
 
     def add_task(self, title, project, text, request_id):
         return {"ok": False, "error": tr("this is the demo: nothing was queued")}
+
+    def doctor(self, label):
+        return {"ok": False, "error": tr("this is the demo: claude doctor was not run")}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -5520,7 +5657,7 @@ def make_handler(panel):
             if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
                 return self.send(403, "forbidden")
             path = urllib.parse.urlsplit(self.path).path
-            if path not in ("/task", "/answer", "/announce"):
+            if path not in ("/task", "/answer", "/announce", "/doctor"):
                 return self.send(404, "not found")
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -5539,6 +5676,9 @@ def make_handler(panel):
                     res = panel.answer(get("task"), get("ref"), get("option").strip(),
                                        get("text").replace("\r\n", "\n").strip(), get("request"))
                 return self.send(200, json.dumps(res), "application/json")
+            if path == "/doctor":
+                # the account is a label looked up in the home's own list; the request never names a path
+                return self.send(200, json.dumps(panel.doctor(get("account"))), "application/json")
             if path == "/announce":
                 note = get("note")
                 res = (panel.announce(note) if re.match(r"^[A-Za-z0-9._-]{1,128}$", note) and ".." not in note
@@ -5590,7 +5730,8 @@ def main(argv=None):
         return 2
     extra = a.claude_dir + [d for d in (os.environ.get("SHIPMATE_CLAUDE_DIRS") or "").split(os.pathsep) if d]
     cfg = Config(a.home, a.fm_root, extra, a.port, os.environ.get("SHIPMATE_QUOTA_CMD") or "quota-axi",
-                 a.context_limit, a.context_warn, os.environ.get("SHIPMATE_GH_CMD") or "gh", max(0.0, a.cache_seconds))
+                 a.context_limit, a.context_warn, os.environ.get("SHIPMATE_GH_CMD") or "gh", max(0.0, a.cache_seconds),
+                 os.environ.get("SHIPMATE_CLAUDE_CMD") or "claude")
     if not os.path.exists(cfg.bin("fm-tasks-axi.sh")):
         print("shipmate: %s has no bin/fm-tasks-axi.sh; name the code root with --fm-root or FM_ROOT" % cfg.fm_root,
               file=sys.stderr)

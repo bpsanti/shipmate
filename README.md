@@ -69,7 +69,7 @@ A fixed sidebar on the right stays on screen with both.
 
 - **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, waiting for merge / delivered.
   A phase with nothing in it shrinks to a thin labelled strip so the busy lanes get the width; a lane taller than the screen scrolls inside itself and says how many cards are below; when lanes are out of view the board says so.
-- **The sidebar** keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
+- **The sidebar** keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls; an account whose reading is stale or unknown gets a "claude doctor" button (see [Renewing an account's token](#renewing-an-accounts-token)).
 - **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
 
 Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
@@ -111,6 +111,7 @@ It zooms and pans; the buttons in its corner zoom in and out, put the signs away
 | `--lang en\|pt-BR` | `SHIPMATE_LANG` | `en` | the page's language: English, or Brazilian Portuguese with `pt-BR` |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
 | | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only to read a PR's checks, for the phases and the detail drawer |
+| | `SHIPMATE_CLAUDE_CMD` | `claude` | Claude Code CLI, run only by an account's "claude doctor" button (see [Renewing an account's token](#renewing-an-accounts-token)) |
 
 Reloading the page, the page's own refresh and the ship view share one reading of the fleet for `--cache-seconds` seconds instead of reading it again each time.
 Sending an answer or a new task drops that reading, so what comes back right after is never stale.
@@ -126,7 +127,7 @@ Text read from the home's records (task titles, status lines, hold reasons, note
 
 `GET /state.json` returns the same snapshot the page is built from.
 `GET /ship` returns the ship view drawn from that snapshot; with `?prev=<print>` (the `data-print` of the drawing on screen) it also lists what changed since, for the page to animate (see [Motion](#motion)).
-`GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
+`GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, `POST /doctor` runs `claude doctor` for one of the home's accounts, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
 
 ## Where each number comes from
 
@@ -414,6 +415,32 @@ bin/fm-inbox.sh note --request-id shipmate-<form id> --json -- "New task queued 
 The project list comes from `data/projects.md`.
 Only `POST` from `127.0.0.1` with this server's `Host`, a matching `Origin` when the browser sends one, no cross-site `Sec-Fetch-Site`, and the per-run token embedded in the page is accepted.
 A resubmitted form (same hidden request id) never queues twice.
+
+## Renewing an account's token
+
+Claude Code signs in with a short-lived access token that it renews by itself while it runs.
+An account nobody has used for a while can be left with an expired token, and quota-axi then reports its quota as stale or unknown (`credentials_expired`, with `claude doctor` as the remedy), because shipmate reads the quota with `--no-credential-refresh` and never renews a credential while reading.
+
+When an account's reading is stale or unknown, the sidebar says so under the account and shows a "claude doctor" button.
+One click runs, on the server:
+
+```bash
+CLAUDE_CONFIG_DIR=<the account's directory> claude doctor
+```
+
+`claude doctor` has Claude Code check that account, which renews its token when the session can still be renewed, and exits; it cannot bring back an account that was signed out.
+For the `ordinary` account (`~/.claude`, Claude Code's default) it runs with no `CLAUDE_CONFIG_DIR` at all, since setting one would make it another account.
+Right after, shipmate forgets its quota reading and reads every account again, and the button's place shows whether the run worked, for 15 minutes.
+
+The rules it keeps:
+
+- The request names an account only by the label the page shows; the directory is looked up in the home's `config/claude-accounts`, and a label that is not there, or that two directories share, runs nothing.
+- The command is a fixed argument list run without a shell, from the account's directory, with no input and a 90-second limit, after which it is stopped with everything it started.
+- Its output is discarded unread: it can name the signed-in account, so nothing of it is shown, logged or kept, only whether it exited cleanly.
+- It is a `POST` with the same guards as the other forms: from `127.0.0.1` with this server's `Host`, a matching `Origin`, no cross-site `Sec-Fetch-Site`, and the page's per-run token.
+- One run at a time; a second click while one runs is refused.
+
+The demo shows the button on its `ordinary` account and runs nothing.
 
 ## Tests
 

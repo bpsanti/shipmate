@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -627,6 +628,101 @@ class TestServer(Base):
         self.assertNotIn("<script src", page)
         r, blocks = self.req("GET", "/blocks")
         self.assertEqual(set(json.loads(blocks)), {"board", "today", "firstmate", "accounts", "strip", "sumline", "usage", "counts", "time"})
+
+    def fake_claude(self, body="exit 0"):
+        self.cfg.claude_cmd = write(os.path.join(self.fake, "claude"),
+                                    '#!/bin/sh\nprintf "%%s|%%s|%%s\\n" "$*" "${CLAUDE_CONFIG_DIR-unset}" "$PWD" >> "$FAKE_DIR/claude.log"\n%s\n'
+                                    % body, 0o755)
+
+    def test_doctor_runs_only_for_an_account_the_home_lists(self):
+        self.fake_claude()
+        os.makedirs(self.acct, exist_ok=True)
+        origin = {"Origin": "http://127.0.0.1:%d" % self.cfg.port, "Sec-Fetch-Site": "same-origin"}
+        for account in ("nobody", self.acct, "/etc", "../.claude-two", ".claude-two; touch pwned", ""):
+            r, body = self.req("POST", "/doctor", {"token": self.panel.token, "account": account}, origin)
+            self.assertEqual(r.status, 200)
+            self.assertFalse(json.loads(body)["ok"], account)
+            self.assertIn("no account of this home is called", json.loads(body)["error"])
+        self.assertEqual(self.log("claude.log"), [])                        # an unknown account runs nothing
+        r, _ = self.req("POST", "/doctor", {"token": self.panel.token, "account": ".claude-two"}, {"Origin": "https://evil.example"})
+        self.assertEqual(r.status, 403)
+        r, _ = self.req("POST", "/doctor", {"token": "wrong", "account": ".claude-two"}, origin)
+        self.assertEqual(r.status, 403)
+        r, _ = self.req("GET", "/doctor?account=.claude-two")
+        self.assertEqual(r.status, 404)
+        self.assertEqual(self.log("claude.log"), [])
+        self.panel.quota.get(self.cfg)
+        r, body = self.req("POST", "/doctor", {"token": self.panel.token, "account": ".claude-two"}, origin)
+        self.assertEqual(json.loads(body), {"ok": True})
+        self.assertEqual(self.log("claude.log"), ["doctor|%s|%s" % (self.acct, os.path.realpath(self.acct))])
+        self.assertIsNone(self.panel.quota.value)                           # the quota is read again
+        self.assertTrue(self.panel.snapshot()["doctor"]["results"][".claude-two"]["ok"])
+        self.fake_claude("echo 'token sk-ant-secret' >&2; exit 3")
+        r, body = self.req("POST", "/doctor", {"token": self.panel.token, "account": ".claude-two"}, origin)
+        self.assertEqual(json.loads(body), {"ok": False, "error": "claude doctor exited with status 3"})
+        self.assertNotIn("sk-ant", body)                                      # its output is never passed on
+        self.assertNotIn("sk-ant", json.dumps(self.panel.snapshot()["doctor"]))
+
+    def test_doctor_is_an_argument_list_without_a_shell(self):
+        write(os.path.join(self.home, "config", "claude-accounts"), "ordinary\n%s\n/x/a/.dup\n/x/b/.dup\n" % self.acct)
+        cfg = shipmate.Config(self.home, self.root, port=0, claude_cmd="/opt/claude")
+        self.assertEqual(set(shipmate.doctor_accounts(cfg)), {"ordinary", ".claude-two"})   # a shared label names neither
+        os.environ["CLAUDE_CONFIG_DIR"] = "/somewhere/else"
+        argv, env = shipmate.doctor_command(cfg, "ordinary", os.path.expanduser("~/.claude"))
+        self.assertEqual(argv, ["/opt/claude", "doctor"])
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)                         # the default account takes no config dir
+        argv, env = shipmate.doctor_command(cfg, self.acct, self.acct)
+        self.assertEqual((argv, env["CLAUDE_CONFIG_DIR"]), (["/opt/claude", "doctor"], self.acct))
+        seen = []
+
+        class Proc:
+            pid = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def popen(args, **kw):
+            seen.append((args, kw))
+            return Proc()
+        real = shipmate.subprocess.Popen
+        shipmate.subprocess.Popen = popen
+        try:
+            self.assertEqual(shipmate.run_doctor(cfg, ".claude-two"), {"ok": True})
+        finally:
+            shipmate.subprocess.Popen = real
+        (args, kw), = seen
+        self.assertEqual(args, ["/opt/claude", "doctor"])
+        self.assertFalse(kw.get("shell", False))
+        self.assertEqual((kw["stdin"], kw["stdout"], kw["stderr"]), (subprocess.DEVNULL,) * 3)   # no terminal, nothing kept
+        self.assertEqual(kw["env"]["CLAUDE_CONFIG_DIR"], self.acct)
+        self.assertEqual(shipmate.run_doctor(shipmate.Config(self.home, self.root, claude_cmd="/no/such/claude"), ".claude-two")["ok"],
+                         False)                                              # a missing command is an error, not a crash
+
+    def test_doctor_that_hangs_is_stopped(self):
+        self.fake_claude("sleep 30 & wait")
+        t = time.monotonic()
+        res = shipmate.run_doctor(self.cfg, ".claude-two", timeout=1)
+        self.assertLess(time.monotonic() - t, 10)
+        self.assertEqual(res, {"ok": False, "error": "claude doctor did not finish in 1 s and was stopped"})
+        self.assertFalse(self.panel.doctoring.locked())
+
+    def test_doctor_button_shows_beside_a_stale_or_unknown_listed_account(self):
+        now = T0
+        doctor = {"accounts": [".claude-two"], "results": {}}
+
+        def lane(label, **kw):
+            return dict({"label": label, "plan": None, "status": "fresh", "remaining": 50, "limit_label": "week", "resets": None,
+                         "runway": None, "exhausts": None, "windows": []}, **kw)
+        html_ = shipmate.block_accounts({"lanes": [lane(".claude-two")]}, now, doctor)
+        self.assertNotIn("data-doctor", html_)
+        for stale in ({"status": "stale"}, {"remaining": None}, {"reason": "credentials_expired"}, {"auth": "expired_refreshable"}):
+            self.assertIn('data-doctor=".claude-two"', shipmate.block_accounts({"lanes": [lane(".claude-two", **stale)]}, now, doctor))
+        self.assertNotIn("data-doctor", shipmate.block_accounts({"lanes": [lane("other", status="stale")]}, now, doctor))
+        done = dict(doctor, results={".claude-two": {"ok": False, "error": "claude doctor exited with status 3", "at": now - 60}})
+        out = shipmate.block_accounts({"lanes": [lane(".claude-two", status="stale")]}, now, done)
+        self.assertIn("exited with status 3", out)
+        self.assertIn("data-doctor", out)                                   # it can be tried again
+        self.assertIn('data-doctor="ordinary"', shipmate.render_blocks(shipmate.demo_snapshot(T0))["accounts"])
 
     def test_detail_and_report_endpoints(self):
         write(os.path.join(self.home, "data", "TASK-A", "report.md"), "# the report\n")
