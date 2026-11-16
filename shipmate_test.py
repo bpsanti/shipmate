@@ -9,6 +9,7 @@ import random
 import re
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 import threading
@@ -1787,6 +1788,44 @@ class TestShip(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", smooth)
         self.assertIn('mode !== "off"', smooth)
 
+    def test_the_zoom_tools_are_in_and_out_only(self):
+        page = shipmate.asset("shipmate.html")
+        self.assertEqual(re.findall(r'data-zoom="(\w+)"', page), ["in", "out"])
+        self.assertNotIn("fit all", page)
+        self.assertNotIn("Frame the crew", page)
+
+    def test_signs_put_away_stay_away_at_every_zoom(self):
+        # the far view shows every tag a hand is not hiding, signs among them; the switch must outrank it
+        css = re.sub(r"/\*.*?\*/", "", shipmate.asset("shipmate.css"), flags=re.S)
+        rules = [(sel.strip(), body) for sels, body in re.findall(r"^([^{}@/][^{}]*)\{([^}]*)\}", css, re.M)
+                 for sel in sels.split(",")]
+
+        def weight(sel):          # class, attribute and pseudo-class selectors; these rules use no id or element
+            return len(re.findall(r"\.[\w-]+|\[[^\]]*\]|:(?!not\()[\w-]+", sel))
+        hide = [w for sel, body in rules if ".no-signs" in sel for w in [weight(sel)] if "display: none" in body]
+        self.assertEqual(len(hide), 1)
+        shows = [sel for sel, body in rules if re.search(r"display:\s*(?!none)\w", body)
+                 and re.search(r"\.sm-(tag|sign)\b", sel.split()[-1])]
+        self.assertTrue(any("is-far" in sel for sel in shows))
+        for sel in shows:
+            self.assertGreater(hide[0], weight(sel), sel)
+        svg = shipmate.render_ship(shipmate.ship_scene(shipmate.demo_snapshot(1_700_000_000)))
+        signs = re.findall(r'class="([^"]*\bsm-sign\b[^"]*)"', svg)
+        self.assertTrue(signs)
+        self.assertEqual([c for c in signs if "sm-tag" not in c.split()], [])   # the rule's selector meets every sign
+
+    def test_favicon_is_the_anchor_in_both_formats(self):
+        self.assertEqual({len(r) for r in shipmate.FAVICON}, {16})
+        self.assertEqual(len(shipmate.FAVICON), 16)
+        uri = shipmate.favicon_svg()
+        self.assertTrue(uri.startswith("data:image/svg+xml,<svg "))
+        for bare in ('"', "#", "http:"):
+            self.assertNotIn(bare, uri)                                  # safe in an attribute, no fragment, no scheme
+        png = shipmate.favicon_png()
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))
+        self.assertIn('href="{{FAVICON}}"', shipmate.asset("shipmate.html"))
+
     def test_a_refresh_with_nothing_new_keeps_the_drawing_and_its_loops(self):
         page = shipmate.asset("shipmate.html")
         self.assertIn("b.ship === shipDrawn", page)
@@ -1812,9 +1851,15 @@ class TestShip(unittest.TestCase):
             st, page = get("/")
             self.assertEqual(st, 200)
             for h in ("Demo: a made-up home", 'data-view="ship"', 'id="sm-view-ship"', "The ship", 'class="sm-chip',
-                      'class="sm-hand', 'data-zoom="all"', "Work by phase", 'class="sm-logcard"', "data-signs"):
+                      'class="sm-hand', 'data-zoom="in"', "Work by phase", 'class="sm-logcard"', "data-signs",
+                      '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,', 'href="/favicon.png"'):
                 self.assertIn(h, page)
             self.assertNotIn("http://", page.replace("http://127.0.0.1", ""))
+            c = http.client.HTTPConnection("127.0.0.1", panel.cfg.port, timeout=30)
+            c.request("GET", "/favicon.png", headers={"Host": "127.0.0.1:%d" % panel.cfg.port})
+            r = c.getresponse()
+            self.assertEqual((r.status, r.getheader("Content-Type"), r.read()), (200, "image/png", shipmate.favicon_png()))
+            c.close()
             st, ship = get("/ship")
             self.assertEqual(set(json.loads(ship)), {"ship", "counts", "projects", "accounts", "stages", "log", "events"})
             self.assertEqual(json.loads(ship)["events"], [])                                 # nothing to compare with

@@ -52,11 +52,13 @@ import os
 import random
 import re
 import secrets
+import struct
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8737
@@ -1813,8 +1815,8 @@ PT_BR.update({
     "Work by phase": "Trabalho por fase", "The ship": "O navio", "Light a stage": "Acender uma etapa",
     "Click a stage to light its hands and take the view to them.":
         "Clique numa etapa para acender os marujos dela e levar a vista até eles.",
-    "Zoom in": "Aproximar", "Zoom out": "Afastar", "Frame the crew": "Enquadrar a tripulação", "crew": "tripulação",
-    "Fit everything": "Mostrar tudo", "fit all": "tudo", "Show the signs on the ship": "Mostrar as placas no navio",
+    "Zoom in": "Aproximar", "Zoom out": "Afastar",
+    "Show the signs on the ship": "Mostrar as placas no navio",
     "signs": "placas", "Waiting for you": "Esperando você",
     "Wheel or pinch to zoom, drag to move, double click to zoom in there. Click a hand or a card in the log for its details, or the crowd at the cabin door to find it in the log.":
         "Roda ou pinça para o zoom, arraste para mover, clique duplo para aproximar ali. Clique num marujo ou num cartão do "
@@ -2477,6 +2479,55 @@ def asset(name):
         return fh.read()
 
 
+# the tab's icon: the header's anchor on its rust disc, in the ship's pixel art, one character a pixel
+FAVICON = (
+    "................",
+    ".....######.....",
+    "...##rrrrrr##...",
+    "..#rrrrwwrrrr#..",
+    ".#rrrrwrrwrrrr#.",
+    ".#rrrrrwwrrrrr#.",
+    "#rrrrwwwwwwrrrr#",
+    "#rrrrrrwwrrrrrr#",
+    "#rrrrrrwwrrrrrr#",
+    "#rrwrrrwwrrrwrr#",
+    "#rwwwrrwwrrwwwr#",
+    ".#rwrrrwwrrrwr#.",
+    ".#rrwwrwwrwwrr#.",
+    "..#rrwwwwwwrr#..",
+    "...##rrrrrr##...",
+    ".....######.....",
+)
+FAVICON_INK = {"#": "#241c14", "r": "#c0452a", "w": "#fbf6ea"}
+
+
+def favicon_svg():
+    """The icon as an SVG data URI for the page's own <link>: a rect per run of one colour in a row."""
+    rects = []
+    for y, row in enumerate(FAVICON):
+        for m in re.finditer(r"([^.])\1*", row):
+            rects.append("<rect x='%d' y='%d' width='%d' height='1' fill='%s'/>"
+                         % (m.start(), y, len(m.group(0)), FAVICON_INK[m.group(1)]))
+    svg = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' shape-rendering='crispEdges'>%s</svg>"
+           % "".join(rects))
+    return "data:image/svg+xml," + urllib.parse.quote(svg, safe=" /='<>,")     # no quote, # or scheme left bare
+
+
+def favicon_png(scale=2):
+    """The same icon as a PNG, for a browser that takes no SVG icon: each pixel a scale x scale square."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    ink = {k: bytes(int(v[i:i + 2], 16) for i in (1, 3, 5)) + b"\xff" for k, v in FAVICON_INK.items()}
+    ink["."] = b"\0\0\0\0"
+    rows = []
+    for row in FAVICON:
+        line = b"\0" + b"".join(ink[c] * scale for c in row)       # filter byte 0, then RGBA pixels
+        rows += [line] * scale
+    side = len(FAVICON) * scale
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
+
+
 def render_page(panel, snap, notice=""):
     b = render_blocks(snap)
     nonce = secrets.token_urlsafe(16)
@@ -2494,7 +2545,7 @@ def render_page(panel, snap, notice=""):
     ship = block_ship(snap)
     page = translate_template(asset("shipmate.html"))
     keys = ("board", "today", "firstmate", "accounts", "strip", "sumline", "usage", "counts")
-    for k, v in [("{{CSS}}", asset("shipmate.css")), ("{{NONCE}}", nonce), ("{{TIME}}", esc(b["time"])),
+    for k, v in [("{{CSS}}", asset("shipmate.css")), ("{{NONCE}}", nonce), ("{{FAVICON}}", favicon_svg()), ("{{TIME}}", esc(b["time"])),
                  ("{{FORM}}", form), ("{{NOTICE}}", notice), ("{{REFRESH_MS}}", str(REFRESH_SECONDS * 1000)),
                  ("{{SHIP}}", ship["ship"]), ("{{SHIPCOUNTS}}", esc(ship["counts"])),
                  ("{{SHIPPROJECTS}}", ship["projects"]), ("{{SHIPACCOUNTS}}", ship["accounts"]), ("{{SHIPSTAGES}}", ship["stages"]), ("{{SHIPLOG}}", ship["log"])] + \
@@ -5406,7 +5457,7 @@ def make_handler(panel):
             return self.headers.get("Host", "") in allowed_hosts
 
         def send(self, code, body, ctype="text/plain; charset=utf-8", nonce=None, extra=None):
-            data = body.encode("utf-8")
+            data = body if isinstance(body, bytes) else body.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
@@ -5432,6 +5483,8 @@ def make_handler(panel):
                 page, nonce = render_page(panel, panel.snapshot(),
                                           getattr(panel, "notice", "") + notice_html(urllib.parse.parse_qs(u.query)))
                 return self.send(200, page, "text/html; charset=utf-8", nonce=nonce)
+            if u.path == "/favicon.png":
+                return self.send(200, favicon_png(), "image/png")
             if u.path == "/blocks":
                 return self.send(200, json.dumps(render_blocks(panel.snapshot())), "application/json")
             if u.path == "/ship":

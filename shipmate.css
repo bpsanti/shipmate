@@ -245,7 +245,7 @@ body.sm-locked { overflow: hidden; }
 .sm-key { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .sm-key > section { background: var(--surface-card); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 10px 14px; min-width: 0; }
 .sm-key h3 { margin: 0 0 8px; }
-.sm-key ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 4px 14px; }
+.sm-key ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px 28px; }
 .sm-key li { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
 .sm-key li svg { flex: none; }
 .sm-key p { margin: 8px 0 0; font-size: var(--fs-xs); }
@@ -258,7 +258,8 @@ body.sm-locked { overflow: hidden; }
 .sm-balloon rect, .sm-balloon polygon { fill: #fffdf7; stroke: #1d140c; stroke-width: 0.6px; opacity: 1; }
 .sm-balloon text { fill: #1d140c; }
 .sm-ship__svg.is-far .sm-tag.sm-sign, .sm-ship__svg.is-far .sm-tag.sm-balloon { display: inline; }
-.sm-ship.no-signs .sm-sign { display: none; }
+/* put away, the signs stay away at every zoom: this outranks every rule that shows a tag (the far view's above) */
+.sm-ship.no-signs .sm-ship__svg .sm-tag.sm-sign { display: none; }
 .sm-ship__tools button[data-signs][aria-pressed="true"] { background: var(--navy-600); color: var(--white); }
 .sm-walkers { pointer-events: none; }
 .sm-num rect { fill: #d8342a; stroke: #fbf6ea; stroke-width: 0.5px; }
