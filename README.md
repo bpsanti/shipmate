@@ -1,20 +1,16 @@
 # shipmate
 
-A small local dashboard for a [Firstmate](https://github.com/kunchenguid/firstmate) home.
-It shows one page, read live from the home's own records every time the page loads and every 30 seconds after that:
+shipmate is a small local dashboard for a [Firstmate](https://github.com/kunchenguid/firstmate) home.
+Firstmate runs a fleet of coding agents on your machine: it takes tasks from a queue, hands each one to a worker, and follows it from exploring to a merged PR.
+shipmate shows that fleet at a glance, read live from the home's own records, so you can see what every agent is doing, what waits for you, and how much context and quota is left, without asking firstmate or reading its files.
 
-- **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, waiting for merge / delivered.
-  A phase with nothing in it shrinks to a thin labelled strip so the busy lanes get the width; a lane taller than the screen scrolls inside itself and says how many cards are below; when lanes are out of view the board says so.
-- **A fixed sidebar** on the right keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
-- **A detail drawer** opens from any card: facts about that piece of work, gathered from the home's records.
-  When the item waits on the captain, the drawer opens with the decision and a place to answer it, which reaches firstmate as an inbox note; firstmate's reply comes back to the same place.
-- **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
-- **The ship view** ("Ship" beside "Board" in the header) draws the same snapshot as one ship in pixel art, seen from the side and cut away: each agent is a hand whose place on board is its phase, and signs painted on the ship say what each place means. Whoever waits on the captain lines up in the captain's cabin, longest wait first, and a log below the scene lists them. Chips above it light one stage at a time. It zooms and pans, and the page remembers the choice of view in the browser.
+It is for the person firstmate works for, the captain: one browser tab beside the terminal, refreshed every 30 seconds.
+From the same page you can answer the decisions firstmate is waiting on and queue new tasks.
 
-Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
-
-It looks like the Firstmate bearings board, without the board's editor around it.
 It is one Python file, a template, and a stylesheet: standard library only, no build step, no web fonts, no CDN.
+It listens on `127.0.0.1` only.
+
+![The ship view: each agent is a hand on a pixel-art ship, placed by its phase](docs/images/ship.png)
 
 ## Run it
 
@@ -23,8 +19,83 @@ FM_HOME=/path/to/your/firstmate-home python3 shipmate.py
 # shipmate: http://127.0.0.1:8737/
 ```
 
+To look around without a Firstmate home, run the demo: a made-up home with every phase, flag and gauge in use.
+Every picture in this README is the demo.
+
+```bash
+python3 shipmate.py --demo
+```
+
 Python 3.9 or newer.
-It listens on `127.0.0.1` only.
+The options are under [Configuration](#configuration).
+
+### Keep it running (optional)
+
+On macOS a LaunchAgent can keep it up.
+Nothing installs one for you; to add it, save a file like this as `~/Library/LaunchAgents/local.shipmate.plist`, with your own paths, then run `launchctl load ~/Library/LaunchAgents/local.shipmate.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.shipmate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/shipmate/shipmate.py</string>
+    <string>--home</string><string>/path/to/your/firstmate-home</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+```
+
+The `PATH` must reach `tasks-axi`, `quota-axi`, `jq`, and whatever else the home's `bin/` scripts call.
+`launchctl unload` with the same path stops it.
+On Linux a `systemd --user` service with the same command does the same job.
+
+## The views
+
+The page has two views of the same snapshot, "Board" and "Ship", switched in the header; the browser remembers the choice.
+A fixed sidebar on the right stays on screen with both.
+
+### The board
+
+![The board: the queue, then one lane per phase, with the sidebar on the right](docs/images/board.png)
+
+- **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, waiting for merge / delivered.
+  A phase with nothing in it shrinks to a thin labelled strip so the busy lanes get the width; a lane taller than the screen scrolls inside itself and says how many cards are below; when lanes are out of view the board says so.
+- **The sidebar** keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls.
+- **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
+
+Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
+It looks like the Firstmate bearings board, without the board's editor around it.
+
+### The detail drawer
+
+![A card's drawer: the open decision with a place to answer it, then the facts about the task](docs/images/drawer.png)
+
+A drawer opens from any card, or from any hand on the ship: facts about that piece of work, gathered from the home's records.
+When the item waits on the captain, the drawer opens with the decision and a place to answer it, which reaches firstmate as an inbox note; firstmate's reply comes back to the same place.
+See [The detail drawer](#the-detail-drawer) and [Answering the captain's decisions](#answering-the-captains-decisions).
+
+### The ship
+
+![The whole ship zoomed out: the stern castle with the captain's cabin, the deck, the hold, the bow, and the pier with the queue](docs/images/ship-whole.png)
+
+The ship view draws the same snapshot as one ship in pixel art, seen from the side and cut away.
+Each agent is a hand whose place on board is its phase, and signs painted on the ship say what each place means.
+Whoever waits on the captain lines up in the captain's cabin, longest wait first, and a log below the scene lists them.
+The queue waits on the pier, the hold shows each account's quota and firstmate's context, and crates pile up as tasks are delivered.
+Chips above the scene light one stage at a time.
+It zooms and pans; the buttons in its corner zoom in and out, put the signs away, and set how much moves.
+[The ship view](#the-ship-view) below says what every element stands for.
+
+## Configuration
 
 | Option | Environment | Default | Meaning |
 | --- | --- | --- | --- |
@@ -56,35 +127,6 @@ Text read from the home's records (task titles, status lines, hold reasons, note
 `GET /state.json` returns the same snapshot the page is built from.
 `GET /ship` returns the ship view drawn from that snapshot; with `?prev=<print>` (the `data-print` of the drawing on screen) it also lists what changed since, for the page to animate (see [Motion](#motion)).
 `GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
-
-### Keep it running (optional)
-
-On macOS a LaunchAgent can keep it up.
-Nothing installs one for you; to add it, save a file like this as `~/Library/LaunchAgents/local.shipmate.plist`, with your own paths, then run `launchctl load ~/Library/LaunchAgents/local.shipmate.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>local.shipmate</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/python3</string>
-    <string>/path/to/shipmate/shipmate.py</string>
-    <string>--home</string><string>/path/to/your/firstmate-home</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-</dict>
-</plist>
-```
-
-The `PATH` must reach `tasks-axi`, `quota-axi`, `jq`, and whatever else the home's `bin/` scripts call.
-`launchctl unload` with the same path stops it.
-On Linux a `systemd --user` service with the same command does the same job.
 
 ## Where each number comes from
 
@@ -189,7 +231,7 @@ Each element stands for one thing:
 | The pump on the orlop | it works when firstmate's context is compacted, and the water goes down (see [Motion](#motion)) |
 | Hammocks in the quarters, cut open in the hull forward of the hold | queued tasks held until a date, one asleep in each hammock under a blanket in its project's colour, the date over it (see below) |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
-| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the lighthouse, the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away, and the browser remembers it |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the lighthouse, the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away at every zoom, and the browser remembers it |
 | Crates on the pier | tasks firstmate closed as done in the last 7 days: the backlog's `closed` date, read with the rest of the backlog (`bin/fm-tasks-axi.sh list`), so a task pruned from the backlog leaves the pile. The session sheets are written later and in batches, so they feed only the usage block |
 | The bell on the mizzen mast | it rings when a task is delivered (see [Motion](#motion)) |
 | Day or night | the local hour: the lamps are lit from 18:00 to 06:00 (on the ship, along the pier and in the tavern's windows); the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
@@ -202,7 +244,8 @@ The scene is larger than its frame and grows with the crew so no hand stands on 
 The cabin is the exception: it has one size, so the ship never grows with the captain's line.
 Three wait inside, 20 art pixels apart between the desk and the door; a fourth would need a longer stern castle, since a hand with a fishing rod or signal flags is up to 26 pixels wide.
 When wide props leave no room for the third, two wait inside, and the line keeps its order: everyone after the first who does not fit is in the crowd at the door.
-It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the buttons zoom in and out, frame the crew again, or fit everything.
+It opens framed on the deck and its crew; the wheel or a pinch zooms, dragging moves, a double click zooms in there, and the + and − buttons zoom in and out around the middle (zoomed all the way out, the whole scene fits).
+The view stays where it is taken across refreshes until the page is reloaded.
 Names show from a readable zoom up, never overlap, and come back on hover or focus when zoomed out.
 Clicking a hand, on board, in the cabin, in a hammock or on the pier, opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
