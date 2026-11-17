@@ -445,15 +445,18 @@ It is the herdr pane whose agent herdr registered with the session id in `state/
 No such pane, more than one, or another process in it refuses the request.
 shipmate itself only reads herdr (`herdr agent list` and `herdr pane process-info`, in the session `--herdr-session` names); it never starts, stops or restarts anything there.
 
-The request is refused, with the reason in the drawer, while something is in flight with firstmate:
+The request is refused, with the reason in the drawer, only while something lives in firstmate's conversation that a clear could lose:
 
 | Refused while | Read from |
 | --- | --- |
-| a question waits for the captain's answer | an open `needs-decision` line in `state/<task>.status`, or a queued task held for the captain's decision (`bin/fm-tasks-axi.sh list`); a hold until a date is not a question yet |
-| a note waits in firstmate's inbox | `bin/fm-inbox.sh receipts`: a pending note other than this request |
-| a merge or another control action is under way | a live holder of `state/.control-<task>.lock` (held by `bin/fm-merge-local.sh`, `bin/fm-pr-merge.sh` and every other control action on that task) or of `state/.afk-contract.lock` (also held by a forge merge); a holder counts while its pid is alive with the start time the lock recorded |
+| firstmate's pane is in a turn | herdr's `agent_status` for the pane: `idle` or `done` is out of a turn, anything else refuses the request; when the moment to type comes after the reply, it is waited for instead |
+| a captain's note waits in firstmate's inbox | `bin/fm-inbox.sh receipts`: a pending note other than this request |
+| firstmate took the captain's answer and has not replied yet | `bin/fm-inbox.sh receipts`: an answer sent from shipmate that firstmate took from its inbox, with no reply, while its decision is still open |
+| a merge or another guarded command is under way | a live holder of `state/.control-<task>.lock` (held by `bin/fm-merge-local.sh`, `bin/fm-pr-merge.sh` and every other control action on that task) or of `state/.afk-contract.lock` (also held by a forge merge); a holder counts while its pid is alive with the start time the lock recorded |
 | firstmate's session or pane is unknown | the session lock and herdr, as above |
-| firstmate's pane is in a turn, when the moment to type comes | herdr's `agent_status`: `idle` or `done` is out of a turn, anything else is waited for |
+
+Open and held decisions never block: an open `needs-decision` line in `state/<task>.status` or a queued task held for the captain's decision is a record in the home, which can stay open for days and survives the clear.
+The drawer lists them as information ("these stay open and survive the clear"), and the new session reloads them.
 
 Workers are not interrupted: each runs in a session and a pane of its own, and `/clear` reaches only firstmate's.
 

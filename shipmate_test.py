@@ -2562,8 +2562,19 @@ class TestClearContext(Base):
         self.meta("TASK-A")
         self.status("TASK-A", ["needs-decision [at=%d] [key=pick]: A) one B) two" % T0])
         self.panel.drop()
-        why = shipmate.clear_blockers(self.panel.snapshot(), doc, None, [])
-        self.assertEqual(why, ["2 questions wait for the captain's answer: TASK-A, TASK-C"])
+        held = self.panel.snapshot()
+        self.assertEqual(shipmate.clear_blockers(held, doc, None, []), [])     # open decisions are durable: they never block
+        self.assertEqual(shipmate.captain_questions(held), ["TASK-A", "TASK-C"])
+        self.assertIn("2 decisions are open: TASK-A, TASK-C. They stay open and survive the clear",
+                      self.panel.clear_drawer())
+        self.assertIn("data-clear>", self.panel.clear_drawer())                 # and the button is offered
+        busy = {"pane": "w1:p1", "target": "default:w1:p1", "status": "working"}
+        self.assertEqual(shipmate.clear_blockers(snap, doc, None, [], pane=busy), ["firstmate's pane is in a turn (working)"])
+        taken = {"note": "4-a", "at": T0 + 10, "words": "B", "state": "received", "reply": None}
+        why = shipmate.clear_blockers(dict(held, answers={"TASK-A": [taken]}), doc, None, [])
+        self.assertEqual(why, ["firstmate took the captain's answer and has not replied yet: TASK-A"])
+        replied = dict(taken, state="replied", reply={"at": T0 + 20, "text": "ok"})
+        self.assertEqual(shipmate.clear_blockers(dict(held, answers={"TASK-A": [replied]}), doc, None, []), [])
         why = shipmate.clear_blockers(snap, {"pending": [{"id": "9-n"}, {"id": "1-x"}]}, None, ["TASK-M", "away"], own_note="1-x")
         self.assertEqual(why, ["1 note waits in firstmate's inbox: 9-n", "a merge or another control action is under way: TASK-M, away"])
         self.assertIn("could not be read", shipmate.clear_blockers(snap, None, "exit 1", [])[0])
@@ -2676,6 +2687,9 @@ class TestClearContext(Base):
         self.assertFalse(self.flow.cancel()["ok"])
 
     def test_refused_up_front_with_the_reasons(self):
+        self.agents(status="working")
+        self.assertIn("in a turn (working)", self.flow.start("f1")["error"])
+        self.agents(status="idle")
         self.receipts(pending=[{"id": "5-n"}])
         res = self.flow.start("f1")
         self.assertFalse(res["ok"])

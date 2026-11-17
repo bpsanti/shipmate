@@ -1672,20 +1672,25 @@ def held_locks(home):
 
 def captain_questions(s):
     """Ids of the items whose question waits on the captain: an open needs-decision line, or a
-    queued task held for the captain's decision."""
+    queued task held for the captain's decision. These are records in the home, which the new
+    session reloads, so they never hold a clear back; the drawer only lists them."""
     ids = [a["id"] for a in s.get("agents") or [] if any(d["state"] == "needs-decision" for d in a.get("decisions") or [])]
     return ids + [q["id"] for q in s.get("queue") or [] if any(r[0] == "decision" for r in q.get("reasons") or [])]
 
 
-def clear_blockers(s, doc, receipts_err, locks, own_note=None):
-    """Why firstmate's context must not be cleared now: what is in flight with it. Empty when nothing is."""
+def clear_blockers(s, doc, receipts_err, locks, own_note=None, pane=None):
+    """Why firstmate's context must not be cleared now: only what lives in the conversation and a
+    clear could lose. Firstmate's pane in a turn, a captain's note it has not taken from its inbox or
+    an answer it took and has not replied to yet, and a merge or another guarded command under way.
+    Durable records, such as open or held decisions, never block. Empty when nothing is in flight."""
     why = []
     if s.get("firstmate") is None:
         why.append(tr("firstmate's session is unknown"))
-    asks = captain_questions(s)
-    if asks:
-        why.append(tr("%d question waits for the captain's answer: %s" if len(asks) == 1
-                      else "%d questions wait for the captain's answer: %s") % (len(asks), ", ".join(asks[:6])))
+    if pane and "error" not in pane and pane["status"] not in CLEAR_FREE:
+        why.append(tr("firstmate's pane is in a turn (%s)") % pane["status"])
+    awaited = sorted(tid for tid, state in answer_marks(s).items() if state == "received")
+    if awaited:
+        why.append(tr("firstmate took the captain's answer and has not replied yet: %s") % ", ".join(awaited[:6]))
     if doc is None:
         why.append(tr("firstmate's inbox could not be read: %s") % receipts_err)
     else:
@@ -1751,7 +1756,7 @@ class ClearFlow:
         doc, err = read_receipts(self.cfg)
         with self.lock:
             own = self.job["note"] if self.job and self.job["state"] in CLEAR_ACTIVE else None
-        return snap, pane, doc, clear_blockers(snap, doc, err, held_locks(self.cfg.home), own)
+        return snap, pane, doc, clear_blockers(snap, doc, err, held_locks(self.cfg.home), own, pane)
 
     def start(self, form_id):
         with self.starting:
@@ -1861,8 +1866,6 @@ class ClearFlow:
             why.append(tr("firstmate's session changed since the request"))
         if "error" in pane2 or pane2["target"] != job["pane"]:
             why.append(pane2.get("error") or tr("firstmate's pane changed"))
-        elif pane2["status"] not in CLEAR_FREE:
-            why.append(tr("firstmate's pane is busy (%s)") % pane2["status"])
         if why:
             return self.finish(job, "refused", "; ".join(why))
         if not self.advance(job, "clearing"):
@@ -2046,9 +2049,10 @@ class Panel:
         """The drawer of "Clear context": what it does, the context it clears, and why not now, if so."""
         job = self.clear.view()
         if job and job["state"] in CLEAR_ACTIVE:
-            return render_clear(self.recent().get("firstmate"), job, None, [], self.token, time.time())
+            snap = self.recent()
+            return render_clear(snap.get("firstmate"), job, None, [], self.token, time.time(), captain_questions(snap))
         snap, pane, _doc, why = self.clear.check()
-        return render_clear(snap.get("firstmate"), job, pane, why, self.token, time.time())
+        return render_clear(snap.get("firstmate"), job, pane, why, self.token, time.time(), captain_questions(snap))
 
     def clear_start(self, form_id):
         return self.clear.start(form_id)
@@ -2305,14 +2309,18 @@ PT_BR = {
     "unconfirmed": "não confirmado", "not cleared": "não limpo", "timed out": "sem resposta", "stopped": "parado",
     "a clear request is already under way": "já há um pedido de limpeza em andamento",
     "no clear request is waiting": "nenhum pedido de limpeza está esperando",
-    "%d question waits for the captain's answer: %s": "%d pergunta espera a resposta do capitão: %s",
-    "%d questions wait for the captain's answer: %s": "%d perguntas esperam a resposta do capitão: %s",
+    "firstmate's pane is in a turn (%s)": "o pane do firstmate está num turno (%s)",
+    "firstmate took the captain's answer and has not replied yet: %s": "o firstmate pegou a resposta do capitão e ainda não respondeu: %s",
+    "%d decision is open: %s. It stays open and survives the clear: it is a record in the home, and the new session reloads it.":
+        "%d decisão está aberta: %s. Ela continua aberta e sobrevive à limpeza: é um registro na home, e a nova sessão a recarrega.",
+    "%d decisions are open: %s. They stay open and survive the clear: they are records in the home, and the new session reloads them.":
+        "%d decisões estão abertas: %s. Elas continuam abertas e sobrevivem à limpeza: são registros na home, e a nova sessão as recarrega.",
     "%d note waits in firstmate's inbox: %s": "%d nota espera na inbox do firstmate: %s",
     "%d notes wait in firstmate's inbox: %s": "%d notas esperam na inbox do firstmate: %s",
     "a merge or another control action is under way: %s": "um merge ou outra ação de controle está em andamento: %s",
     "firstmate's session is unknown": "a sessão do firstmate é desconhecida",
     "firstmate's inbox could not be read: %s": "a inbox do firstmate não pôde ser lida: %s",
-    "firstmate's pane changed": "o pane do firstmate mudou", "firstmate's session changed since the request": "a sessão do firstmate mudou desde o pedido", "firstmate's pane is busy (%s)": "o pane do firstmate está ocupado (%s)",
+    "firstmate's pane changed": "o pane do firstmate mudou", "firstmate's session changed since the request": "a sessão do firstmate mudou desde o pedido",
     "firstmate's pane stayed busy (%s) for %d s after the reply": "o pane do firstmate ficou ocupado (%s) por %d s depois da resposta",
     "firstmate replied: %s": "o firstmate respondeu: %s",
     "firstmate replied without \"%s\": %s": "o firstmate respondeu sem \"%s\": %s",
@@ -2954,7 +2962,7 @@ def clear_row(job):
             % (state, esc(tr("Clear context…"))))
 
 
-def render_clear(fm, job, pane, why, token, now):
+def render_clear(fm, job, pane, why, token, now, asks=()):
     """The drawer of "Clear context": the context it clears, the three steps in order, and then the
     request under way, the reasons it cannot run now, or the button that confirms it."""
     if fm and fm.get("context") is not None:
@@ -2980,6 +2988,12 @@ def render_clear(fm, job, pane, why, token, now):
             out.append('<div class="sm-form__foot"><span class="sm-faint">%s</span>'
                        '<button class="fm-btn fm-btn--sm" type="button" data-clear-cancel>%s</button></div>'
                        % (esc(tr("Stopping only stops shipmate: firstmate may still finish the stow.")), esc(tr("Stop waiting"))))
+    if asks:
+        out.append('<div class="sm-clear__info"><p>%s</p></div>' % esc(tr(
+            "%d decision is open: %s. It stays open and survives the clear: it is a record in the home, and the new session reloads it."
+            if len(asks) == 1 else
+            "%d decisions are open: %s. They stay open and survive the clear: they are records in the home, and the new session reloads them.")
+            % (len(asks), ", ".join(asks[:8]) + (", …" if len(asks) > 8 else ""))))
     if not live:
         problems = list(why) + ([pane["error"]] if pane and "error" in pane else [])
         if problems:

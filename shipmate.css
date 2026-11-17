@@ -508,6 +508,7 @@ body.sm-locked { overflow: hidden; }
 .sm-clear__job { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .sm-clear__why ul { margin: 6px 0 0; padding-left: 1.2em; font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .sm-clear__why p { margin: 0; }
+.sm-clear__info p { margin: 0; font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .sm-form label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
 .sm-form input, .sm-form select, .sm-form textarea {
   font: inherit; font-size: var(--fs-sm); font-weight: 400; color: var(--text-strong); background: var(--surface-card);
