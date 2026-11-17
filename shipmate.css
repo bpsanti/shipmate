@@ -500,6 +500,14 @@ body.sm-locked { overflow: hidden; }
 
 /* ---- form (in the drawer) ---- */
 .sm-form { display: grid; grid-template-columns: 1fr; gap: 12px; }
+/* "Clear context": the sidebar's button and its drawer */
+.sm-clear-row { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.sm-clear-row__state { margin-right: auto; }
+.sm-clear { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
+.sm-clear__steps { margin: 0; padding-left: 1.4em; display: grid; gap: 6px; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.sm-clear__job { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.sm-clear__why ul { margin: 6px 0 0; padding-left: 1.2em; font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.sm-clear__why p { margin: 0; }
 .sm-form label { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); font-weight: 700; color: var(--text-muted); }
 .sm-form input, .sm-form select, .sm-form textarea {
   font: inherit; font-size: var(--fs-sm); font-weight: 400; color: var(--text-strong); background: var(--surface-card);

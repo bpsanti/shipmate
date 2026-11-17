@@ -2304,6 +2304,7 @@ class TestLanguage(unittest.TestCase):
         phrases |= set(shipmate.SCOUT_PHASES) | set(shipmate.CREW_TONE) | set(shipmate.CLASSES) | {"unknown", "inferred", "configured"}
         phrases |= {label for _mark, label in shipmate.ANSWER_PILLS.values()} | set(shipmate.ANSWER_MESSAGES.values())
         phrases |= set(shipmate.CHECKS_TEXT.values())
+        phrases |= set(shipmate.CLEAR_TEXT.values()) | set(shipmate.CLEAR_LABEL.values())
         phrases |= set(m[1] for m in shipmate.RE_PHRASE.findall(shipmate.asset("shipmate.html")))
         phrases = {p.replace('\\"', '"') for p in phrases if p}
         self.assertGreater(len(phrases), 150)
@@ -2453,6 +2454,289 @@ class TestAwayTab(unittest.TestCase):
         m = re.search(r"var awayEvery = every \* (\d+);", self.html)
         self.assertTrue(m and int(m.group(1)) >= 4)
         self.assertNotIn("setInterval(tick", self.html)
+
+
+FAKE_HERDR = r"""#!/bin/sh
+# fake herdr: read-only answers from canned JSON; every call logged
+printf '%s\n' "$*" >> "$FAKE_DIR/herdr.log"
+case "$1 $2" in
+  "agent list") cat "$FAKE_DIR/herdr-agents.json" ;;
+  "pane process-info") cat "$FAKE_DIR/herdr-process.json" ;;
+  *) echo '{"error":{"code":"unexpected"}}'; exit 1 ;;
+esac
+"""
+FAKE_SEND = r"""#!/bin/sh
+# fake fm-send.sh: logs the target and the text, exits with send.rc
+printf '%s\n' "$*" >> "$FAKE_DIR/send.log"
+exit "$(cat "$FAKE_DIR/send.rc" 2>/dev/null || echo 0)"
+"""
+CLEAN_LIST = """count: 1
+tasks[1]{id,state,kind,repo,title,blocked,blocked_by,created,deps,held,hold_kind,hold_reason,hold_until,priority,links}:
+  TASK-B,queued,ship,demo-app,Ready one,no,none,2026-01-02,none,no,"-","-","-","-",none
+"""
+
+
+class TestClearContext(Base):
+    """"Clear context": save first (an inbox note asking for /stow), clear only after firstmate's ready
+    reply (fm-send types /clear into its herdr pane), and refuse whatever is in flight."""
+
+    def setUp(self):
+        super().setUp()
+        write(os.path.join(self.root, "bin", "fm-send.sh"), FAKE_SEND, 0o755)
+        self.cfg.herdr_cmd = write(os.path.join(self.fake, "herdr"), FAKE_HERDR, 0o755)
+        write(os.path.join(self.fake, "list.toon"), CLEAN_LIST)
+        write(os.path.join(self.home, "state", ".lock"), "4242\n")
+        write(os.path.join(self.home, "state", ".lock-session"), "sess-fm\n")
+        t = Transcript()
+        t.call(time.time() - 60, inp=1, cw=20000, cr=292999)
+        t.save(os.path.join(self.acct, "projects", shipmate.encode_dir(self.home), "sess-fm.jsonl"))
+        self.agents(status="idle")
+        self.process(4242)
+        self.panel = shipmate.Panel(self.cfg)
+        self.flow = self.panel.clear = shipmate.ClearFlow(self.panel, timeout=20, idle_wait=5, poll=0.02)
+
+    def tearDown(self):
+        self.flow.stop.set()
+        if self.flow.thread:
+            self.flow.thread.join(5)
+        super().tearDown()
+
+    def agents(self, status="idle", sessions=("sess-fm",), cwd=None):
+        rows = [{"agent": "claude", "agent_session": {"kind": "id", "value": s}, "agent_status": status,
+                 "cwd": cwd or self.home, "pane_id": "w1:p%d" % (i + 1)} for i, s in enumerate(sessions)]
+        rows.append({"agent": "claude", "agent_session": {"kind": "id", "value": "sess-worker"}, "agent_status": "working",
+                     "cwd": "/work/pool/x", "pane_id": "w9:p2"})
+        write(os.path.join(self.fake, "herdr-agents.json"), json.dumps({"id": "cli:agent:list", "result": {"agents": rows}}))
+
+    def process(self, pid, pane="w1:p1"):
+        write(os.path.join(self.fake, "herdr-process.json"), json.dumps({"result": {"type": "pane_process_info", "process_info": {
+            "pane_id": pane, "shell_pid": 100, "foreground_process_group_id": pid, "foreground_processes": [{"pid": pid}]}}}))
+
+    def receipts(self, pending=(), handled=()):
+        write(os.path.join(self.fake, "receipts.json"), json.dumps({"pending": list(pending), "handled": list(handled)}))
+
+    def reply(self, text):
+        self.receipts(handled=[{"id": "1-x", "request_id": "shipmate-clear:f1", "acknowledged": True,
+                                "reply": {"at": iso(time.time()), "body": text}}])
+
+    def log(self, name):
+        try:
+            with open(os.path.join(self.fake, name)) as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
+
+    def until(self, *states):
+        end = time.time() + 10
+        while time.time() < end:
+            j = self.flow.view()
+            if j and j["state"] in states:
+                return j
+            time.sleep(0.02)
+        self.fail("the request never reached %s: %r" % (states, self.flow.view()))
+
+    def test_the_pane_is_the_one_both_lock_records_name(self):
+        p = shipmate.firstmate_pane(self.cfg)
+        self.assertEqual(p, {"pane": "w1:p1", "target": "default:w1:p1", "status": "idle"})
+        self.assertIn("--session default", self.log("herdr.log")[0])
+        self.agents(sessions=("sess-fm", "sess-fm"))                   # two panes claim it: no pick
+        self.assertIn("2 panes", shipmate.firstmate_pane(self.cfg)["error"])
+        self.agents(sessions=("sess-other",))
+        self.assertIn("no pane for firstmate's session", shipmate.firstmate_pane(self.cfg)["error"])
+        self.agents(cwd="/somewhere/else")
+        self.assertIn("not in this home", shipmate.firstmate_pane(self.cfg)["error"])
+        self.agents()
+        self.process(777)                                              # the pane runs another process
+        self.assertIn("pid 4242", shipmate.firstmate_pane(self.cfg)["error"])
+        self.process(4242)
+        os.remove(os.path.join(self.home, "state", ".lock-session"))
+        self.assertIn("no firstmate session lock", shipmate.firstmate_pane(self.cfg)["error"])
+        self.assertTrue(all(l.split()[:2] in (["agent", "list"], ["pane", "process-info"]) for l in self.log("herdr.log")))
+
+    def test_what_is_in_flight_blocks_the_request(self):
+        snap = self.panel.snapshot()
+        doc = {"pending": [], "handled": []}
+        self.assertEqual(shipmate.clear_blockers(snap, doc, None, []), [])
+        write(os.path.join(self.fake, "list.toon"), CLEAN_LIST.replace("count: 1", "count: 2").replace("tasks[1]", "tasks[2]")
+              + '  TASK-C,queued,scout,demo-app,Wait for a call,no,none,2026-01-03,none,yes,captain,"Pick a or b","-","-",none\n')
+        self.meta("TASK-A")
+        self.status("TASK-A", ["needs-decision [at=%d] [key=pick]: A) one B) two" % T0])
+        self.panel.drop()
+        why = shipmate.clear_blockers(self.panel.snapshot(), doc, None, [])
+        self.assertEqual(why, ["2 questions wait for the captain's answer: TASK-A, TASK-C"])
+        why = shipmate.clear_blockers(snap, {"pending": [{"id": "9-n"}, {"id": "1-x"}]}, None, ["TASK-M", "away"], own_note="1-x")
+        self.assertEqual(why, ["1 note waits in firstmate's inbox: 9-n", "a merge or another control action is under way: TASK-M, away"])
+        self.assertIn("could not be read", shipmate.clear_blockers(snap, None, "exit 1", [])[0])
+        self.assertEqual(shipmate.clear_blockers(dict(snap, firstmate=None), doc, None, []), ["firstmate's session is unknown"])
+
+    def test_a_merge_lock_counts_only_while_its_holder_lives(self):
+        state = os.path.join(self.home, "state")
+        def lock(name, pid, start=None):
+            owner = os.path.join(state, name + ".owner.abc")
+            write(os.path.join(owner, "pid"), "%d\n" % pid)
+            if start is not None:
+                write(os.path.join(owner, "pid-start"), start + "\n")
+            os.symlink(owner, os.path.join(state, name))
+        rc, out, _ = shipmate.run(["ps", "-p", str(os.getpid()), "-o", "lstart="], env=dict(os.environ, LC_ALL="C", TZ="UTC0"))
+        lock(".control-TASK-M.lock", os.getpid(), out.strip())
+        lock(".control-TASK-OLD.lock", 999999)                               # its holder is gone
+        lock(".control-TASK-REUSED.lock", os.getpid(), "Thu Jan  1 00:00:00 1970")   # the pid now belongs to another process
+        lock(".afk-contract.lock", os.getpid())
+        self.assertEqual(shipmate.held_locks(self.home), ["TASK-M", "away"])
+
+    def test_save_then_clear_in_that_order(self):
+        res = self.flow.start("f1")
+        self.assertTrue(res["ok"], res)
+        note = self.log("inbox.log")[0]
+        self.assertTrue(note.startswith("note --request-id shipmate-clear:f1 --json -- Clear request from shipmate"))
+        for part in ("Run /stow now", "bin/fm-inbox.sh reply <this note's id> 'stowed: ready to clear'", "313k of 1.00M tokens",
+                     "'not ready: <reason>'", "within 1 minutes"):
+            self.assertIn(part, note)
+        self.assertEqual(self.flow.view()["state"], "stowing")
+        self.assertEqual(self.flow.start("f1")["ok"], True)                 # the same form again is the same request
+        self.assertEqual(len(self.log("inbox.log")), 1)
+        self.assertIn("already under way", self.flow.start("f2")["error"])
+        time.sleep(0.2)
+        self.assertEqual(self.log("send.log"), [])                          # no /clear before the reply
+        self.agents(status="working")                                       # firstmate is still ending its turn
+        self.reply("stowed: ready to clear")
+        self.until("waiting")
+        time.sleep(0.2)
+        self.assertEqual(self.log("send.log"), [])                          # never into a busy pane
+        self.agents(status="idle")
+        j = self.until("cleared", "refused", "failed")
+        self.assertEqual(j["state"], "cleared", j)
+        self.assertEqual(self.log("send.log"), ["default:w1:p1 /clear"])
+
+    def test_nothing_is_typed_without_the_ready_reply(self):
+        for reply, state, words in (("not ready: a merge is mine to finish", "refused", "a merge is mine"),
+                                    ("I stowed most of it", "refused", "without \"stowed: ready to clear\""),
+                                    (None, "timeout", "no reply from firstmate")):
+            with self.subTest(reply=reply):
+                self.receipts()
+                self.flow.timeout = 0.3
+                self.assertTrue(self.flow.start("f1" if reply else "f3")["ok"])
+                if reply:
+                    self.reply(reply)
+                j = self.until("refused", "timeout", "cleared", "failed")
+                self.assertEqual(j["state"], state)
+                self.assertIn(words, j["detail"])
+                self.assertEqual(self.log("send.log"), [])
+                self.flow.thread.join(5)
+                self.flow.job["request"] = "done"                            # the next subtest starts a new request
+
+    def test_the_guards_are_read_again_before_typing(self):
+        self.assertTrue(self.flow.start("f1")["ok"])
+        self.receipts(pending=[{"id": "7-new", "request_id": "x"}],
+                      handled=[{"id": "1-x", "request_id": "shipmate-clear:f1", "reply": {"at": iso(time.time()), "body": "stowed: ready to clear"}}])
+        j = self.until("refused", "cleared")
+        self.assertEqual(j["state"], "refused")
+        self.assertIn("7-new", j["detail"])
+        self.assertEqual(self.log("send.log"), [])
+
+    def test_a_session_that_never_stowed_is_never_cleared(self):
+        self.assertTrue(self.flow.start("f1")["ok"])
+        self.agents(sessions=("sess-new",))                                  # firstmate restarted meanwhile
+        write(os.path.join(self.home, "state", ".lock-session"), "sess-new\n")
+        self.reply("stowed: ready to clear")
+        j = self.until("refused", "cleared")
+        self.assertIn("session changed since the request", j["detail"])
+        self.assertEqual(self.log("send.log"), [])
+
+    def test_a_pane_that_stays_busy_is_never_cleared(self):
+        self.flow.idle_wait = 0.3
+        self.assertTrue(self.flow.start("f1")["ok"])
+        self.agents(status="working")
+        self.reply("stowed: ready to clear")
+        j = self.until("refused", "cleared")
+        self.assertIn("stayed busy (working)", j["detail"])
+        self.assertEqual(self.log("send.log"), [])
+
+    def test_an_unconfirmed_or_refused_send_is_reported_and_never_retried(self):
+        for rc, state in (("3", "unconfirmed"), ("1", "failed")):
+            with self.subTest(rc=rc):
+                write(os.path.join(self.fake, "send.rc"), rc)
+                os.makedirs(os.path.join(self.fake, "requests"), exist_ok=True)
+                self.receipts()
+                self.assertTrue(self.flow.start("f1")["ok"])
+                self.reply("stowed: ready to clear")
+                self.assertEqual(self.until("unconfirmed", "failed", "cleared")["state"], state)
+                self.assertEqual(len(self.log("send.log")), 1)
+                os.remove(os.path.join(self.fake, "send.log"))
+                self.flow.thread.join(5)
+                self.flow.job["request"] = "done"
+
+    def test_stop_waiting_types_nothing(self):
+        self.assertTrue(self.flow.start("f1")["ok"])
+        self.assertTrue(self.flow.cancel()["ok"])
+        self.reply("stowed: ready to clear")
+        time.sleep(0.3)
+        self.assertEqual(self.flow.view()["state"], "cancelled")
+        self.assertEqual(self.log("send.log"), [])
+        self.assertFalse(self.flow.cancel()["ok"])
+
+    def test_refused_up_front_with_the_reasons(self):
+        self.receipts(pending=[{"id": "5-n"}])
+        res = self.flow.start("f1")
+        self.assertFalse(res["ok"])
+        self.assertIn("1 note waits in firstmate's inbox: 5-n", res["error"])
+        self.receipts()
+        self.agents(sessions=())
+        self.assertIn("no pane for firstmate's session", self.flow.start("f1")["error"])
+        self.assertEqual(self.log("inbox.log"), [])                          # nothing asked of firstmate
+        drawer = self.panel.clear_drawer()
+        self.assertIn("Not now", drawer)
+        self.assertNotIn("data-clear>", drawer)
+
+    def test_the_drawer_and_the_server(self):
+        self.panel.clear = self.flow
+        srv = shipmate.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a: None)
+        self.cfg.port = srv.server_address[1]
+        srv.RequestHandlerClass = shipmate.make_handler(self.panel)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def req(method, path, body=None):
+                c = http.client.HTTPConnection("127.0.0.1", self.cfg.port, timeout=30)
+                h = {"Host": "127.0.0.1:%d" % self.cfg.port}
+                if body is not None:
+                    body = urllib.parse.urlencode(body)
+                    h["Content-Type"] = "application/x-www-form-urlencoded"
+                c.request(method, path, body=body, headers=h)
+                r = c.getresponse()
+                return r, r.read().decode()
+            _r, page = req("GET", "/")
+            self.assertIn('data-action="clear"', page)
+            _r, drawer = req("GET", "/clear")
+            for part in ("313k of 1.00M", "Save: shipmate asks firstmate", "Clear: only after firstmate replies",
+                         "Resume: the new session", "default:w1:p1", "Save, then clear 313k", "does not interrupt them"):
+                self.assertIn(part, drawer)
+            r, _ = req("POST", "/clear", {"token": "nope", "request": "f1"})
+            self.assertEqual(r.status, 403)
+            _r, body = req("POST", "/clear", {"token": self.panel.token, "request": "bad id!"})
+            self.assertFalse(json.loads(body)["ok"])
+            _r, body = req("POST", "/clear", {"token": self.panel.token, "request": "f1"})
+            self.assertTrue(json.loads(body)["ok"], body)
+            _r, drawer = req("GET", "/clear")
+            self.assertIn("data-live", drawer)
+            self.assertIn("Stop waiting", drawer)
+            self.assertIn("clear: saving", json.loads(req("GET", "/blocks")[1])["firstmate"])
+            _r, body = req("POST", "/clear/cancel", {"token": self.panel.token})
+            self.assertTrue(json.loads(body)["ok"])
+            self.assertIn("clear: stopped", json.loads(req("GET", "/blocks")[1])["firstmate"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_the_demo_types_nothing(self):
+        demo = shipmate.DemoPanel(0)
+        self.assertIn("this is the demo", demo.clear_drawer())
+        self.assertFalse(demo.clear_start("f1")["ok"])
+
+    def test_the_readme_says_what_the_button_does(self):
+        with open(os.path.join(os.path.dirname(shipmate.__file__), "README.md"), encoding="utf-8") as fh:
+            text = fh.read()
+        for part in ("## Clearing firstmate's context", shipmate.CLEAR_READY, "bin/fm-send.sh", "--clear-timeout"):
+            self.assertIn(part, text)
 
 
 if __name__ == "__main__":

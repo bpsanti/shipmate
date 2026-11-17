@@ -21,7 +21,9 @@ Read-only over the home, except the add-task form, which runs the same backlog
 command firstmate uses (`bin/fm-tasks-axi.sh add ... --queue`) and then the inbox
 note command (`bin/fm-inbox.sh note`), and the answer form, which sends the
 captain's answer with `bin/fm-inbox.sh note --request-id` (and `announce` to
-repair a failed wake). Standard library only; Python 3.9 or newer.
+repair a failed wake), and "Clear context", which asks firstmate for /stow with an
+inbox note and, only after its ready reply, types /clear into firstmate's own herdr
+pane with `bin/fm-send.sh`. Standard library only; Python 3.9 or newer.
 
 Usage:
   shipmate.py [--home DIR] [--fm-root DIR] [--claude-dir DIR]... [--port N] [--once] [--demo]
@@ -35,6 +37,9 @@ Usage:
   --context-limit N   firstmate's context window in tokens ($SHIPMATE_CONTEXT_LIMIT;
                 default: inferred, 1M when the session already went past 200k)
   --context-warn P    warn past P percent of that window ($SHIPMATE_CONTEXT_WARN; 60)
+  --clear-timeout N   seconds firstmate has to stow and reply to a clear request
+                ($SHIPMATE_CLEAR_TIMEOUT; 900)
+  --herdr-session NAME  the herdr session that runs firstmate ($SHIPMATE_HERDR_SESSION; default)
   --once        print the JSON snapshot and exit instead of serving
   --demo        serve a made-up home instead of a real one (no home needed)
 """
@@ -86,7 +91,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 class Config:
     def __init__(self, home, fm_root=None, claude_dirs=(), port=DEFAULT_PORT, quota_cmd="quota-axi",
                  context_limit=None, context_warn=DEFAULT_CONTEXT_WARN, gh_cmd="gh",
-                 cache_seconds=DEFAULT_CACHE_SECONDS, claude_cmd="claude"):
+                 cache_seconds=DEFAULT_CACHE_SECONDS, claude_cmd="claude",
+                 herdr_cmd="herdr", herdr_session="default", clear_timeout=None):
         self.home = os.path.abspath(home)
         self.fm_root = os.path.abspath(fm_root or self.home)
         self.port = port
@@ -96,6 +102,9 @@ class Config:
         self.gh_cmd = gh_cmd                    # only the detail view's PR checks use it
         self.claude_cmd = claude_cmd            # only the accounts' "claude doctor" button runs it
         self.cache_seconds = cache_seconds      # seconds one snapshot is reused; 0 reads the fleet on every request
+        self.herdr_cmd = herdr_cmd              # only "Clear context" reads herdr, to find firstmate's pane
+        self.herdr_session = herdr_session      # the herdr session that runs firstmate
+        self.clear_timeout = clear_timeout or DEFAULT_CLEAR_TIMEOUT   # seconds firstmate has to stow and reply
         self.accounts = read_accounts(os.path.join(self.home, "config"))
         dirs = [os.path.expanduser("~/.claude")] + [d for _, d in self.accounts]
         dirs += [os.path.abspath(os.path.expanduser(d)) for d in claude_dirs if d]
@@ -1310,17 +1319,23 @@ def answers_from_receipts(doc):
     return by
 
 
-def read_answers(cfg):
-    """(answers by task, error): every pending and handled note, since an answer's state must not
-    drop out of a bounded page while its decision is still open."""
+def read_receipts(cfg):
+    """(receipts JSON, error): every pending and handled note with its reply, never a bounded page."""
     rc, out, err = run([cfg.bin("fm-inbox.sh"), "receipts", "--all-pending", "--all-handled"], env=cfg.env())
     if rc != 0:
-        return {}, (err or out).strip()[:300] or "exit %d" % rc
+        return None, (err or out).strip()[:300] or "exit %d" % rc
     try:
         doc = json.loads(out)
     except ValueError:
-        return {}, tr("the inbox receipts are not JSON")
-    return (answers_from_receipts(doc), None) if isinstance(doc, dict) else ({}, tr("the inbox receipts are not JSON"))
+        doc = None
+    return (doc, None) if isinstance(doc, dict) else (None, tr("the inbox receipts are not JSON"))
+
+
+def read_answers(cfg):
+    """(answers by task, error): every pending and handled note, since an answer's state must not
+    drop out of a bounded page while its decision is still open."""
+    doc, err = read_receipts(cfg)
+    return (answers_from_receipts(doc), None) if doc is not None else ({}, err)
 
 
 class ReceiptsCache:
@@ -1533,6 +1548,353 @@ class ChecksCache:
         return dict(hit[1], age=int(now - hit[0])) if hit else None
 
 
+# ---------------------------------------------------------------- clearing firstmate's context
+#
+# "Clear context…" in the sidebar runs three steps, in this order, and never skips one:
+#   1. save: a note in firstmate's inbox (`bin/fm-inbox.sh note --request-id shipmate-clear:<form id>`)
+#      asks it to run /stow and to reply to that note with CLEAR_READY once the stow is done;
+#   2. clear: only after that reply, within the timeout, while firstmate's pane is idle and nothing is
+#      in flight, shipmate types /clear into the pane with `bin/fm-send.sh <herdr session>:<pane> /clear`,
+#      the home's verified submit (empty composer first, then Enter until the pane confirms it);
+#   3. resume: the new session starts with firstmate's session-start re-emit, which reloads the queue,
+#      the workers, the open decisions and memory. shipmate takes no part in it.
+# Without the reply in time, or with a guard failing when the moment comes, nothing is typed.
+
+CLEAR_PREFIX = "shipmate-clear:"        # the request's request id: shipmate-clear:<form id>
+CLEAR_READY = "stowed: ready to clear"  # firstmate's reply when the stow is done
+CLEAR_NOT_READY = "not ready:"          # firstmate's reply when it cannot be cleared now, with the reason
+DEFAULT_CLEAR_TIMEOUT = 900             # seconds firstmate has to stow and reply
+CLEAR_IDLE_WAIT = 180                   # seconds the pane has, after the reply, to end its turn
+CLEAR_POLL = 3.0
+CLEAR_KEEP = 1800                       # seconds a finished request stays on the page
+CLEAR_ACTIVE = ("stowing", "waiting", "clearing")
+CLEAR_FREE = ("idle", "done")           # herdr agent states of a pane that is not in a turn
+
+
+def read_lock_pid(home):
+    """Line 1 of state/.lock: the pid of the harness that holds this home's firstmate lock."""
+    try:
+        with open(os.path.join(home, "state", ".lock"), encoding="utf-8") as fh:
+            line = fh.readline().strip()
+    except OSError:
+        return None
+    return int(line) if line.isdigit() and int(line) > 1 else None
+
+
+def herdr(cfg, *args):
+    """(rc, JSON or None, error) of one read-only herdr call in the configured session."""
+    env = dict(os.environ, HERDR_SESSION=cfg.herdr_session)
+    rc, out, err = run([cfg.herdr_cmd] + list(args) + ["--session", cfg.herdr_session], env=env, timeout=15)
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        doc = None
+    return rc, doc if isinstance(doc, dict) else None, (err or out).strip()[:300] or "exit %d" % rc
+
+
+def firstmate_pane(cfg):
+    """Firstmate's own herdr pane as {"pane", "target", "status"}, or {"error"}. Two records of the
+    home name it, so nothing is guessed: herdr's agent registered for the session id in
+    state/.lock-session, in this home's folder, whose pane runs the pid in state/.lock in its
+    foreground. Only herdr reads are made; nothing here starts, stops or types anything."""
+    sid, pid = read_lock_session(cfg.home), read_lock_pid(cfg.home)
+    if not sid or not pid:
+        return {"error": tr("the home records no firstmate session lock (state/.lock and state/.lock-session)")}
+    rc, doc, err = herdr(cfg, "agent", "list")
+    agents = ((doc or {}).get("result") or {}).get("agents")
+    if rc != 0 or not isinstance(agents, list):
+        return {"error": tr("herdr did not list its panes: %s") % err}
+    hits = [a for a in agents if isinstance(a, dict) and ((a.get("agent_session") or {}).get("value") == sid)]
+    if not hits:
+        return {"error": tr("herdr has no pane for firstmate's session %s") % sid[:8]}
+    if len(hits) > 1:
+        return {"error": tr("herdr has %d panes for firstmate's session %s; shipmate does not pick one") % (len(hits), sid[:8])}
+    a, pane = hits[0], str(hits[0].get("pane_id") or "")
+    if not pane or os.path.realpath(a.get("cwd") or "/nonexistent") != os.path.realpath(cfg.home):
+        return {"error": tr("the pane herdr names for session %s is not in this home") % sid[:8]}
+    rc, doc, err = herdr(cfg, "pane", "process-info", "--pane", pane)
+    info = ((doc or {}).get("result") or {}).get("process_info") or {}
+    if rc != 0 or info.get("pane_id") != pane:
+        return {"error": tr("herdr did not describe pane %s: %s") % (pane, err)}
+    pids = {p.get("pid") for p in info.get("foreground_processes") or [] if isinstance(p, dict)}
+    if pid not in pids | {info.get("foreground_process_group_id")}:
+        return {"error": tr("pane %s does not run the process that holds firstmate's lock (pid %d)") % (pane, pid)}
+    return {"pane": pane, "target": "%s:%s" % (cfg.herdr_session, pane), "status": str(a.get("agent_status") or "unknown")}
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def lock_holder_alive(path):
+    """Whether a live process holds a firstmate lock (a symlink to, or a directory with, `pid` and
+    `pid-start`). Like the home's own check, a recorded start time that a live pid no longer has
+    frees it (the pid was reused), and a start time that cannot be read now keeps it held."""
+    owner = os.path.realpath(path)
+    try:
+        with open(os.path.join(owner, "pid"), encoding="utf-8") as fh:
+            pid = int(fh.readline().strip())
+    except (OSError, ValueError):
+        return False
+    if pid <= 1 or not pid_alive(pid):
+        return False
+    try:
+        with open(os.path.join(owner, "pid-start"), encoding="utf-8") as fh:
+            recorded = fh.readline().strip()
+    except OSError:
+        return True
+    if not recorded or recorded.startswith("proc-starttime="):
+        return True
+    rc, out, _err = run(["ps", "-p", str(pid), "-o", "lstart="], env=dict(os.environ, LC_ALL="C", TZ="UTC0"), timeout=5)
+    return rc != 0 or not out.strip() or out.strip() == recorded
+
+
+def held_locks(home):
+    """What a live firstmate control lock holds now: a task id for `state/.control-<task>.lock`,
+    which a merge (`bin/fm-merge-local.sh`, `bin/fm-pr-merge.sh`) and every other control action on
+    that task hold, and "away" for `state/.afk-contract.lock`, which a forge merge also holds."""
+    state = os.path.join(home, "state")
+    out = []
+    for path in sorted(glob.glob(os.path.join(state, ".control-*.lock"))) + [os.path.join(state, ".afk-contract.lock")]:
+        if os.path.lexists(path) and lock_holder_alive(path):
+            name = os.path.basename(path)
+            out.append(name[len(".control-"):-len(".lock")] if name.startswith(".control-") else "away")
+    return out
+
+
+def captain_questions(s):
+    """Ids of the items whose question waits on the captain: an open needs-decision line, or a
+    queued task held for the captain's decision."""
+    ids = [a["id"] for a in s.get("agents") or [] if any(d["state"] == "needs-decision" for d in a.get("decisions") or [])]
+    return ids + [q["id"] for q in s.get("queue") or [] if any(r[0] == "decision" for r in q.get("reasons") or [])]
+
+
+def clear_blockers(s, doc, receipts_err, locks, own_note=None):
+    """Why firstmate's context must not be cleared now: what is in flight with it. Empty when nothing is."""
+    why = []
+    if s.get("firstmate") is None:
+        why.append(tr("firstmate's session is unknown"))
+    asks = captain_questions(s)
+    if asks:
+        why.append(tr("%d question waits for the captain's answer: %s" if len(asks) == 1
+                      else "%d questions wait for the captain's answer: %s") % (len(asks), ", ".join(asks[:6])))
+    if doc is None:
+        why.append(tr("firstmate's inbox could not be read: %s") % receipts_err)
+    else:
+        notes = [n.get("id") or "?" for n in doc.get("pending") or [] if isinstance(n, dict) and n.get("id") != own_note]
+        if notes:
+            why.append(tr("%d note waits in firstmate's inbox: %s" if len(notes) == 1
+                          else "%d notes wait in firstmate's inbox: %s") % (len(notes), ", ".join(notes[:6])))
+    if locks:
+        why.append(tr("a merge or another control action is under way: %s") % ", ".join(locks))
+    return why
+
+
+def clear_note(fm, now, timeout=DEFAULT_CLEAR_TIMEOUT):
+    """The request firstmate reads in its inbox, in English whatever the page's language."""
+    size = "%s of %s tokens" % (fmt_tokens(fm["context"]), fmt_tokens(fm["limit"])) if fm and fm.get("context") else "unknown"
+    return "\n".join([
+        "Clear request from shipmate: the captain asked to clear firstmate's context (%s, confirmed %s)." % (size, utc_text(now)),
+        "1. Run /stow now: persist every decision, open work item and learning that exists only in this conversation.",
+        "2. When the stow is done and nothing must not be interrupted, reply to this note with exactly:",
+        "   bin/fm-inbox.sh reply <this note's id> '%s'" % CLEAR_READY,
+        "   and end your turn. shipmate then types /clear into this session's pane; the session-start re-emit reloads"
+        " the queue, the workers, the open decisions and memory.",
+        "3. If it must not be cleared now, reply '%s <reason>' instead; shipmate then types nothing." % CLEAR_NOT_READY,
+        "Without the reply within %d minutes nothing is typed." % max(1, round(timeout / 60)),
+    ])
+
+
+def note_reply(doc, note_id):
+    """The reply recorded against a note in the receipts, as text, or None."""
+    for n in (doc.get("pending") or []) + (doc.get("handled") or []):
+        if isinstance(n, dict) and n.get("id") == note_id and isinstance(n.get("reply"), dict):
+            return str(n["reply"].get("body") or "")
+    return None
+
+
+class ClearFlow:
+    """One clear request at a time: the save, the wait for firstmate's reply, and the /clear, driven by
+    a thread of its own so closing the page changes nothing. Its state lives here only: after a restart
+    shipmate never acts on an earlier request's reply."""
+
+    def __init__(self, panel, timeout=DEFAULT_CLEAR_TIMEOUT, idle_wait=CLEAR_IDLE_WAIT, poll=CLEAR_POLL):
+        self.panel, self.cfg = panel, panel.cfg
+        self.timeout, self.idle_wait, self.poll = timeout, idle_wait, poll
+        self.lock = threading.Lock()
+        self.starting = threading.Lock()
+        self.job = None
+        self.thread = None
+        self.stop = threading.Event()
+
+    def view(self):
+        with self.lock:
+            j = self.job
+            if j is None or (j["state"] not in CLEAR_ACTIVE and time.time() - j["ended"] > CLEAR_KEEP):
+                return None
+            return {k: v for k, v in j.items()}
+
+    def check(self):
+        """(snapshot, pane, blockers) read fresh: nothing cached decides a clear."""
+        self.panel.drop()
+        self.panel.inbox.drop()
+        snap = self.panel.snapshot()
+        pane = firstmate_pane(self.cfg)
+        doc, err = read_receipts(self.cfg)
+        with self.lock:
+            own = self.job["note"] if self.job and self.job["state"] in CLEAR_ACTIVE else None
+        return snap, pane, doc, clear_blockers(snap, doc, err, held_locks(self.cfg.home), own)
+
+    def start(self, form_id):
+        with self.starting:
+            with self.lock:
+                j = self.job
+                if j and j["request"] == form_id:          # the same form sent again is the same request
+                    return {"ok": True, "message": clear_message(j)}
+                if j and j["state"] in CLEAR_ACTIVE:
+                    return {"ok": False, "error": tr("a clear request is already under way")}
+            snap, pane, _doc, why = self.check()
+            if "error" in pane:
+                why.append(pane["error"])
+            if why:
+                return {"ok": False, "error": tr("Not now: %s") % "; ".join(why)}
+            now = time.time()
+            rc, out, err = run([self.cfg.bin("fm-inbox.sh"), "note", "--request-id", CLEAR_PREFIX + form_id, "--json", "--",
+                                clear_note(snap["firstmate"], now, self.timeout)],
+                               env=self.cfg.env(), timeout=60)
+            try:
+                res = json.loads(out)
+            except ValueError:
+                res = None
+            self.panel.inbox.drop()
+            self.panel.drop()
+            if not isinstance(res, dict) or rc not in (0, 3) or not res.get("saved") or not res.get("id"):
+                return {"ok": False, "error": tr("the inbox refused it: %s") % ((err or out).strip()[:300] or "exit %d" % rc)}
+            job = {"request": form_id, "note": res["id"], "started": now, "ended": 0.0, "state": "stowing",
+                   "detail": "" if rc == 0 else tr("saved, but firstmate was not woken; it sees the request at its next drain"),
+                   "context": (snap["firstmate"] or {}).get("context"), "pane": pane["target"],
+                   "session": read_lock_session(self.cfg.home)}
+            with self.lock:
+                self.job = job
+            self.stop.clear()
+            self.thread = threading.Thread(target=self.drive, args=(job,), daemon=True)
+            self.thread.start()
+            return {"ok": True, "message": clear_message(job)}
+
+    def cancel(self):
+        with self.lock:
+            j = self.job
+            if not j or j["state"] not in ("stowing", "waiting"):
+                return {"ok": False, "error": tr("no clear request is waiting")}
+            self.finish(j, "cancelled", "", locked=True)
+        self.stop.set()
+        return {"ok": True, "message": clear_message(j)}
+
+    def advance(self, job, state, detail=""):
+        with self.lock:
+            if job["state"] not in CLEAR_ACTIVE:        # cancelled meanwhile: the request stays where it ended
+                return False
+            job["state"], job["detail"] = state, detail
+            return True
+
+    def finish(self, job, state, detail, locked=False):
+        if not locked:
+            with self.lock:
+                return self.finish(job, state, detail, locked=True)
+        if job["state"] in CLEAR_ACTIVE:
+            job["state"], job["detail"], job["ended"] = state, detail, time.time()
+        return True
+
+    def live(self, job):
+        with self.lock:
+            return job["state"] in CLEAR_ACTIVE
+
+    def drive(self, job):
+        try:
+            self.steps(job)
+        except Exception as exc:                          # the request must end, never hang as under way
+            self.finish(job, "failed", str(exc)[:300])
+
+    def steps(self, job):
+        # 1. the stow: wait for firstmate's reply to the request
+        reply = None
+        while reply is None:
+            if not self.live(job):
+                return
+            if time.time() - job["started"] > self.timeout:
+                return self.finish(job, "timeout", tr("no reply from firstmate within %d min") % max(1, round(self.timeout / 60)))
+            doc, _err = read_receipts(self.cfg)
+            reply = note_reply(doc, job["note"]) if doc else None
+            if reply is None:
+                self.stop.wait(self.poll)
+        text = reply.strip().strip("'\"`").strip()
+        if text.lower().startswith(CLEAR_NOT_READY):
+            return self.finish(job, "refused", tr("firstmate replied: %s") % text[:300])
+        if not text.lower().startswith(CLEAR_READY):
+            return self.finish(job, "refused", tr("firstmate replied without \"%s\": %s") % (CLEAR_READY, text[:300]))
+        # 2. the clear: once the pane is out of its turn, and only while nothing is in flight
+        if not self.advance(job, "waiting"):
+            return
+        since = time.time()
+        while True:
+            if not self.live(job):
+                return
+            pane = firstmate_pane(self.cfg)
+            if "error" in pane:
+                return self.finish(job, "failed", pane["error"])
+            if pane["status"] in CLEAR_FREE:
+                break
+            if time.time() - since > self.idle_wait:
+                return self.finish(job, "refused", tr("firstmate's pane stayed busy (%s) for %d s after the reply")
+                                   % (pane["status"], self.idle_wait))
+            self.stop.wait(self.poll)
+        _snap, pane2, _doc, why = self.check()
+        if read_lock_session(self.cfg.home) != job["session"]:       # a session that never stowed is not cleared
+            why.append(tr("firstmate's session changed since the request"))
+        if "error" in pane2 or pane2["target"] != job["pane"]:
+            why.append(pane2.get("error") or tr("firstmate's pane changed"))
+        elif pane2["status"] not in CLEAR_FREE:
+            why.append(tr("firstmate's pane is busy (%s)") % pane2["status"])
+        if why:
+            return self.finish(job, "refused", "; ".join(why))
+        if not self.advance(job, "clearing"):
+            return
+        rc, out, err = run([self.cfg.bin("fm-send.sh"), pane["target"], "/clear"], env=self.cfg.env(), timeout=120)
+        self.panel.drop()
+        if rc == 0:
+            return self.finish(job, "cleared", "")
+        if rc == 3:
+            return self.finish(job, "unconfirmed", (err or out).strip()[:300])
+        return self.finish(job, "failed", tr("fm-send refused: %s") % ((err or out).strip()[:300] or "exit %d" % rc))
+
+
+CLEAR_TEXT = {
+    "stowing": "Saving: firstmate was asked to /stow; waiting for its reply.",
+    "waiting": "Saved: waiting for firstmate's turn to end before typing /clear.",
+    "clearing": "Typing /clear into firstmate's pane.",
+    "cleared": "Cleared: /clear reached firstmate's pane; the new session reloads its state.",
+    "unconfirmed": "/clear was typed, but the pane did not confirm it: look at firstmate's pane before trying again.",
+    "refused": "Not cleared, and nothing was typed.",
+    "timeout": "Not cleared, and nothing was typed.",
+    "failed": "Not cleared.",
+    "cancelled": "Stopped waiting: nothing was typed. firstmate may still finish the stow, which keeps what it saves.",
+}
+CLEAR_TONE = {"stowing": "info", "waiting": "info", "clearing": "info", "cleared": "online", "unconfirmed": "warn",
+              "refused": "danger", "timeout": "danger", "failed": "danger", "cancelled": "neutral"}
+
+
+def clear_message(j):
+    return tr(CLEAR_TEXT[j["state"]]) + ((" " + j["detail"]) if j.get("detail") else "")
+
+
 # ---------------------------------------------------------------- snapshot and the add form
 
 
@@ -1554,6 +1916,7 @@ class Panel:
         self.gen = 0                             # bumped by drop(); a reading from an older one is never reused
         self.doctoring = threading.Lock()        # one `claude doctor` at a time
         self.doctored = {}                       # account label -> the last doctor run's result, shown beside it
+        self.clear = ClearFlow(self, cfg.clear_timeout)
 
     def drop(self):
         """Forgets the cached reading: the next request reads the fleet again, even when a reading
@@ -1675,6 +2038,23 @@ class Panel:
         if rc != 0:
             return {"ok": False, "error": tr("firstmate was not woken: %s") % ((err or out).strip()[:300] or "exit %d" % rc)}
         return {"ok": True, "message": tr("Firstmate was woken.")}
+
+    def clear_view(self):
+        return self.clear.view()
+
+    def clear_drawer(self):
+        """The drawer of "Clear context": what it does, the context it clears, and why not now, if so."""
+        job = self.clear.view()
+        if job and job["state"] in CLEAR_ACTIVE:
+            return render_clear(self.recent().get("firstmate"), job, None, [], self.token, time.time())
+        snap, pane, _doc, why = self.clear.check()
+        return render_clear(snap.get("firstmate"), job, pane, why, self.token, time.time())
+
+    def clear_start(self, form_id):
+        return self.clear.start(form_id)
+
+    def clear_cancel(self):
+        return self.clear.cancel()
 
     def add_task(self, title, project, text, request_id):
         with self.lock:
@@ -1892,6 +2272,64 @@ PT_BR = {
     "the lighthouse: nobody is waiting for CI": "o farol: ninguém esperando o CI",
     "the bilge pump: it works when firstmate's context is compacted": "a bomba do porão: trabalha quando o contexto do firstmate é compactado",
     "every check passed": "todos os checks passaram", "a check failed": "um check falhou", "checks running": "checks rodando",
+    # clearing firstmate's context
+    "Clear context…": "Limpar o contexto…", "Clear firstmate's context": "Limpar o contexto do firstmate",
+    "Checking what is in flight…": "Vendo o que está em andamento…", "Session": "Sessão", "Pane": "Pane",
+    "not found": "não encontrado", "%s of %s (%s window)": "%s de %s (janela %s)", "asked %s": "pedido %s",
+    "Save, then clear %s": "Salvar e limpar %s", "Stop waiting": "Parar de esperar",
+    "Stopping only stops shipmate: firstmate may still finish the stow.":
+        "Parar só para o shipmate: o firstmate ainda pode terminar o stow.",
+    "Not now: something is in flight with firstmate.": "Agora não: há algo em andamento com o firstmate.",
+    "Not now: %s": "Agora não: %s",
+    "Not sent: shipmate could not be reached. Try again: the same request is never sent twice.":
+        "Não enviado: o shipmate não respondeu. Tente de novo: o mesmo pedido nunca é enviado duas vezes.",
+    "Workers run in sessions of their own: clearing firstmate does not interrupt them. Nothing needs undoing: what firstmate keeps is on disk, and the new session reads it back.":
+        "Os workers rodam em sessões próprias: limpar o firstmate não os interrompe. Não há nada a desfazer: o que o firstmate guarda está em disco, e a nova sessão lê de volta.",
+    "Save: shipmate asks firstmate, in its inbox, to run /stow, which writes the decisions, open work and learnings that exist only in the conversation to the home's files.":
+        "Salvar: o shipmate pede ao firstmate, pela inbox, que rode /stow, que grava nos arquivos da home as decisões, o trabalho em aberto e os aprendizados que só existem na conversa.",
+    "Clear: only after firstmate replies that the stow is done, and only while its pane is idle and nothing is in flight, shipmate types /clear into that pane.":
+        "Limpar: só depois que o firstmate responde que o stow terminou, e só com o pane dele ocioso e nada em andamento, o shipmate digita /clear nesse pane.",
+    "Resume: the new session starts with firstmate's session-start re-emit, which reloads the queue, the workers, the open decisions and memory.":
+        "Retomar: a nova sessão começa com o re-emit de início de sessão do firstmate, que recarrega a fila, os workers, as decisões abertas e a memória.",
+    "Saving: firstmate was asked to /stow; waiting for its reply.": "Salvando: o firstmate recebeu o pedido de /stow; esperando a resposta.",
+    "Saved: waiting for firstmate's turn to end before typing /clear.": "Salvo: esperando o turno do firstmate terminar para digitar /clear.",
+    "Typing /clear into firstmate's pane.": "Digitando /clear no pane do firstmate.",
+    "Cleared: /clear reached firstmate's pane; the new session reloads its state.":
+        "Limpo: o /clear chegou ao pane do firstmate; a nova sessão recarrega o estado.",
+    "/clear was typed, but the pane did not confirm it: look at firstmate's pane before trying again.":
+        "O /clear foi digitado, mas o pane não confirmou: olhe o pane do firstmate antes de tentar de novo.",
+    "Not cleared, and nothing was typed.": "Não limpo, e nada foi digitado.", "Not cleared.": "Não limpo.",
+    "Stopped waiting: nothing was typed. firstmate may still finish the stow, which keeps what it saves.":
+        "Parou de esperar: nada foi digitado. O firstmate ainda pode terminar o stow, e o que ele salvar fica.",
+    "clear: %s": "limpeza: %s", "saving": "salvando", "saved": "salvo", "clearing": "limpando", "cleared": "limpo",
+    "unconfirmed": "não confirmado", "not cleared": "não limpo", "timed out": "sem resposta", "stopped": "parado",
+    "a clear request is already under way": "já há um pedido de limpeza em andamento",
+    "no clear request is waiting": "nenhum pedido de limpeza está esperando",
+    "%d question waits for the captain's answer: %s": "%d pergunta espera a resposta do capitão: %s",
+    "%d questions wait for the captain's answer: %s": "%d perguntas esperam a resposta do capitão: %s",
+    "%d note waits in firstmate's inbox: %s": "%d nota espera na inbox do firstmate: %s",
+    "%d notes wait in firstmate's inbox: %s": "%d notas esperam na inbox do firstmate: %s",
+    "a merge or another control action is under way: %s": "um merge ou outra ação de controle está em andamento: %s",
+    "firstmate's session is unknown": "a sessão do firstmate é desconhecida",
+    "firstmate's inbox could not be read: %s": "a inbox do firstmate não pôde ser lida: %s",
+    "firstmate's pane changed": "o pane do firstmate mudou", "firstmate's session changed since the request": "a sessão do firstmate mudou desde o pedido", "firstmate's pane is busy (%s)": "o pane do firstmate está ocupado (%s)",
+    "firstmate's pane stayed busy (%s) for %d s after the reply": "o pane do firstmate ficou ocupado (%s) por %d s depois da resposta",
+    "firstmate replied: %s": "o firstmate respondeu: %s",
+    "firstmate replied without \"%s\": %s": "o firstmate respondeu sem \"%s\": %s",
+    "no reply from firstmate within %d min": "nenhuma resposta do firstmate em %d min",
+    "saved, but firstmate was not woken; it sees the request at its next drain":
+        "gravado, mas o firstmate não foi acordado; ele vê o pedido na próxima leitura da inbox",
+    "fm-send refused: %s": "o fm-send recusou: %s",
+    "the home records no firstmate session lock (state/.lock and state/.lock-session)":
+        "a home não registra o lock de sessão do firstmate (state/.lock e state/.lock-session)",
+    "herdr did not list its panes: %s": "o herdr não listou os panes: %s",
+    "herdr has no pane for firstmate's session %s": "o herdr não tem pane para a sessão %s do firstmate",
+    "herdr has %d panes for firstmate's session %s; shipmate does not pick one":
+        "o herdr tem %d panes para a sessão %s do firstmate; o shipmate não escolhe um",
+    "the pane herdr names for session %s is not in this home": "o pane que o herdr indica para a sessão %s não é desta home",
+    "herdr did not describe pane %s: %s": "o herdr não descreveu o pane %s: %s",
+    "pane %s does not run the process that holds firstmate's lock (pid %d)":
+        "o pane %s não roda o processo que tem o lock do firstmate (pid %d)",
 }
 
 # the page template's own phrases ({{t:...}} and {{j:...}} in shipmate.html)
@@ -2502,7 +2940,62 @@ def render_queue_detail(q, full, intent, reports, now, answer=""):
            ("<h3>%s</h3>" % esc(tr("Captain's intent")) + pre(intent, "")) if intent else "", esc(tr("Report")), report_links(q["id"], reports)))
 
 
-def block_firstmate(fm, now):
+CLEAR_LABEL = {"stowing": "saving", "waiting": "saved", "clearing": "clearing", "cleared": "cleared",
+               "unconfirmed": "unconfirmed", "refused": "not cleared", "timeout": "timed out", "failed": "failed",
+               "cancelled": "stopped"}
+
+
+def clear_row(job):
+    """The sidebar's "Clear context…" button, with the state of the latest request beside it."""
+    state = ('<span class="sm-clear-row__state" title="%s">%s</span>'
+             % (esc(clear_message(job)), badge(tr("clear: %s") % tr(CLEAR_LABEL[job["state"]]), CLEAR_TONE[job["state"]]))
+             if job else "")
+    return ('<div class="sm-clear-row">%s<button class="fm-btn fm-btn--sm" type="button" data-action="clear">%s</button></div>'
+            % (state, esc(tr("Clear context…"))))
+
+
+def render_clear(fm, job, pane, why, token, now):
+    """The drawer of "Clear context": the context it clears, the three steps in order, and then the
+    request under way, the reasons it cannot run now, or the button that confirms it."""
+    if fm and fm.get("context") is not None:
+        size = tr("%s of %s (%s window)") % (fmt_tokens(fm["context"]), fmt_tokens(fm["limit"]), tr(fm["limit_how"]))
+        if fm.get("percent") is not None:
+            size += " · " + tr("%d%% used") % round(fm["percent"])
+    else:
+        size = tr("unknown")
+    live = job is not None and job["state"] in CLEAR_ACTIVE
+    out = ['<div class="sm-clear" data-token="%s"%s>' % (esc(token), ' data-live=""' if live else ""),
+           '<div class="sm-facts">%s%s%s</div>' % (
+               fact(tr("Context"), esc(size)), fact(tr("Session"), esc(fm["session"][:8] if fm else tr("unknown"))),
+               fact(tr("Pane"), esc((job or {}).get("pane") or (pane or {}).get("target") or tr("not found")))),
+           '<ol class="sm-clear__steps">%s</ol>' % "".join("<li>%s</li>" % esc(tr(x)) for x in (
+               "Save: shipmate asks firstmate, in its inbox, to run /stow, which writes the decisions, open work and learnings that exist only in the conversation to the home's files.",
+               "Clear: only after firstmate replies that the stow is done, and only while its pane is idle and nothing is in flight, shipmate types /clear into that pane.",
+               "Resume: the new session starts with firstmate's session-start re-emit, which reloads the queue, the workers, the open decisions and memory."))]
+    if job:
+        out.append('<div class="sm-clear__job">%s <span>%s</span> <span class="sm-faint">%s</span></div>'
+                   % (badge(tr(CLEAR_LABEL[job["state"]]), CLEAR_TONE[job["state"]]), esc(clear_message(job)),
+                      esc(tr("asked %s") % fmt_when(job["started"], now))))
+        if job["state"] in ("stowing", "waiting"):
+            out.append('<div class="sm-form__foot"><span class="sm-faint">%s</span>'
+                       '<button class="fm-btn fm-btn--sm" type="button" data-clear-cancel>%s</button></div>'
+                       % (esc(tr("Stopping only stops shipmate: firstmate may still finish the stow.")), esc(tr("Stop waiting"))))
+    if not live:
+        problems = list(why) + ([pane["error"]] if pane and "error" in pane else [])
+        if problems:
+            out.append('<div class="sm-clear__why"><p class="sm-warnline">%s</p><ul>%s</ul></div>'
+                       % (esc(tr("Not now: something is in flight with firstmate.")), "".join("<li>%s</li>" % esc(w) for w in problems)))
+        else:
+            out.append('<form class="sm-clear__form" data-clear><input type="hidden" name="request" value="%s">'
+                       '<div class="sm-form__foot"><p class="sm-answer__msg" aria-live="polite"></p>'
+                       '<button class="fm-btn fm-btn--sm fm-btn--primary" type="submit">%s</button></div></form>'
+                       % (esc(secrets.token_urlsafe(6)), esc(tr("Save, then clear %s") % fmt_tokens(fm["context"]))))
+    out.append('<p class="sm-faint">%s</p></div>' % esc(tr(
+        "Workers run in sessions of their own: clearing firstmate does not interrupt them. Nothing needs undoing: what firstmate keeps is on disk, and the new session reads it back.")))
+    return "".join(out)
+
+
+def block_firstmate(fm, now, clear=None):
     if fm is None:
         return '<div class="sm-empty">%s</div>' % esc(tr("Firstmate session unknown: no Claude transcript in the project folder of this home."))
     pct = fm["percent"]
@@ -2537,7 +3030,7 @@ def block_firstmate(fm, now):
            esc(tr("%s of %s (%s window) · last call %s") % (fmt_tokens(fm["context"]), fmt_tokens(fm["limit"]), tr(fm["limit_how"]),
                                                            fmt_when(fm["last_call"], now))), esc(growth),
            esc(tr("today: %s new · %s cache reads") % (fmt_tokens(fm["today_new"]), fmt_tokens(fm["today_cache"]))), esc(comp),
-           warn, esc(tr("session %s, found by %s") % (fm["session"][:8], fm["found_by"]))))
+           warn, esc(tr("session %s, found by %s") % (fm["session"][:8], fm["found_by"])))) + clear_row(clear)
 
 
 def phase_bar(a):
@@ -2595,7 +3088,7 @@ def render_blocks(s):
     return {
         "board": block_board(s["agents"], s["queue"], s["backlog_error"], s["now"], answer_marks(s)),
         "today": block_today(s["daily"]),
-        "firstmate": block_firstmate(s.get("firstmate"), s["now"]),
+        "firstmate": block_firstmate(s.get("firstmate"), s["now"], s.get("clear")),
         "accounts": block_accounts(s["quota"], s["now"], s.get("doctor")),
         "strip": block_strip(s),
         "sumline": block_sumline(s),
@@ -5572,6 +6065,20 @@ class DemoPanel:
     def doctor(self, label):
         return {"ok": False, "error": tr("this is the demo: claude doctor was not run")}
 
+    def clear_view(self):
+        return None
+
+    def clear_drawer(self):
+        snap = self.recent()
+        return render_clear(snap.get("firstmate"), None, {"target": "demo:w1:p1", "status": "idle"},
+                            [tr("this is the demo: firstmate is not here")], self.token, time.time())
+
+    def clear_start(self, form_id):
+        return {"ok": False, "error": tr("this is the demo: firstmate is not here")}
+
+    def clear_cancel(self):
+        return {"ok": False, "error": tr("no clear request is waiting")}
+
 
 # ---------------------------------------------------------------- HTTP
 
@@ -5617,13 +6124,16 @@ def make_handler(panel):
                 return self.send(403, "forbidden")
             u = urllib.parse.urlsplit(self.path)
             if u.path == "/":
-                page, nonce = render_page(panel, panel.snapshot(),
+                page, nonce = render_page(panel, dict(panel.snapshot(), clear=panel.clear_view()),
                                           getattr(panel, "notice", "") + notice_html(urllib.parse.parse_qs(u.query)))
                 return self.send(200, page, "text/html; charset=utf-8", nonce=nonce)
             if u.path == "/favicon.png":
                 return self.send(200, favicon_png(), "image/png")
             if u.path == "/blocks":
-                return self.send(200, json.dumps(render_blocks(panel.snapshot())), "application/json")
+                return self.send(200, json.dumps(render_blocks(dict(panel.snapshot(), clear=panel.clear_view()))),
+                                 "application/json")
+            if u.path == "/clear":
+                return self.send(200, panel.clear_drawer(), "text/html; charset=utf-8")
             if u.path == "/ship":
                 prev = parse_print((urllib.parse.parse_qs(u.query).get("prev") or [""])[0])
                 return self.send(200, json.dumps(block_ship(panel.recent(), prev)), "application/json")
@@ -5657,7 +6167,7 @@ def make_handler(panel):
             if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
                 return self.send(403, "forbidden")
             path = urllib.parse.urlsplit(self.path).path
-            if path not in ("/task", "/answer", "/announce", "/doctor"):
+            if path not in ("/task", "/answer", "/announce", "/doctor", "/clear", "/clear/cancel"):
                 return self.send(404, "not found")
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -5679,6 +6189,12 @@ def make_handler(panel):
             if path == "/doctor":
                 # the account is a label looked up in the home's own list; the request never names a path
                 return self.send(200, json.dumps(panel.doctor(get("account"))), "application/json")
+            if path == "/clear":
+                res = (panel.clear_start(get("request")) if RE_FORM_ID.match(get("request"))
+                       else {"ok": False, "error": tr("this form has no request id; reopen the drawer")})
+                return self.send(200, json.dumps(res), "application/json")
+            if path == "/clear/cancel":
+                return self.send(200, json.dumps(panel.clear_cancel()), "application/json")
             if path == "/announce":
                 note = get("note")
                 res = (panel.announce(note) if re.match(r"^[A-Za-z0-9._-]{1,128}$", note) and ".." not in note
@@ -5709,6 +6225,11 @@ def main(argv=None):
     ap.add_argument("--cache-seconds", type=float,
                     default=float(os.environ.get("SHIPMATE_CACHE_SECONDS") or DEFAULT_CACHE_SECONDS),
                     help="seconds one reading of the fleet answers every request (default 5; 0 turns the cache off)")
+    ap.add_argument("--clear-timeout", type=int,
+                    default=int(os.environ.get("SHIPMATE_CLEAR_TIMEOUT") or DEFAULT_CLEAR_TIMEOUT),
+                    help="seconds firstmate has to stow and reply before a clear request lapses (default 900)")
+    ap.add_argument("--herdr-session", default=os.environ.get("SHIPMATE_HERDR_SESSION") or "default",
+                    help="the herdr session that runs firstmate (default: default)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--demo", action="store_true", help="serve a made-up home instead of a real one")
     ap.add_argument("--lang", choices=LANGS, default=os.environ.get("SHIPMATE_LANG") or "en",
@@ -5731,7 +6252,8 @@ def main(argv=None):
     extra = a.claude_dir + [d for d in (os.environ.get("SHIPMATE_CLAUDE_DIRS") or "").split(os.pathsep) if d]
     cfg = Config(a.home, a.fm_root, extra, a.port, os.environ.get("SHIPMATE_QUOTA_CMD") or "quota-axi",
                  a.context_limit, a.context_warn, os.environ.get("SHIPMATE_GH_CMD") or "gh", max(0.0, a.cache_seconds),
-                 os.environ.get("SHIPMATE_CLAUDE_CMD") or "claude")
+                 os.environ.get("SHIPMATE_CLAUDE_CMD") or "claude", os.environ.get("SHIPMATE_HERDR_CMD") or "herdr",
+                 a.herdr_session, max(60, a.clear_timeout))
     if not os.path.exists(cfg.bin("fm-tasks-axi.sh")):
         print("shipmate: %s has no bin/fm-tasks-axi.sh; name the code root with --fm-root or FM_ROOT" % cfg.fm_root,
               file=sys.stderr)

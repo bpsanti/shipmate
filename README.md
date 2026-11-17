@@ -70,6 +70,7 @@ A fixed sidebar on the right stays on screen with both.
 - **A board by phase** fills the page: the queue is the first lane (what waits and why, with a "+ Add task" button that queues a new task and notifies firstmate), then one lane per phase of the live workers: exploring, implementing / writing, PR open, waiting for CI, waiting for merge / delivered.
   A phase with nothing in it shrinks to a thin labelled strip so the busy lanes get the width; a lane taller than the screen scrolls inside itself and says how many cards are below; when lanes are out of view the board says so.
 - **The sidebar** keeps today's tokens, firstmate's own session (context against the model's window, growth, compactions, and a warning past a threshold so you know when to clear it) and every Claude account's quota (tightest first: what is left, when it resets, when it runs out at the current pace) on screen while the board scrolls; an account whose reading is stale or unknown gets a "claude doctor" button (see [Renewing an account's token](#renewing-an-accounts-token)).
+  Under firstmate's session, "Clear context…" saves what only firstmate's conversation holds and then clears it (see [Clearing firstmate's context](#clearing-firstmates-context)).
 - **Usage** (tokens per day and per delivered task, new tokens apart from cache re-reads) is folded under the board.
 
 Below 1400 px of width the sidebar becomes a strip of small gauges above the board, so it never squeezes the lanes; on a phone it becomes a one-line summary that opens the full blocks, the drawer takes the whole screen, and the board scrolls sideways one lane at a time.
@@ -105,12 +106,15 @@ It zooms and pans; the buttons in its corner zoom in and out, put the signs away
 | `--port N` | `SHIPMATE_PORT` | `8737` | TCP port |
 | `--context-limit N` | `SHIPMATE_CONTEXT_LIMIT` | inferred | firstmate's context window in tokens |
 | `--context-warn P` | `SHIPMATE_CONTEXT_WARN` | `60` | warn when firstmate's context passes P percent of the window |
+| `--clear-timeout N` | `SHIPMATE_CLEAR_TIMEOUT` | `900` | seconds firstmate has to stow and reply to a clear request before it lapses (at least 60) |
+| `--herdr-session NAME` | `SHIPMATE_HERDR_SESSION` | `default` | the herdr session that runs firstmate, read only to find its pane |
 | `--cache-seconds N` | `SHIPMATE_CACHE_SECONDS` | `5` | seconds one reading of the fleet (backlog, records, inbox receipts) answers every request; `0` reads again on each request |
 | `--once` | | | print the JSON snapshot and exit |
 | `--demo` | | | serve a made-up home with every phase, flag and gauge in use, instead of a real one (no `--home` needed); it changes between two moments every 30 s, so the ship's animations can be seen |
 | `--lang en\|pt-BR` | `SHIPMATE_LANG` | `en` | the page's language: English, or Brazilian Portuguese with `pt-BR` |
 | | `SHIPMATE_QUOTA_CMD` | `quota-axi` | quota command |
 | | `SHIPMATE_GH_CMD` | `gh` | GitHub CLI used only to read a PR's checks, for the phases and the detail drawer |
+| | `SHIPMATE_HERDR_CMD` | `herdr` | herdr CLI, read only to find firstmate's pane and whether it is in a turn (see [Clearing firstmate's context](#clearing-firstmates-context)) |
 | | `SHIPMATE_CLAUDE_CMD` | `claude` | Claude Code CLI, run only by an account's "claude doctor" button (see [Renewing an account's token](#renewing-an-accounts-token)) |
 
 Reloading the page, the page's own refresh and the ship view share one reading of the fleet for `--cache-seconds` seconds instead of reading it again each time.
@@ -127,7 +131,7 @@ Text read from the home's records (task titles, status lines, hold reasons, note
 
 `GET /state.json` returns the same snapshot the page is built from.
 `GET /ship` returns the ship view drawn from that snapshot; with `?prev=<print>` (the `data-print` of the drawing on screen) it also lists what changed since, for the page to animate (see [Motion](#motion)).
-`GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, `POST /doctor` runs `claude doctor` for one of the home's accounts, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
+`GET /detail?id=<task>` returns one card's drawer, `POST /answer` sends the captain's answer to a waiting decision, `POST /doctor` runs `claude doctor` for one of the home's accounts, `GET /clear` returns the drawer of "Clear context", `POST /clear` and `POST /clear/cancel` start and stop a clear request, and `GET /report?id=<task>&f=md|html` shows that task's `data/<task>/report.md` or `report.html` as a sandboxed document.
 
 ## Where each number comes from
 
@@ -401,6 +405,61 @@ Below the forms, every answer sent about the item shows what became of it, read 
 The card of a waiting item, in the board and in the ship's log, carries the state of the latest answer sent since the item began to wait, so an answer to an earlier decision never marks a new one.
 shipmate only delivers the answer: firstmate acts on it under its usual rules, so a merge or a destructive action still needs the captain's explicit word on that PR.
 `POST /answer` and `POST /announce` take the same guards as the add form below.
+
+## Clearing firstmate's context
+
+"Clear context…" under firstmate's session in the sidebar clears firstmate's own Claude session, after saving what only its conversation holds.
+It opens the drawer with the context it would clear (tokens, the share of the window, the session and the herdr pane), the three steps below, and either the button that confirms it ("Save, then clear 313k") or the reasons it cannot run now.
+
+What the button does, in order:
+
+1. **Save.** shipmate leaves firstmate a note in its inbox, with `FM_HOME` set:
+
+   ```bash
+   bin/fm-inbox.sh note --request-id shipmate-clear:<form id> --json -- "Clear request from shipmate: ..."
+   ```
+
+   The note, in English whatever the page's language, asks firstmate to run `/stow`, which writes the decisions, open work and learnings that exist only in the conversation to the home's files.
+   It then asks firstmate to reply to that note with exactly `stowed: ready to clear` and end its turn, or with `not ready: <reason>` when it must not be cleared now.
+2. **Clear.** shipmate reads `bin/fm-inbox.sh receipts` every 3 seconds for that reply.
+   Only `stowed: ready to clear`, recorded within `--clear-timeout` (15 minutes by default) of the request, lets it go on.
+   It then waits up to 3 minutes for firstmate's pane to end its turn, reads every guard below again, checks that `state/.lock-session` and the pane still name the session that was asked to stow, and types `/clear` into the pane:
+
+   ```bash
+   bin/fm-send.sh <herdr session>:<pane> /clear
+   ```
+
+   That is the home's verified submit: it types only into an empty composer, refuses while a prompt is open, and presses Enter until the pane confirms it.
+3. **Resume.** The new session starts with firstmate's session-start re-emit, which reloads the queue, the workers, the open decisions and memory from the home's records.
+   shipmate takes no part in this step.
+
+Any other reply, no reply in time, a pane that stays in its turn, or a guard that fails at the last moment ends the request with its reason, and nothing is typed.
+A `/clear` that `fm-send` typed but could not confirm (exit 3) shows as unconfirmed and is never sent again: look at the pane first.
+The request runs in shipmate's server, so closing the page changes nothing; it lives in memory only, so after a restart shipmate never acts on an earlier request's reply.
+"Stop waiting" ends a request before `/clear`; firstmate may still finish the stow, which only saves.
+Sending the same confirmation twice (a double click, a retry) is one request, since fm-inbox keeps one note per request id, and only one request runs at a time.
+The sidebar shows the state of the latest request beside the button: saving, saved, clearing, cleared, unconfirmed, not cleared, timed out, failed or stopped.
+
+Firstmate's pane is never guessed.
+It is the herdr pane whose agent herdr registered with the session id in `state/.lock-session`, whose working directory is the home, and whose foreground process is the pid on line 1 of `state/.lock`.
+No such pane, more than one, or another process in it refuses the request.
+shipmate itself only reads herdr (`herdr agent list` and `herdr pane process-info`, in the session `--herdr-session` names); it never starts, stops or restarts anything there.
+
+The request is refused, with the reason in the drawer, while something is in flight with firstmate:
+
+| Refused while | Read from |
+| --- | --- |
+| a question waits for the captain's answer | an open `needs-decision` line in `state/<task>.status`, or a queued task held for the captain's decision (`bin/fm-tasks-axi.sh list`); a hold until a date is not a question yet |
+| a note waits in firstmate's inbox | `bin/fm-inbox.sh receipts`: a pending note other than this request |
+| a merge or another control action is under way | a live holder of `state/.control-<task>.lock` (held by `bin/fm-merge-local.sh`, `bin/fm-pr-merge.sh` and every other control action on that task) or of `state/.afk-contract.lock` (also held by a forge merge); a holder counts while its pid is alive with the start time the lock recorded |
+| firstmate's session or pane is unknown | the session lock and herdr, as above |
+| firstmate's pane is in a turn, when the moment to type comes | herdr's `agent_status`: `idle` or `done` is out of a turn, anything else is waited for |
+
+Workers are not interrupted: each runs in a session and a pane of its own, and `/clear` reaches only firstmate's.
+
+There is nothing to undo.
+`/clear` drops the conversation, not the work: the backlog, the workers' records, the open decisions, the inbox and what the stow wrote are files in the home, and the new session reads them back.
+The old conversation also stays on disk as its transcript in the home's Claude project folder.
 
 ## Adding a task
 

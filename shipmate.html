@@ -838,14 +838,25 @@
     document.body.classList.remove("sm-locked");
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
+  var CLEAR = "@clear";                 // the drawer of "Clear context", not a card
+  var clearTimer = null;
   function load() {
     if (!openId) return;
     var id = openId;
-    fetch("/detail?id=" + encodeURIComponent(id), { cache: "no-store" }).then(function (r) {
+    clearTimeout(clearTimer);
+    fetch(id === CLEAR ? "/clear" : "/detail?id=" + encodeURIComponent(id), { cache: "no-store" }).then(function (r) {
       if (r.status === 404) return '<div class="sm-empty">' + {{j:This item is no longer on the board.}} + '</div>';
       if (!r.ok) throw new Error(String(r.status));
       return r.text();
-    }).then(function (h) { if (openId === id) refill(h); }).catch(function () {});
+    }).then(function (h) {
+      if (openId !== id) return;
+      if (id !== CLEAR) { refill(h); return; }
+      var f = detail.querySelector("form[data-clear]");
+      if (f && f.hasAttribute("data-busy")) return;     // a confirmation on its way keeps its button
+      detail.innerHTML = h;
+      // a request under way is followed closely while its drawer is open
+      if (detail.querySelector("[data-live]")) clearTimer = setTimeout(function () { if (openId === CLEAR) { load(); tick(); } }, 3000);
+    }).catch(function () {});
   }
 
   // the captain's answer, in the drawer of a decision that waits on the captain. The 30 s refresh
@@ -943,6 +954,51 @@
     var i = e.target;
     if (i.name === "option" && i.getAttribute("data-was") === "1") { i.checked = false; i.setAttribute("data-was", ""); }
   });
+  // "Clear context": the confirmation in the drawer, then the request followed until it ends
+  detail.addEventListener("submit", function (e) {
+    var f = e.target.closest("form[data-clear]");
+    if (!f) return;
+    e.preventDefault();
+    var btn = f.querySelector("button[type=submit]"), msg = f.querySelector(".sm-answer__msg");
+    if (btn.disabled) return;
+    var data = new FormData(f);
+    data.append("token", f.closest(".sm-clear").getAttribute("data-token"));
+    btn.disabled = true;
+    f.setAttribute("data-busy", "");
+    msg.className = "sm-answer__msg";
+    msg.textContent = {{j:Sending…}};
+    post("/clear", data).then(function (res) {
+      f.removeAttribute("data-busy");
+      msg.textContent = res.ok ? res.message : {{j:Not sent: %s}}.replace("%s", res.error || "?");
+      msg.classList.add(res.ok ? "is-ok" : "is-err");
+      if (!res.ok) { btn.disabled = false; return; }
+      load();
+      tick();
+    }).catch(function () {
+      // the form keeps its request id, so sending it again never asks firstmate twice
+      f.removeAttribute("data-busy");
+      msg.textContent = {{j:Not sent: shipmate could not be reached. Try again: the same request is never sent twice.}};
+      msg.classList.add("is-err");
+      btn.disabled = false;
+    });
+  });
+  detail.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-clear-cancel]");
+    if (!b || b.disabled) return;
+    var data = new FormData();
+    data.append("token", b.closest(".sm-clear").getAttribute("data-token"));
+    b.disabled = true;
+    post("/clear/cancel", data).then(function () { load(); tick(); }).catch(function () { b.disabled = false; });
+  });
+  function openClear() {
+    openId = CLEAR;
+    dtitle.textContent = {{j:Clear firstmate's context}};
+    add.hidden = true;
+    detail.hidden = false;
+    detail.innerHTML = '<div class="sm-empty">' + {{j:Checking what is in flight…}} + '</div>';
+    show();
+    load();
+  }
   function openDetail(id) {
     openId = id;
     dtitle.textContent = {{j:Details}};
@@ -979,6 +1035,7 @@
     if (act) {
       var a = act.getAttribute("data-action");
       if (a === "add") openAdd();
+      else if (a === "clear") openClear();
       else if (a === "close") close();
       else if (a === "sum") document.getElementById("sm-side").classList.toggle("is-open");
       else if (a === "view") setView(act.getAttribute("data-view"), true);
