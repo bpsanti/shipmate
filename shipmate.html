@@ -780,6 +780,7 @@
       document.getElementById("b-shipcounts").textContent = b.counts;
       document.getElementById("b-shipprojects").innerHTML = b.projects;
       document.getElementById("b-shipaccounts").innerHTML = b.accounts;
+      applyWinPick();
       document.getElementById("b-shipstages").innerHTML = b.stages;
       document.getElementById("b-shiplog").innerHTML = b.log;
       if (!same) ship.bind();
@@ -929,6 +930,30 @@
       b.textContent = {{j:Not sent: %s}}.replace("%s", res.error || "?");
     }).catch(function () { b.disabled = false; });
   });
+  // a quota chip picks the window whose reset the account's headline shows; the pick is per page view
+  // and is laid over every refresh, which redraws the cards from the server's default (the limiting window)
+  var winPick = {};
+  function applyWinPick() {
+    document.querySelectorAll("[data-acct]").forEach(function (card) {
+      var want = winPick[card.getAttribute("data-acct")];
+      if (want === undefined) return;
+      var chip = card.querySelector('.sm-chip[data-win="' + want + '"]');
+      if (!chip) return;
+      card.querySelectorAll(".sm-chip[data-win]").forEach(function (c) {
+        c.setAttribute("aria-pressed", c === chip ? "true" : "false");
+      });
+      var line = card.querySelector("[data-reset-line]");
+      if (line) line.textContent = chip.getAttribute("data-reset");
+      else card.title = chip.getAttribute("data-reset");
+    });
+  }
+  document.addEventListener("click", function (e) {
+    var chip = e.target.closest && e.target.closest(".sm-chip[data-win]");
+    var card = chip && chip.closest("[data-acct]");
+    if (!card) return;
+    winPick[card.getAttribute("data-acct")] = chip.getAttribute("data-win");
+    applyWinPick();
+  });
   // "claude doctor" beside an account whose quota reading is stale or unknown: the server runs it for
   // that account of the home's list, and the next refresh shows the result and the account read again
   document.getElementById("sm-side").addEventListener("click", function (e) {
@@ -1062,6 +1087,7 @@
       return r.json();
     }).then(function (b) {
       ids.forEach(function (k) { document.getElementById("b-" + k).innerHTML = b[k]; });
+      applyWinPick();
       document.getElementById("sm-time").textContent = b.time;
       document.getElementById("sm-stale").hidden = true;
       overflow();

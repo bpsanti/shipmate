@@ -415,6 +415,45 @@ class TestQuota(Base):
         self.assertIn("runs out", html_out)
         self.assertNotIn("example.invalid", html_out)   # account identity never reaches the page
 
+    @staticmethod
+    def provider(plan, windows, limiting, remaining):
+        return {"provider": "claude", "plan": plan, "windows": windows, "state": {"status": "fresh"},
+                "accountLocator": {"kind": "config-dir", "path": "/accounts/.claude-%s" % plan},
+                "quotaSemantics": {"effectiveAvailability": [{
+                    "scope": "all_models", "effectivePercentRemaining": remaining, "limitingWindowIds": [limiting]}]}}
+
+    def test_every_window_is_a_chip(self):
+        team = self.provider("team", [
+            {"id": "five_hour", "label": "session", "percentRemaining": 97, "resetsAt": iso(T0 + 3600)},
+            {"id": "seven_day", "label": "week", "percentRemaining": 75, "resetsAt": iso(T0 + 86400)},
+            {"id": "seven_day_fable", "label": "Fable week", "percentRemaining": 80, "resetsAt": iso(T0 + 86400)},
+            {"id": "extra_usage", "label": "extra usage", "percentRemaining": None, "resetsAt": None}], "seven_day", 75)
+        max_ = self.provider("max", [
+            {"id": "seven_day", "label": "week", "percentRemaining": 40, "resetsAt": iso(T0 + 86400)},
+            {"id": "seven_day_fable", "label": "Fable week", "percentRemaining": 55, "resetsAt": iso(T0 + 86400)}], "seven_day", 40)
+        q = {"error": None, "lanes": [shipmate.quota_lane(team), shipmate.quota_lane(max_)]}
+        out = shipmate.block_accounts(q, T0)
+        card = {c.split('"', 1)[0]: c for c in out.split('data-acct="')[1:]}
+        t, m = card[".claude-team"], card[".claude-max"]
+        for label, pct in (("session", 97), ("week", 75), ("Fable week", 80)):
+            self.assertIn('<button type="button" class="sm-chip sm-chip--ok" data-win=', t)
+            self.assertIn("%s <b>%d%%</b>" % (label, pct), t)
+        self.assertEqual(t.count("<button"), 3)
+        # the unknown window is a dashed chip with "?", never a made-up percentage, and cannot be pressed
+        self.assertIn('class="sm-chip sm-chip--unknown"', t)
+        self.assertIn("extra usage <b>?</b>", t)
+        # the headline stays on the limiting window, whose chip starts pressed
+        self.assertIn("week resets", t.split("</div>", 4)[3])
+        self.assertEqual(t.count('aria-pressed="true"'), 1)
+        self.assertRegex(t, r'data-reset="session resets [^"]*" aria-pressed="false"')
+        # a Max account has no session window, so no session chip
+        self.assertEqual(m.count("<button"), 2)
+        self.assertNotIn("session", m)
+        # the narrow-screen strip carries the same chips
+        strip = shipmate.block_strip({"now": T0, "quota": q, "daily": []})
+        self.assertEqual(strip.count("<button"), 5)
+        self.assertIn("extra usage <b>?</b>", strip)
+
     def test_quota_failure_is_shown_not_raised(self):
         write(os.path.join(self.fake, "quota.json"), "not json")
         q = shipmate.QuotaCache().get(self.cfg)
