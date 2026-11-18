@@ -160,6 +160,14 @@ body.sm-locked { overflow: hidden; }
 .sm-acct__sub { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-xs); color: var(--text-muted); }
 .sm-acct__doctor { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: var(--fs-xs); }
 .sm-acct__doctor .fm-btn { white-space: normal; text-align: left; }
+.sm-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.sm-chip { font: inherit; font-family: var(--font-mono); font-size: var(--fs-2xs); line-height: 1.3; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; background: transparent; color: var(--text-muted); white-space: nowrap; }
+.sm-chip b { font-weight: 700; }
+button.sm-chip { cursor: pointer; }
+button.sm-chip:focus-visible { outline: 2px solid var(--text-strong); outline-offset: 1px; }
+.sm-chip--ok { color: var(--ok); } .sm-chip--warn { color: var(--warn); } .sm-chip--danger { color: var(--danger); }
+.sm-chip[aria-pressed="true"] { box-shadow: inset 0 0 0 1px currentColor; font-weight: 700; }
+.sm-chip--unknown { border-style: dashed; color: var(--text-faint); }
 .sm-acct__win { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); }
 
 /* ---- strip (narrow screens) ---- */

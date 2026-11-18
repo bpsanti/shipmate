@@ -968,8 +968,9 @@ def quota_lane(p):
         "resets": parse_ts(lim.get("resetsAt")),
         "runway": runway.get("status"),
         "exhausts": parse_ts(runway.get("projectedExhaustedAt")),
-        "windows": [{"label": w.get("label"), "remaining": w.get("percentRemaining"), "resets": parse_ts(w.get("resetsAt"))}
-                    for w in p.get("windows", []) if w.get("percentRemaining") is not None],
+        # every window, one with no reading too (remaining None): the page shows it as unknown, never as a number
+        "windows": [{"label": w.get("label") or w.get("id"), "remaining": w.get("percentRemaining"),
+                     "resets": parse_ts(w.get("resetsAt"))} for w in p.get("windows", [])],
     }
 
 
@@ -2113,7 +2114,7 @@ PT_BR = {
     "unknown": "desconhecido", "today %s": "hoje %s", "under 1 min": "menos de 1 min",
     "at this pace runs out %s": "neste ritmo acaba %s", "at this pace lasts until reset": "neste ritmo dura até renovar",
     "projection unknown": "projeção desconhecida", "Quota unavailable: %s": "Cota indisponível: %s",
-    "No Claude account measured.": "Nenhuma conta Claude medida.", "%s %s%% (resets %s)": "%s %s%% (renova %s)",
+    "No Claude account measured.": "Nenhuma conta Claude medida.", "%s %s%% (resets %s)": "%s %s%% (renova %s)", "%s: no reading": "%s: sem leitura",
     "%d%% left": "%d%% restante", "%s resets %s": "%s renova %s", "limit": "limite", "new tokens today": "tokens novos hoje",
     "cache reads today": "leituras de cache hoje", "Firstmate context": "Contexto do firstmate", "%d%% used": "%d%% usado",
     "%s of %s · %d compactions": "%s de %s · %d compactações", "resets %s": "renova %s", "Today": "Hoje", "%s new": "%s novos",
@@ -2566,6 +2567,29 @@ def runway_text(ln, now):
     return tr("projection unknown"), "muted"
 
 
+def window_chips(ln, now):
+    """One chip per quota window of an account, coloured by its tone. The limiting window is pressed at first;
+    pressing another one (the page's script) shows that window's reset in the headline. A window with no
+    reading is a dashed chip with "?" and cannot be pressed: no percentage is made up for it."""
+    wins = ln.get("windows") or []
+    if not wins:
+        return ""
+    chips = []
+    for i, w in enumerate(wins):
+        label = w["label"] or "?"
+        if w["remaining"] is None:
+            chips.append('<span class="sm-chip sm-chip--unknown" title="%s">%s <b>?</b></span>'
+                         % (esc(tr("%s: no reading") % label), esc(label)))
+            continue
+        pressed = bool(ln.get("limit_label")) and label == ln["limit_label"]
+        chips.append('<button type="button" class="sm-chip sm-chip--%s" data-win="%d" data-reset="%s" aria-pressed="%s" title="%s">%s <b>%s%%</b></button>'
+                     % (quota_tone(w["remaining"]), i, esc(tr("%s resets %s") % (label, fmt_when(w["resets"], now))),
+                        "true" if pressed else "false",
+                        esc(tr("%s %s%% (resets %s)") % (label, w["remaining"], fmt_when(w["resets"], now))),
+                        esc(label), w["remaining"]))
+    return '<div class="sm-chips">%s</div>' % "".join(chips)
+
+
 def lanes_by_urgency(q):
     """Accounts with the least left first; unmeasured ones last."""
     return sorted(q.get("lanes") or [], key=lambda ln: (ln["remaining"] is None, ln["remaining"] or 0))
@@ -2614,18 +2638,16 @@ def block_accounts(q, now, doctor=None):
         rem = ln["remaining"]
         tone = quota_tone(rem)
         proj, ptone = runway_text(ln, now)
-        wins = " · ".join(tr("%s %s%% (resets %s)") % (w["label"] or "?", w["remaining"], fmt_when(w["resets"], now))
-                          for w in ln["windows"])
         rows.append(
-            '<div class="sm-acct" title="%s">'
+            '<div class="sm-acct" data-acct="%s">'
             '<div class="sm-acct__top"><span class="sm-acct__name">%s</span>%s<span class="sm-acct__pct sm-%s">%s</span></div>'
             '<div class="sm-bar"><div class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></div></div>'
-            '<div class="sm-acct__sub"><span>%s</span><span class="sm-%s">%s</span></div>%s</div>'
-            % (esc(wins), esc(ln["label"]), badge(ln["plan"]) if ln["plan"] else "",
+            '<div class="sm-acct__sub"><span data-reset-line>%s</span><span class="sm-%s">%s</span></div>%s%s</div>'
+            % (esc(ln["label"]), esc(ln["label"]), badge(ln["plan"]) if ln["plan"] else "",
                tone, (tr("%d%% left") % rem) if rem is not None else tr("unknown"),
                tone, max(0, min(100, rem or 0)),
                esc(tr("%s resets %s") % (ln["limit_label"] or tr("limit"), fmt_when(ln["resets"], now))), ptone, esc(proj),
-               doctor_line(ln["label"], doctor, ln, now)))
+               window_chips(ln, now), doctor_line(ln["label"], doctor, ln, now)))
     return "".join(rows)
 
 
@@ -2635,11 +2657,12 @@ def block_today(daily):
             % (esc(fmt_tokens(d["new"])), esc(tr("new tokens today")), esc(fmt_tokens(d["cache"])), esc(tr("cache reads today"))))
 
 
-def gauge(label, pct, value, sub, tone, title=""):
-    return ('<div class="sm-gauge" title="%s"><div class="sm-gauge__top"><b>%s</b><span class="sm-%s">%s</span></div>'
+def gauge(label, pct, value, sub, tone, title="", chips="", acct=None):
+    return ('<div class="sm-gauge"%s title="%s"><div class="sm-gauge__top"><b>%s</b><span class="sm-%s">%s</span></div>'
             '<span class="sm-bar sm-bar--thin"><span class="sm-bar__fill sm-bar__fill--%s" style="width:%d%%"></span></span>'
-            '<div class="sm-gauge__sub">%s</div></div>'
-            % (esc(title), esc(label), tone, esc(value), tone, max(0, min(100, round(pct or 0))), esc(sub)))
+            '<div class="sm-gauge__sub">%s</div>%s</div>'
+            % ((' data-acct="%s"' % esc(acct)) if acct is not None else "", esc(title), esc(label), tone, esc(value), tone,
+               max(0, min(100, round(pct or 0))), esc(sub), chips))
 
 
 def block_strip(s):
@@ -2653,7 +2676,8 @@ def block_strip(s):
     for ln in lanes_by_urgency(s["quota"]):
         rem = ln["remaining"]
         out.append(gauge(ln["label"], rem, (tr("%d%% left") % rem) if rem is not None else tr("unknown"),
-                         runway_text(ln, now)[0], quota_tone(rem), tr("resets %s") % fmt_when(ln["resets"], now)))
+                         runway_text(ln, now)[0], quota_tone(rem), tr("resets %s") % fmt_when(ln["resets"], now),
+                         window_chips(ln, now), ln["label"]))
     d = s["daily"][0] if s["daily"] else {"new": 0, "cache": 0}
     out.append('<div class="sm-gauge sm-gauge--today"><div class="sm-gauge__top"><b>%s</b><span>%s</span></div>'
                '<div class="sm-gauge__sub">%s</div></div>' % (esc(tr("Today")), esc(tr("%s new") % fmt_tokens(d["new"])),
