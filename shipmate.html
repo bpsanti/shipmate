@@ -139,10 +139,41 @@
     function aspect() { return frame.clientHeight / Math.max(1, frame.clientWidth); }
     function scale() { return frame.clientWidth / v.w; }
     function maxW() { return Math.max(SW, SH / aspect()) * 1.02; }
+    // how far the widest view reaches: past the scene on a frame wider than it, to its ends otherwise
+    function edges() {
+      var past = frame.clientWidth && frame.clientHeight ? Math.max(0, Math.ceil((maxW() - SW) / 2)) : 0;
+      return [-past, SW + past];
+    }
+    // the sky, the sea and the pier reach the ends of that view (spread, tiled and gulls in
+    // shipmate.py), and a little more, since the near layer shifts against the ship
+    var drawn = "";
+    function stretch() {
+      var e = edges(), l = e[0] - Math.ceil(SW * 0.1), r = e[1] + Math.ceil(SW * 0.1);
+      if (drawn === l + " " + r) return;
+      drawn = l + " " + r;
+      svg.querySelectorAll("[data-spread]").forEach(function (b) { b.setAttribute("x", l); b.setAttribute("width", r - l); });
+      svg.querySelectorAll("[data-tile]").forEach(function (g) {
+        var step = +g.getAttribute("data-step"), end = Math.ceil((r + (+g.getAttribute("data-move"))) / step), kept = {};
+        g.querySelectorAll("use").forEach(function (u) { kept[u.getAttribute("x")] = true; });
+        for (var k = Math.floor(l / step) - 1; k <= end; k++) {
+          if (!k || kept[k * step]) continue;
+          var u = document.createElementNS(svg.namespaceURI, "use");
+          u.setAttribute("href", "#" + g.getAttribute("data-tile"));
+          u.setAttribute("x", k * step);
+          g.appendChild(u);
+        }
+      });
+      svg.querySelectorAll(".sm-gull").forEach(function (g) {
+        var off = +g.getAttribute("data-off"), east = g.getAttribute("data-east") === "1";
+        g.style.setProperty("--from", (east ? e[0] - off : e[1] + off) + "px");
+        g.style.setProperty("--to", (east ? e[1] + off : e[0] - off) + "px");
+      });
+    }
     function apply() {
       if (!svg || !v || !frame.clientWidth) return;
       v.w = Math.min(Math.max(v.w, MIN_W), maxW());
       v.h = v.w * aspect();
+      stretch();
       v.x = v.w >= SW ? (SW - v.w) / 2 : Math.min(Math.max(v.x, 0), SW - v.w);
       v.y = v.h >= SH ? (SH - v.h) / 2 : Math.min(Math.max(v.y, 0), SH - v.h);
       svg.setAttribute("viewBox", [v.x, v.y, v.w, v.h].map(function (n) { return n.toFixed(2); }).join(" "));
@@ -185,6 +216,7 @@
     function bind() {
       svg = frame.querySelector("svg");
       if (!svg) return;
+      drawn = "";
       SW = +svg.getAttribute("data-w"); SH = +svg.getAttribute("data-h");
       crew = svg.getAttribute("data-crew").split(",").map(Number);
       tags = svg.querySelectorAll(".sm-tag[data-ax]");
@@ -256,7 +288,7 @@
       var c = middle();
       zoomAt(b.getAttribute("data-zoom") === "in" ? 1.4 : 1 / 1.4, c[0], c[1]);
     });
-    return { bind: bind, apply: apply, box: box };
+    return { bind: bind, apply: apply, box: box, edges: edges };
   })();
   window.shipView = ship;
 
@@ -427,6 +459,11 @@
       var start = [g._x, g._y];
       return walk(g, start, legs, f, Math.max(0.6, length(start, legs) / speed));
     }
+    // off the pier at one end of the view, however far that is
+    function goOff(g, x, f, speed) {
+      var start = [g._x, g._y], legs = [[x, start[1], "walk"]];
+      return walk(g, start, legs, f, Math.min(8, Math.max(0.6, length(start, legs) / speed)));
+    }
 
     // -- a hand leaves the ship (kind leave): down the gangplank, with its crate to the pile on the
     // pier when firstmate closed its task as done, empty-handed off the pier when not
@@ -461,7 +498,7 @@
       await go(g, legs, f, 55);
       if (meet) await meet(g);
       if (!ev.delivered) {                                               // nothing to deliver: off the pier, the near end
-        await go(g, [[-16, geo.pier, "walk"]], f, 70);
+        await goOff(g, geo.edge[0] - 16, f, 70);
         g.remove();
         return;
       }
@@ -480,7 +517,7 @@
       if (showCrate) showCrate();
       g.innerHTML = f.wave; g._key = "wave";
       await sleep(700);
-      await go(g, [[geo.edge + 16, geo.pier, "walk"]], f, 100);
+      await goOff(g, geo.edge[1] + 16, f, 100);
       g.remove();
     }
 
@@ -592,7 +629,7 @@
 
     // -- night fell: the lamps are lit one by one, from the stern
     async function playLights(ev, ctx) {
-      var lamps = [].slice.call(ctx.svg.querySelectorAll(".sm-lights > *"));
+      var lamps = [].slice.call(ctx.svg.querySelectorAll(".sm-lights > :not(.sm-beacon)"));
       lamps.sort(function (a, b) { return (+a.getAttribute("cx") || 0) - (+b.getAttribute("cx") || 0); });
       lamps.forEach(function (l) { l.style.visibility = "hidden"; });
       undo.push(function () { lamps.forEach(function (l) { l.style.visibility = ""; }); });
@@ -604,7 +641,7 @@
     async function playArrive(ev, ctx) {
       var f = ev.frames, end = at(ctx.svg.querySelector('.sm-hand[data-id="' + ev.id + '"]')), show = ctx.hidden[ev.id];
       if (!end || !f.stand) { show(); return; }
-      var start = [-16, ctx.geo.pier], g = sprite(f.stand, start[0], start[1], ctx.layer);
+      var start = [ctx.geo.edge[0] - 16, ctx.geo.pier], g = sprite(f.stand, start[0], start[1], ctx.layer);
       var legs = [[end[0], ctx.geo.pier, "walk"], [end[0], end[1], "walk"]];
       await walk(g, start, legs, f, Math.min(7, Math.max(2, length(start, legs) / 40)));
       g.remove();
@@ -629,6 +666,7 @@
       NS = svg.namespaceURI;
       var geo;
       try { geo = JSON.parse(svg.getAttribute("data-geo")); } catch (e) { return; }
+      geo.edge = ship.edges();                         // where the pier leaves the widest view
       var layer = el("g", { "class": "sm-walkers" }, svg.querySelector(".sm-mid"));
       undo.push(function () { layer.remove(); });
       var ctx = { svg: svg, geo: geo, layer: layer, before: before || { at: {} }, hidden: {} }, runs = [];

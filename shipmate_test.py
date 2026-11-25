@@ -1359,25 +1359,28 @@ class TestShip(unittest.TestCase):
         # on the forecastle, the spyglasses ahead of the flags, nearest the lighthouse, which stands past the bow
         self.assertTrue(max(body["B0"], body["B1"]) < min(body["W0"], body["W1"], body["W2"]))
         self.assertTrue(all(lay["fc_x"] < body[k] and body[k] + 19 <= lay["x0"] + lay["length"] for k in body))
-        self.assertGreater(lay["light_x"] - 5, lay["x0"] + lay["length"])
-        self.assertGreaterEqual(lay["crew"][0] + lay["crew"][2], lay["light_x"] + shipmate.LIGHT_W)   # in the opening frame
-        # the queue on the pier and the lamp posts keep clear of it, even where the line would stand
-        with mock.patch.object(shipmate, "LIGHT_GAP", 100 - lay["length"]):
-            near = shipmate.ship_layout(sc)
-        a, b = shipmate.light_span(near)
-        self.assertLess(a, near["x0"] + 92 + shipmate.LINE_STEP)                       # right where the line begins
-        self.assertTrue(all(x >= b for x, _f, _p, _u in near["pier"].values()))         # so the line steps past it
-        for lay_ in (lay, near):
-            a, b = shipmate.light_span(lay_)
-            self.assertFalse([x for x in shipmate.pier_lamp_xs(lay_) if a - shipmate.LAMP_CLEAR <= x <= b + shipmate.LAMP_CLEAR])
+        rock = (lay["light_x"] - shipmate.ROCK_W // 2, lay["light_x"] + shipmate.ROCK_W // 2)
+        self.assertGreater(rock[0], lay["x0"] + lay["length"])
+        self.assertLess(rock[1], lay["dock_x"])                                        # the moored skiffs keep clear of the rock
+        self.assertGreaterEqual(lay["crew"][0] + lay["crew"][2], lay["light_x"] + shipmate.LIGHT_W // 2)   # in the opening frame
+        self.assertFalse([x for x in shipmate.pier_lamp_xs(lay) if rock[0] - shipmate.LAMP_CLEAR <= x <= rock[1] + shipmate.LAMP_CLEAR])
         svg = shipmate.render_ship(sc)
-        self.assertIn('<g class="sm-beacon is-running"><title>the lighthouse: the checks are running for W0, W1, W2</title>', svg)
+        self.assertIn('<g class="sm-lighthouse"><title>the lighthouse: the checks are running for W0, W1, W2</title>', svg)
         self.assertIn("LIGHTHOUSE · CI", svg)
         self.assertIn("BOW · PR open and CI", svg)
         self.assertRegex(shipmate.stage_chips(sc), r'data-stage="watch"[^>]*>.*?<span>waiting for CI</span><b>3</b>')
         self.assertIn("W0 · demo-app · at the bow with a spyglass on the lighthouse: the checks are running", svg)
         idle = shipmate.render_ship(shipmate.ship_scene(self.snap(signal)))
-        self.assertIn('<g class="sm-beacon is-idle"><title>the lighthouse: nobody is waiting for CI</title>', idle)
+        self.assertIn('<g class="sm-lighthouse"><title>the lighthouse: nobody is waiting for CI</title>', idle)
+        # the lamp is on the lights layer, over the night's tint, above the eyes at the bow and against the sky
+        for drawn, state in ((svg, "is-running"), (idle, "is-idle")):
+            self.assertEqual(drawn.count("sm-beacon "), 1)
+            self.assertIn('<g class="sm-beacon %s">' % state, drawn.split('<g class="sm-lights">')[1].split('<g class="sm-tags">')[0])
+        y, h = map(int, re.search(r'sm-beacon__lamp" x="\d+" y="(\d+)" width="\d+" height="(\d+)"', svg).groups())
+        self.assertLess(y + h, min(shipmate.HOR, min(lay["hands"]["W%d" % i][1] for i in range(3)) - 21))
+        # the tower stands behind the pier, and dark glass shows when no lamp is lit
+        self.assertLess(svg.index('class="sm-lighthouse"'), svg.index('id="sm-tile-pier"'))
+        self.assertIn(".sm-beacon__lamp { fill: none; }", shipmate.asset("shipmate.css"))
         # the gangplank stays out with nobody on it: the way ashore with the crate, and aboard from the queue
         self.assertIn('<g class="sm-plank">', idle)
         self.assertNotIn("pose-pack", svg + idle)
@@ -1762,6 +1765,29 @@ class TestShip(unittest.TestCase):
             span = int(re.search(r"--span:-(\d+)px", c).group(1))
             self.assertEqual(span, 998 + shipmate.CLOUD_SPAN)
             self.assertIn("--px:%d;" % span, c)                                       # one art pixel a step
+
+    def test_the_scenery_and_the_pier_reach_the_edges_of_any_view(self):
+        noon = time.mktime((2026, 11, 13, 12, 0, 0, 0, 0, -1))
+        for now in (noon, noon + 10 * 3600):
+            sc = self.tavern_scene(now)
+            drawn, w = shipmate.render_ship(sc), shipmate.ship_layout(sc)["width"]
+            tiles = re.findall(r'<g data-tile="([^"]+)" data-step="(\d+)" data-move="(\d+)">', drawn)
+            names = [n for n, _s, _m in tiles]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertTrue({"sm-tile-pier", "sm-tile-hills", "sm-tile-caps", "sm-tile-clouds0", "sm-tile-swell"} <= set(names))
+            for name, step, move in tiles:
+                self.assertEqual(drawn.count('id="%s"' % name), 1)
+                at = sorted([0] + [int(x) for x in re.findall(r'<use href="#%s" x="(-?\d+)"/>' % name, drawn)])
+                self.assertEqual(at, list(range(at[0], at[-1] + 1, int(step))))        # no gap and no copy twice
+                self.assertTrue(at[0] < 0 and at[-1] + int(step) >= w + int(move), name)
+            spread = re.findall(r'<rect [^>]*data-spread=""[^>]*/>', drawn)
+            self.assertEqual(len(spread), 2 + 6 + 6 + 14 + (now != noon))               # behind all, sky, sea, pier, the night's tint
+        # the page stretches them to the view, and hands walk on and off the pier at its edges
+        page = shipmate.asset("shipmate.html")
+        for part in ('querySelectorAll("[data-spread]")', 'querySelectorAll("[data-tile]")', "geo.edge = ship.edges()",
+                     "goOff(g, geo.edge[0] - 16", "goOff(g, geo.edge[1] + 16", "start = [ctx.geo.edge[0] - 16"):
+            self.assertIn(part, page)
+        self.assertIn('.sm-lights > :not(.sm-beacon)', page)                            # nightfall never hides the CI lamp
 
     def test_the_pier_gives_every_queued_hand_its_own_spot(self):
         today = dt.date.fromtimestamp(T0).isoformat()
@@ -2219,7 +2245,7 @@ class TestMotion(unittest.TestCase):
         self.assertIn('class="sm-bucket" data-for="DEMO-LOGS"', drawn)
         self.assertNotIn('class="sm-bucket" data-for="DEMO-FORMS"', drawn)              # it watches the lighthouse
         self.assertRegex(drawn, r'data-for="DEMO-ICONS">.*?class="sm-bucket__fish" data-n="4"')
-        self.assertIn('<g class="sm-beacon is-running"><title>the lighthouse: the checks are running for DEMO-FORMS</title>', drawn)
+        self.assertIn('<g class="sm-lighthouse"><title>the lighthouse: the checks are running for DEMO-FORMS</title>', drawn)
         self.assertRegex(drawn, r'<g class="sm-plank">')
         self.assertNotIn('visibility="hidden" class="sm-plank"', drawn)
         self.assertIn('class="sm-pump__down" visibility="hidden"', drawn)
@@ -2231,7 +2257,7 @@ class TestMotion(unittest.TestCase):
         self.assertEqual(printed, json.loads(json.dumps(shipmate.ship_print(b))))
         geo = json.loads(html.unescape(re.search(r'data-geo="([^"]*)"', drawn).group(1)))
         self.assertEqual(set(geo), {"ladder", "walk", "deck_x", "nest", "door", "floor", "fc", "plank", "pier", "stern", "wl",
-                                    "rod", "reel", "hold", "pump", "crates", "dock", "bell", "edge"})
+                                    "rod", "reel", "hold", "pump", "crates", "dock", "bell"})
         # the delivered crates are drawn one by one, so the page can hold back the one on its way
         for cid in ("DEMO-AUTH", "DEMO-I18N"):
             self.assertRegex(drawn, r'<g class="sm-crate" data-for="%s" data-at="\d+,\d+">' % cid)

@@ -330,10 +330,10 @@ button.sm-chip:focus-visible { outline: 2px solid var(--text-strong); outline-of
 .motion-all .pace-slow > .sm-alt { animation: sm-frame-b-slow 2.7s steps(1) infinite; }
 .motion-all .pose-signal > g:first-of-type { animation: sm-signal 1.4s steps(2) infinite; }
 .motion-all .pose-rest > g:first-of-type { animation: sm-breathe 3s steps(2) infinite; }
-/* the lighthouse shows CI (shipmate.py, lighthouse): dark glass when nobody waits for it, yellow
+/* the lighthouse shows CI (shipmate.py, lighthouse): the tower's dark glass when nobody waits for it, yellow
    while someone does (blinking between bright and amber only with all motion, so it never looks
    dark), and green or red for a few seconds when an answer comes (the page script, playBeacon) */
-.sm-beacon__lamp { fill: #3b4248; }
+.sm-beacon__lamp { fill: none; }
 .sm-beacon__halo { fill: none; }
 .sm-beacon.is-running .sm-beacon__lamp { fill: #f6c33a; }
 .sm-beacon.is-running .sm-beacon__halo { fill: #f6c33a; opacity: 0.3; }

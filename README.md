@@ -216,7 +216,7 @@ Each element stands for one thing:
 | A hand on deck with a hammer, a mop or a broom | an agent implementing; the tools take turns by when each hand reached the deck (see [Work on deck](#work-on-deck)) |
 | A hand at the bow with signal flags | an agent with a PR open |
 | A hand at the bow with a spyglass on the lighthouse | an agent waiting for CI; these stand ahead of the signal flags, nearest the lighthouse |
-| The lighthouse on the pier's edge, ahead of the bow | CI: its lamp blinks yellow while any hand waits for CI, and is dark when none does; it flashes green or red for about four seconds when a hand's checks come back (see [Motion](#motion)) |
+| The lighthouse on a rock in the sea, ahead of the bow | CI: its lamp blinks yellow while any hand waits for CI, and is dark when none does; it flashes green or red for about four seconds when a hand's checks come back (see [Motion](#motion)) |
 | A hand fishing at the rail | an agent waiting for the merge: every check on its PR passed and it reported `done` |
 | A bucket beside a hand at the rail | how long it has waited for the merge: one fish when it got there and one more each hour, up to four; its title gives the exact wait |
 | The gangplank, from the stern down to the pier | the way ashore and aboard, always out: a merged hand goes down it with its crate, and a queued task comes up it when firstmate dispatches it. Nobody waits on it |
@@ -236,7 +236,7 @@ Each element stands for one thing:
 | The pump on the orlop | it works when firstmate's context is compacted, and the water goes down (see [Motion](#motion)) |
 | Hammocks in the quarters, cut open in the hull forward of the hold | queued tasks held until a date, one asleep in each hammock under a blanket in its project's colour, the date over it (see below) |
 | Hands on the pier | the rest of the queue, one hand per queued task in its project's colour, doing what says why it waits (see below) |
-| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, and on the pier the lighthouse, the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away at every zoom, and the browser remembers it |
+| Signs painted on the ship | what each place means (lookout, deck, bow, rail, gangplank, hold, quarters, helm, cabin, on its rock the lighthouse, and on the pier the slot each tavern waits for, ready, waiting for a task); the "signs" button puts them away at every zoom, and the browser remembers it |
 | Crates on the pier | tasks firstmate closed as done in the last 7 days: the backlog's `closed` date, read with the rest of the backlog (`bin/fm-tasks-axi.sh list`), so a task pruned from the backlog leaves the pile. The session sheets are written later and in batches, so they feed only the usage block |
 | The bell on the mizzen mast | it rings when a task is delivered (see [Motion](#motion)) |
 | Day or night | the local hour: the lamps are lit from 18:00 to 06:00 (on the ship, along the pier and in the tavern's windows); the sky darkens in six steps, one every ten minutes, from 17:30 to 18:30, and lightens the same way from 05:30 to 06:30 |
@@ -255,6 +255,7 @@ Names show from a readable zoom up, never overlap, and come back on hover or foc
 Clicking a hand, on board, in the cabin, in a hammock or on the pier, opens the same drawer as its card.
 The chips above the scene name each stage, say where its hands stand and who is in it now, and count them; clicking one lights those hands, fades the rest and takes the view to them, and clicking it again lets go.
 The log below the scene is the captain's line as cards, longest wait first, with why each one waits and for how long; pointing at a card lights its hand (or the crowd at the cabin door it is in), and clicking it opens its drawer.
+The sky, the sea and the pier reach both edges of the view, however wide the window, and whoever walks on or off the pier does it at those edges.
 The sky, the ship and the near layer move at different speeds as you pan; the ship bobs, red flags blink, the tools on deck and the flags move, and lamps flicker, all only while the motion switch says "all" (see below).
 
 ### Scenery
@@ -268,7 +269,7 @@ Around the ship the harbour lives on its own, and none of it stands for anything
 | Little waves | they rise, roll a pixel or two and sink, in three sets a beat apart |
 | Foam at the hull, the hull's reflection, the glitter under the sun or the moon | two frames that take turns |
 | Stars | at night a few brighter ones dip now and then, on two beats |
-| Lamp posts along the pier | dark by day; at night lit, with a pool of light on the planks and their reflection in the water between the piles. They keep clear of the tavern (it has its own lantern), the foot of the gangplank, the lighthouse, and the moored skiffs and crates |
+| Lamp posts along the pier | dark by day; at night lit, with a pool of light on the planks and their reflection in the water between the piles. They keep clear of the tavern (it has its own lantern), the foot of the gangplank, the lighthouse's rock, and the moored skiffs and crates |
 
 All of it moves only while the motion switch says "all", stands with "changes only" or "off" (the gulls are then gone and the clouds stand), and stops where it is in a hidden tab.
 A loop longer than the page's refresh (a cloud's crossing, a gull's round) starts where the local clock says, so a new drawing goes on where the last one was instead of starting it over.

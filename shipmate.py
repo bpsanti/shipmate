@@ -3830,8 +3830,12 @@ HATCH_STEP = 39
 RAIL_STEP = 48        # a hand fishing and its bucket of up to four fish
 BOW_STEP = 69
 WATCH_STEP = 36       # between hands at the bow with a spyglass on the lighthouse
-LIGHT_GAP = 26        # from the bow to the lighthouse's tower, on the pier's edge ahead of the ship
-LIGHT_W = 30          # the lighthouse's stone head on the pier
+LIGHT_OUT = 78        # from the stem to the middle of the lighthouse, on its rock in the sea ahead of the bow
+LIGHT_TALL = 168      # the lighthouse's tower, from the rock to the gallery
+LIGHT_W = 30          # the tower's foot
+LIGHT_BASE = 266      # the row the tower stands on, the top of the rock
+ROCK_W = 112          # the rock at the waterline, its foam included; its foot is behind the pier
+LIGHT_CLEAR = 146     # from the stem to the moored skiffs and the scouts, past the rock
 NEST_STEP = 33        # between lookouts in the crow's nest, and those that stand below it
 SCOUT_STEP = 45       # between scouts' skiffs
 NEST_UPTO, SKIFF_UPTO = 14, 15                    # rows of a hand shown above the nest's rim or a skiff's side
@@ -3888,13 +3892,6 @@ def tavern_units(sc):
     return out
 
 
-def light_span(lay):
-    """The stretch of pier the lighthouse and its sign take, ahead of the bow."""
-    w = max(LIGHT_W, sign_w(tr("LIGHTHOUSE · CI")))
-    mid = lay["light_x"] + LIGHT_W // 2 - 5
-    return mid - w // 2 - 4, mid + w // 2 + 4
-
-
 def pier_layout(sc, lay, x0):
     """Where the queue stands on the pier. The tavern is anchored first, at the foot of the
     gangplank on its right, and grows to the right; then, toward the bow, the talkers, each under
@@ -3945,7 +3942,6 @@ def pier_layout(sc, lay, x0):
             spot = lay["hands"].get(q["partner"]) or lay["scouts"].get(q["partner"])
             groups.append({"act": "talk", "who": [q], "pref": (spot[0] - 2) if spot else x0 + 92, "sign": None, "w": TALK_W})
     taken, end = ([(x0 + TAVERN_FROM, tavern_end + 8)] if lay["tavern"] else []), max(x0 + 92, tavern_end)
-    taken.append(light_span(lay))
     order = {"talk": 0, "board": 1, "wait": 2}
     for g in sorted(groups, key=lambda g: (order[g["act"]], g["pref"])):
         gx = max(g["pref"], x0 + 92)
@@ -4076,13 +4072,13 @@ def ship_layout(sc):
     for i, h in enumerate(by["watch"]):                 # ahead of the signallers, nearest the lighthouse
         put[h["id"]] = (fc_x + 8 + BOW_STEP * n["bow"] + WATCH_STEP * i + pose_left("signal"), 166 + 3 * ((n["bow"] + i) % 2), "spy", None)
     out["plank"] = ((x0 + 86, NEAR + 2), (x0 + 30, PIER + 4))
-    out["light_x"] = x0 + length + LIGHT_GAP
+    out["light_x"] = x0 + length + LIGHT_OUT
     out["seated"], out["crowd"] = cabin_line(sc["line"], put, x0 + CABIN_X)
     for h in sc["hands"]:
         if h["off"] and h["id"] in put:
             x, feet, _pose, upto = put[h["id"]]
             put[h["id"]] = (x, feet, "rest", upto)
-    right = x0 + length + 70
+    right = x0 + length + LIGHT_CLEAR
     sb = {k: [h for h in sc["scouts"] if h["place"] == k and not h["line"]] for k in SCOUT_PLACES}
     out["scouts"] = {}
     for i, h in enumerate(sb["out"]):
@@ -4101,7 +4097,7 @@ def ship_layout(sc):
     # the opening frame also takes in the captain's cabin
     # and the queue on the pier below it; the tavern grows to the right of it
     every = list(put.values()) + list(out["pier"].values())
-    xs = ([x0 + CABIN_X - 10, fc_x + fc_len, out["light_x"] + LIGHT_W] + [x for x, _f, _p, _u in every if x >= x0]
+    xs = ([x0 + CABIN_X - 10, fc_x + fc_len, out["light_x"] + LIGHT_W // 2] + [x for x, _f, _p, _u in every if x >= x0]
           + [x + len(POSES[p][0]) for x, _f, p, _u in every if x >= x0])
     ys = [FAR - 50, NEAR + 20] + [f - len(POSES[p][:u]) - 12 for _x, f, p, u in every] + [f + 8 for _x, f, _p, _u in every]
     out["crew"] = (min(xs) - 12, min(ys) - 8, max(xs) - min(xs) + 24, max(ys) - min(ys) + 16)
@@ -4797,6 +4793,25 @@ DAY_SKY = ["#6fb3e0", "#78b9e4", "#83c0e8", "#8fc8ec", "#9dd0ee", "#b3dcf2"]
 NIGHT_SKY = ["#0d1631", "#111c3b", "#152244", "#1a294d", "#203157", "#283a60"]
 
 
+TILE = 640      # scenery that repeats is drawn once this wide: every step and period below divides it
+
+
+def spread(x0, y0, w, y1, c, attrs=""):
+    """A band that reaches both ends of the view, however wide: the page stretches it (stretch)."""
+    return band(x0, y0, w, y1, c, ' data-spread=""' + attrs)
+
+
+def tiled(name, body, w, step=TILE, move=0):
+    """Scenery that repeats every `step` pixels to both ends of the view. The drawing is written once
+    and copied over the scene (and as far as `move` takes it); the page adds the copies a wider view
+    needs (stretch)."""
+    out = ['<g id="sm-tile-%s">%s</g>' % (name, body)]
+    for k in range(-1, -(-(w + move) // step) + 1):
+        if k:
+            out.append('<use href="#sm-tile-%s" x="%d"/>' % (name, k * step))
+    return '<g data-tile="sm-tile-%s" data-step="%d" data-move="%d">%s</g>' % (name, step, move, "".join(out))
+
+
 def sky_and_sea(w, dusk, night, sea, rnd, now):
     """The sky, the hills and the sea behind the ship, `dusk` of the way from day (0) to night (1);
     the stars and the moon come out with the night (is_night), and the gulls fly only by day."""
@@ -4804,11 +4819,11 @@ def sky_and_sea(w, dusk, night, sea, rnd, now):
         return mix(day, nite, dusk)
     far, mid = [], []
     for i, (d, n) in enumerate(zip(DAY_SKY, NIGHT_SKY)):
-        far.append(band(-300, HOR * i // 6, w + 600, HOR * (i + 1) // 6, tint(d, n)))
-    deco = Pix()
+        far.append(spread(-300, HOR * i // 6, w + 600, HOR * (i + 1) // 6, tint(d, n)))
+    deco, stars = Pix(), Pix()
     if night:
-        for _ in range(w // 6):
-            deco.dot(rnd.randrange(-200, w + 200), rnd.randrange(2, HOR - 18), "#fff8d8" if rnd.random() < 0.3 else "#aab6d8")
+        for _ in range(TILE // 7):
+            stars.dot(rnd.randrange(TILE), rnd.randrange(2, HOR - 18), "#fff8d8" if rnd.random() < 0.3 else "#aab6d8")
         for y in range(-7, 8):
             for x in range(-7, 8):
                 if x * x + y * y <= 49 and (x - 3) ** 2 + (y + 2) ** 2 > 30:
@@ -4820,29 +4835,30 @@ def sky_and_sea(w, dusk, night, sea, rnd, now):
                     deco.dot(w - 90 + x, 22 + y, tint("#fff1b8", "#f2a35a") if x * x + y * y < 40 else tint("#ffe58a", "#d9783a"))
     hills = Pix()
     hc = [tint(d, n) for d, n in zip(("#8fb7c9", "#9ec2d2", "#7aa6bb"), ("#2a3b5c", "#304466", "#22314f"))]
-    for x in range(-300, w + 300):
-        hgt = int(9 + 8 * abs(((x * 7) % 130) - 65) / 65.0 + 4 * ((x // 37) % 2))
-        hills.rect(x, HOR - hgt, 1, hgt, hc[0] if x % 210 < 130 else hc[1])
+    for x in range(TILE):
+        hgt = int(9 + 8 * abs(((x * 7) % 128) - 64) / 64.0 + 4 * ((x // 32) % 2))
+        hills.rect(x, HOR - hgt, 1, hgt, hc[0] if x % 320 < 200 else hc[1])
         hgt = int(4 + 4 * abs(((x * 5 + 40) % 100) - 50) / 50.0)
         hills.rect(x, HOR - hgt, 1, hgt, hc[2])
-    far += [deco.svg()] + (twinkling_stars(w) if night else []) + sky_clouds(w, dusk, now) + [hills.svg()]
+    far += ([tiled("stars", stars.svg(), w)] if night else []) + [deco.svg()] + (twinkling_stars(w) if night else [])
+    far += sky_clouds(w, dusk, now) + [tiled("hills", hills.svg(), w)]
     if not night:
         far += gulls(w, now)
     near_c, far_c = tint("#2c6f9f", "#0c2440"), tint("#5aa6cf", "#1d3d64")
     for i in range(6):
-        mid.append(band(-300, HOR + (SHIP_H - HOR) * i // 6, w + 600, HOR + (SHIP_H - HOR) * (i + 1) // 6,
+        mid.append(spread(-300, HOR + (SHIP_H - HOR) * i // 6, w + 600, HOR + (SHIP_H - HOR) * (i + 1) // 6,
                         mix(far_c, near_c, i / 5.0)))
     caps = Pix()
-    count = {"calm": w // 5, "choppy": w // 3, "rough": w // 2}[sea]
+    count = TILE // {"calm": 6, "choppy": 4, "rough": 2}[sea]
     for _ in range(count):
         y = rnd.randrange(HOR + 2, SHIP_H)
         t = (y - HOR) / float(SHIP_H - HOR)
-        x = rnd.randrange(-100, w + 100)
+        x = rnd.randrange(TILE)
         size = 2 + int((4 if sea == "rough" else 3) * t)
         caps.rect(x, y, size, 1, tint(mix("#cfe8f5", "#9bc9e4", t), mix("#5a7aa8", "#3a5a88", t)))
         if t > 0.5 and sea != "calm":
             caps.rect(x + 1, y - 1, max(1, size - 2), 1, tint("#f6fbfd", "#8aa6cc"))
-    mid.append('<g class="sm-waves">%s</g>' % caps.svg())
+    mid.append('<g class="sm-waves">%s</g>' % tiled("caps", caps.svg(), w))
     mid += ripples(w, sea, dusk) + [glitter(w, night)]
     return far, mid
 
@@ -4863,8 +4879,8 @@ def clock_phase(now, period):
 
 def sky_clouds(w, dusk, now):
     """Two layers of clouds that cross the whole sky a pixel at a time and wrap around: the far
-    layer small and slow, the near one larger and quicker. Each is drawn twice, one sky's width
-    apart, so the loop never shows a seam."""
+    layer small and slow, the near one larger and quicker. Each is copied every sky's width, so the
+    loop never shows a seam."""
     span = w + CLOUD_SPAN
     out = []
     for k, (n, size, y0, y1, slow) in enumerate(CLOUD_LAYERS):
@@ -4874,13 +4890,12 @@ def sky_clouds(w, dusk, now):
         p = Pix()
         for i in range(n):
             cx, cy = -CLOUD_SPAN // 2 + int(span * (i + rnd.random() * 0.6) / n), rnd.randrange(y0, y1)
-            for off in (0, span):
-                for dx, dy, ww in ((6 * size, 0, 14 * size), (0, 4, 30 * size), (3 * size, 8, 26 * size)):
-                    p.rect(cx + off + dx, cy + dy, ww, 4, body)
-                p.rect(cx + off + 3 * size, cy + 12, 26 * size, 1, edge)
+            for dx, dy, ww in ((6 * size, 0, 14 * size), (0, 4, 30 * size), (3 * size, 8, 26 * size)):
+                p.rect(cx + dx, cy + dy, ww, 4, body)
+            p.rect(cx + 3 * size, cy + 12, 26 * size, 1, edge)
         period = int(span * slow)
-        out.append(p.svg(' class="sm-cloud" style="--round:%ds;--px:%d;--span:-%dpx;--late:%s"'
-                         % (period, span, span, clock_phase(now, period))))
+        out.append('<g class="sm-cloud" style="--round:%ds;--px:%d;--span:-%dpx;--late:%s">%s</g>'
+                   % (period, span, span, clock_phase(now, period), tiled("clouds%d" % k, p.svg(), w, span, span)))
     return out
 
 
@@ -4907,7 +4922,7 @@ GULL_UP = ["kw.........wk", ".ww.......ww.", "..owwwwwwwg..", "....ggggg....", "
 GULL_DOWN = [".............", ".............", "..owwwwwwwg..", ".ww.ggggg.ww.", "kw.........wk"]
 GULL_INK = {"w": "#f7f7f2", "g": "#b9c0c8", "k": "#2a2a30", "o": "#e8a33a"}
 GULLS = ((60, 46, False), (97, 74, True))    # seconds per round, the row it flies along, whether it flies east
-GULL_OFF = 60                                # it starts and ends this far out of the scene
+GULL_OFF = 60                                # it starts and ends this far out of the view (the page widens it: stretch)
 
 
 def gulls(w, now):
@@ -4921,8 +4936,8 @@ def gulls(w, now):
             p.sprite(0, y, [r[::-1] for r in rows] if east else rows, GULL_INK)
             frames.append(p.svg(' class="sm-wing-%s"' % "ab"[k]))
         a, b = (-GULL_OFF, w + GULL_OFF) if east else (w + GULL_OFF, -GULL_OFF)
-        out.append('<g class="sm-gull" style="--round:%ds;--from:%dpx;--to:%dpx;--late:%s">%s</g>'
-                   % (period, a, b, clock_phase(now, period), "".join(frames)))
+        out.append('<g class="sm-gull" data-east="%d" data-off="%d" style="--round:%ds;--from:%dpx;--to:%dpx;--late:%s">%s</g>'
+                   % (east, GULL_OFF, period, a, b, clock_phase(now, period), "".join(frames)))
     return out
 
 
@@ -4934,17 +4949,17 @@ def ripples(w, sea, dusk):
     the sea already says (sea_state)."""
     rnd = random.Random(7)
     sets = [Pix(), Pix(), Pix()]
-    for i in range(w // RIPPLES[sea]):
+    for i in range(TILE // RIPPLES[sea]):
         y = rnd.randrange(HOR + 4, SHIP_H - 2)
         t = (y - HOR) / float(SHIP_H - HOR)
-        x = rnd.randrange(-120, w + 120)
+        x = rnd.randrange(TILE)
         c = mix(mix("#e6f3fa", "#b9dcef", t), mix("#6a8ab6", "#4a6a98", t), dusk)
         big = 1 if t > 0.45 else 0
         p = sets[i % 3]
         p.rect(x + 1, y, 2 + big, 1, c)                 # a crest ...
         p.dot(x, y + 1, c)                              # ... and its curl
         p.dot(x + 3 + big, y + 1, c)
-    return [s.svg(' class="sm-ripple sm-ripple%d"' % k) for k, s in enumerate(sets)]
+    return ['<g class="sm-ripple sm-ripple%d">%s</g>' % (k, tiled("ripple%d" % k, s.svg(), w)) for k, s in enumerate(sets)]
 
 
 def two_frames(a, b, beat):
@@ -5198,8 +5213,7 @@ def paint_signs(sc, lay, tags):
     hx0, hx1 = lay["hold"]
     sign(tags, tr("HOLD · quota barrels, context water"), (hx0 + hx1) // 2, NEAR + 16)
     sign(tags, tr("GANGPLANK · ashore and aboard"), x0 + 48, PIER + 4)
-    a, b = light_span(lay)
-    sign(tags, tr("LIGHTHOUSE · CI"), (a + b) // 2, PIER + 11)
+    sign(tags, tr("LIGHTHOUSE · CI"), lay["light_x"], LIGHT_BASE + 9)      # on the rock, over the heads on the pier
     for text, cx, cls in lay["pier_signs"]:
         sign(tags, text, cx, PIER + 11, cls)
     if lay["scouts"]:
@@ -5250,13 +5264,12 @@ LAMP_CLEAR = 8       # a lamp post keeps this far from the tavern and the other 
 
 def pier_lamp_xs(lay):
     """Where the lamp posts stand along the pier: every LAMP_STEP, but not in the tavern (it has
-    its own lantern), at the foot of the gangplank, by the lighthouse, by the moored skiffs and the
+    its own lantern), at the foot of the gangplank, before the lighthouse's rock, by the moored skiffs and the
     crates, or behind the near layer's lamp at the scene's edge."""
     x0, W = lay["x0"], lay["width"]
     busy = [(a - LAMP_CLEAR, b + LAMP_CLEAR) for a, b, _u in lay["rooms"]]
     busy += [(x0 + 10, x0 + 100), (lay["dock_x"] - LAMP_CLEAR, W)]
-    a, b = light_span(lay)
-    busy.append((a - LAMP_CLEAR, b + LAMP_CLEAR))
+    busy.append((lay["light_x"] - ROCK_W // 2 - LAMP_CLEAR, lay["light_x"] + ROCK_W // 2 + LAMP_CLEAR))
     return [x for x in range(46, W - 40, LAMP_STEP) if not any(a <= x <= b for a, b in busy)]
 
 
@@ -5613,22 +5626,21 @@ def render_ship(sc):
         elif h["place"] == "dock":
             ashore.append(hand_svg(h, (x + 3, wl - 3, pose, upto), tags, shadow_on=False) + boat_pix(x, wl).svg())
             stuff.shaded(x + 4, PIER + 2, MAP, {})
-    pier = Pix()
+    ashore.append(lighthouse(sc, lay, lights))               # in the sea behind the pier
     for y in range(PIER, PIER + 12):
-        pier.rect(0, y, W, 1, mix("#c08a55", "#a06c3a", (y - PIER) / 11.0) if (y - PIER) % 4 else "#8a5530")
-    for x in range(0, W, 34):
+        ashore.append(spread(-300, y, W + 600, y + 1, mix("#c08a55", "#a06c3a", (y - PIER) / 11.0) if (y - PIER) % 4 else "#8a5530"))
+    ashore.append(spread(-300, PIER + 12, W + 600, PIER + 13, "#9a6233"))
+    ashore.append(spread(-300, PIER + 13, W + 600, PIER + 17, "#6b3a1c"))
+    pier = Pix()                                             # what repeats along it: planks, piles and bollards
+    for x in range(0, TILE, 32):
         pier.rect(x, PIER, 1, 12, "#8a5530")
-    pier.rect(0, PIER + 12, W, 5, "#6b3a1c")
-    pier.rect(0, PIER + 12, W, 1, "#9a6233")
-    for x in range(6, W, 30):
-        pier.rect(x, PIER + 17, 5, SHIP_H - PIER - 17, "#4f2c14")
-        pier.rect(x, PIER + 17, 1, SHIP_H - PIER - 17, "#6b3a1c")
-    for x in range(40, W, 64):
+        pier.rect(x + 6, PIER + 17, 5, SHIP_H - PIER - 17, "#4f2c14")
+        pier.rect(x + 6, PIER + 17, 1, SHIP_H - PIER - 17, "#6b3a1c")
+    for x in range(40, TILE, 64):
         pier.shaded(x, PIER - 4, ["OOO", "OoO", "OoO"], {"O": "#2a1a10", "o": "#4a3020"})
-    ashore.append(pier.svg())
+    ashore.append(tiled("pier", pier.svg(), W))
     ashore.append(draw_pier_lamps(lay, mid, lights, night))
     ashore.append(draw_pier(sc, lay, tags, lights, night))
-    ashore.append(lighthouse(sc, lay))
     # the newest MAX_CRATES crates, each its own drawing so the page can hold one back while its
     # hand carries it there (ship_events)
     crates = []
@@ -5652,32 +5664,29 @@ def render_ship(sc):
     ship.append(bell.svg(' class="sm-bell"'))
     (px0, py0), (px1, py1) = lay["plank"]
     ashore.append(shadow(px1 + 10, py1, 24, 3, 0.25) + plank_svg(lay["plank"]))
-    # the near layer: out of focus, dark and chunky, at the edges so it hides nobody
+    # the near layer: out of focus, dark and chunky, past the crates so it hides nobody
     fg = Pix()
-    fg.rect(4, PIER + 13, 18, SHIP_H - PIER - 13, "#1c120a")      # below the pier's surface: the queue stands on it
-    fg.rect(4, PIER + 13, 18, 3, "#2a1a10")
-    for k in range(3):
-        fg.rect(0, PIER + 18 + 6 * k, 28, 3, "#3a2414")
     fg.rect(W - 18, 214, 6, 126, "#1c120a")
     fg.rect(W - 26, 204, 22, 4, "#1c120a")
     fg.rect(W - 24, 208, 18, 14, "#24170d")
     fg.rect(W - 22, 210, 14, 10, "#f2c35a")
     fg.rect(W - 20, 211, 6, 4, "#fff0b0")
-    for _ in range(W // 16):
-        x = rnd.randrange(-40, W + 40)
-        fg.rect(x, SHIP_H - 3, 14, 3, mix("#24577d", "#0a1c33", dusk))
-        fg.rect(x + 2, SHIP_H - 5, 10, 2, mix("#2c6690", "#0f2846", dusk))
-    near.append(fg.svg())
+    swell = Pix()
+    for _ in range(TILE // 17):
+        x = rnd.randrange(TILE)
+        swell.rect(x, SHIP_H - 3, 14, 3, mix("#24577d", "#0a1c33", dusk))
+        swell.rect(x + 2, SHIP_H - 5, 10, 2, mix("#2c6690", "#0f2846", dusk))
+    near += [fg.svg(), tiled("swell", swell.svg(), W)]
     lights.append('<circle class="sm-glow" cx="%d" cy="215" r="%d" fill="#fff0b0" opacity="%s"/>'
                   % (W - 15, 30 if night else 20, "0.3" if night else "0.18"))
     # the night's tint, the near layer and the lights lie over the hands: they take no clicks (see the stylesheet)
-    shade = band(-300, -300, W + 600, SHIP_H + 300, "#081633", ' class="sm-shade" opacity="%.3f"' % (0.38 * dusk)) if dusk else ""
+    shade = spread(-300, -300, W + 600, SHIP_H + 300, "#081633", ' class="sm-shade" opacity="%.3f"' % (0.38 * dusk)) if dusk else ""
     # where the page's script walks a hand and works the pump (see ship_events)
     geo = {"ladder": [[main_x - 38, FAR], [main_x - 8, 46]], "walk": DECK_WALK, "deck_x": deck_x, "nest": nx,
            "door": lay["cabin"][1] - 8, "floor": CABIN_FLOOR - 2, "fc": [fc_x, BOW_WALK], "plank": [[px0, py0], [px1, py1]],
            "pier": PIER_FEET, "stern": x0, "wl": WL, "rod": list(ROD_TIP), "reel": list(REEL_TIP),
            "hold": [hx0, hx1, hy1, room, thr], "pump": [pump_x, hy0],
-           "crates": lay["crates_x"], "dock": lay["dock_x"], "bell": [x0 + 66, 127], "edge": W}
+           "crates": lay["crates_x"], "dock": lay["dock_x"], "bell": [x0 + 66, 127]}
     args = ((sc["sea"], " is-night" if night else "", W, SHIP_H, esc(tr("The ship: %s") % ship_counts(sc)), W, SHIP_H)
             + tuple(lay["crew"])
             + (esc(json.dumps(ship_print(sc), separators=(",", ":"))), esc(json.dumps(geo, separators=(",", ":"))))
@@ -5686,8 +5695,8 @@ def render_ship(sc):
     return ('<svg class="sm-ship__svg sea-%s%s" viewBox="0 0 %d %d" preserveAspectRatio="xMidYMid meet" '
             'shape-rendering="crispEdges" role="group" aria-label="%s" data-w="%d" data-h="%d" data-crew="%d,%d,%d,%d" '
             'data-print="%s" data-geo="%s">'
-            '<rect x="-3000" y="-3000" width="7000" height="7000" fill="%s"/>'
-            '<rect x="-3000" y="-3000" width="7000" height="3010" fill="%s"/>'
+            '<rect data-spread="" x="-3000" y="-3000" width="7000" height="7000" fill="%s"/>'
+            '<rect data-spread="" x="-3000" y="-3000" width="7000" height="3010" fill="%s"/>'
             '<g class="sm-far">%s</g><g class="sm-mid">%s<g class="sm-bob">%s</g>%s</g>%s'
             '<g class="sm-near">%s</g><g class="sm-lights">%s</g><g class="sm-tags">%s</g></svg>' % args)
 
@@ -5709,47 +5718,53 @@ def plank_svg(plank):
     return p.svg(' class="sm-plank"')
 
 
-LIGHT_TALL = 104      # the lighthouse's tower, from the stone head to the gallery
-
-
-def lighthouse(sc, lay):
-    """The lighthouse ahead of the bow, on a stone head at the pier's edge. Its lamp says how CI
-    goes for the hands at the bow with a spyglass on it: it blinks yellow while any of them waits,
-    and is dark when none does; the page flashes it green or red as an answer comes (ship_events)."""
-    x, base = lay["light_x"], PIER
-    top = base - 4 - LIGHT_TALL
+def lighthouse(sc, lay, lights):
+    """The lighthouse on a rock in the sea ahead of the bow. Its lamp says how CI goes for the hands
+    at the bow with a spyglass on it: it blinks yellow while any of them waits, and is dark when none
+    does; the page flashes it green or red as an answer comes (ship_events). The lit lamp goes on the
+    lights layer, over the night's tint; the dark glass is part of the tower."""
+    cx, base = lay["light_x"], LIGHT_BASE
+    top = base - LIGHT_TALL
+    rnd = random.Random(5)
     p = Pix()
-    p.rect(x - 5, base - 4, LIGHT_W, 5, "#7d7a74")                    # the stone head
-    p.rect(x - 5, base - 4, LIGHT_W, 1, "#a8a49b")
-    p.rect(x - 4, base + 1, LIGHT_W - 2, 2, "#5d5a55")
-    for y in range(top, base - 4):                                   # the tower, red and white bands, narrower up top
-        k = (base - 4 - y) * 3 // LIGHT_TALL
-        w, left = 20 - k * 2, x + k
-        c = "#c8402a" if ((base - 4 - y) // 16) % 2 else "#f2ece0"
+    rows = PIER - base                                               # the rock, down to the pier's far edge
+    for i in range(rows):
+        t = i / float(rows)
+        half = int(21 + (ROCK_W / 2 - 25) * t ** 0.8) + (i // 3 % 2) * 2
+        p.rect(cx - half, base + i, 2 * half, 1, mix("#a8a49b", "#4b4a47", t))
+        for _ in range(5):
+            p.rect(cx - half + rnd.randrange(2 * half - 2), base + i, 3, 1, "#6a6761" if rnd.random() < 0.6 else "#bdb9af")
+    for x in range(cx - ROCK_W // 2, cx + ROCK_W // 2, 4):
+        p.rect(x, PIER - 1 - x // 4 % 2, 3, 1, "#eef7fb")
+    for y in range(top, base):                                       # the tower, red and white bands, narrower up top
+        w = int(LIGHT_W - (base - y) * 8.0 / LIGHT_TALL) // 2 * 2
+        left = cx - w // 2
+        c = "#c8402a" if ((base - y) // 24) % 2 else "#f2ece0"
         p.rect(left, y, w, 1, c)
-        p.dot(left, y, lit(c))
-        p.dot(left + w - 1, y, dark(c))
-        p.dot(left + w - 2, y, dark(c, 0.15))
-    p.rect(x + 8, base - 24, 4, 7, "#24170d")                        # a door and two windows
-    p.rect(x + 9, base - 52, 2, 4, "#24170d")
-    p.rect(x + 9, base - 84, 2, 4, "#24170d")
-    p.rect(x - 1, top - 2, 22, 2, "#3e2a1c")                         # the gallery and its rail
-    for i in range(0, 22, 3):
-        p.rect(x - 1 + i, top - 6, 1, 4, "#3e2a1c")
-    p.rect(x - 1, top - 6, 22, 1, "#3e2a1c")
-    p.rect(x + 3, top - 16, 14, 1, "#3e2a1c")                        # the lantern room's frame
-    p.rect(x + 3, top - 16, 1, 10, "#3e2a1c")
-    p.rect(x + 16, top - 16, 1, 10, "#3e2a1c")
-    p.rect(x + 2, top - 20, 16, 4, "#8a2a1c")                        # the cap
-    p.rect(x + 2, top - 20, 16, 1, lit("#8a2a1c"))
-    p.rect(x + 5, top - 22, 10, 2, "#8a2a1c")
-    p.rect(x + 9, top - 25, 2, 3, "#3e2a1c")
+        p.rect(left, y, 2, 1, lit(c))
+        p.rect(left + w - 5, y, 3, 1, dark(c, 0.15))
+        p.rect(left + w - 2, y, 2, 1, dark(c))
+    p.rect(cx - 4, base - 13, 8, 13, "#24170d")                      # a door and three windows
+    p.rect(cx - 3, base - 12, 6, 12, "#6b3a1c")
+    for up in (60, 104, 141):
+        p.rect(cx - 2, base - up, 4, 6, "#24170d")
+    p.rect(cx - 18, top - 3, 36, 3, "#3e2a1c")                       # the gallery and its rail
+    for x in range(cx - 18, cx + 18, 4):
+        p.rect(x, top - 9, 1, 6, "#3e2a1c")
+    p.rect(cx - 18, top - 9, 36, 1, "#3e2a1c")
+    p.rect(cx - 10, top - 25, 20, 22, "#3e2a1c")                     # the lantern room: its frame and its dark glass
+    p.rect(cx - 9, top - 24, 18, 20, "#3b4248")
+    p.rect(cx - 12, top - 30, 24, 5, "#8a2a1c")                      # the cap
+    p.rect(cx - 12, top - 30, 24, 1, lit("#8a2a1c"))
+    p.rect(cx - 6, top - 33, 12, 3, "#8a2a1c")
+    p.rect(cx - 1, top - 38, 2, 5, "#3e2a1c")
     watchers = [h["id"] for h in sc["hands"] if h["place"] == "watch" and not h["line"]]
     title = (tr("the lighthouse: the checks are running for %s") % ", ".join(watchers) if watchers
              else tr("the lighthouse: nobody is waiting for CI"))
-    return ('<g class="sm-beacon %s"><title>%s</title><circle class="sm-beacon__halo" cx="%d" cy="%d" r="13"/>%s'
-            '<rect class="sm-beacon__lamp" x="%d" y="%d" width="12" height="9"/></g>'
-            % ("is-running" if watchers else "is-idle", esc(title), x + 10, top - 11, p.svg(), x + 4, top - 15))
+    lights.append('<g class="sm-beacon %s"><circle class="sm-beacon__halo" cx="%d" cy="%d" r="24"/>'
+                  '<rect class="sm-beacon__lamp" x="%d" y="%d" width="18" height="20"/></g>'
+                  % ("is-running" if watchers else "is-idle", cx, top - 14, cx - 9, top - 24))
+    return '<g class="sm-lighthouse"><title>%s</title>%s</g>' % (esc(title), p.svg())
 
 
 def sprite_icon(rows, pal, scale=2):
